@@ -11,6 +11,28 @@ export function candidateMatrix(candidate) {
   return zUpToYUp.clone().multiply(T)
 }
 
+// THREE.Box3().setFromObject() unions each mesh's *local* bounding box after
+// transforming its corners by the mesh's world matrix. For an assembly whose
+// sub-meshes carry their own rotations (e.g. a pulley mounted at an angle),
+// that corner-transform over-estimates the true extent — it can be 15-20%
+// larger than the backend's vertex-based OBB (dims_lbh). Compute the AABB
+// from actual transformed vertices instead so dimensions match the backend.
+export function computeTightBounds(object) {
+  const box = new THREE.Box3()
+  const v = new THREE.Vector3()
+  object.updateMatrixWorld(true)
+  object.traverse((o) => {
+    if (!o.isMesh) return
+    const pos = o.geometry.attributes.position
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i)
+      v.applyMatrix4(o.matrixWorld)
+      box.expandByPoint(v)
+    }
+  })
+  return box
+}
+
 // Loads a GLB, scales metres -> mm, and applies the candidate's resting-pose
 // transform. Returns a group wrapping the positioned model plus its
 // world-space bounding box (in mm).
@@ -36,7 +58,7 @@ export function loadOrientedModel(glbUrl, candidate) {
       group.matrix.copy(candidateMatrix(candidate))
       group.add(model)
       group.updateMatrixWorld(true)
-      const box = new THREE.Box3().setFromObject(group)
+      const box = computeTightBounds(group)
       resolve({ model: group, box })
     }, undefined, reject)
   })

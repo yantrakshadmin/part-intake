@@ -10,7 +10,7 @@ import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
-import { candidateMatrix } from '../lib/glbModel.js'
+import { candidateMatrix, computeTightBounds } from '../lib/glbModel.js'
 
 export default function OrientationViewer({ glbUrl, candidate }) {
   const mountRef = useRef(null)
@@ -102,7 +102,7 @@ export default function OrientationViewer({ glbUrl, candidate }) {
 
     // Wireframe OBB so the resting orientation/footprint is visible
     if (stateRef.current.boxHelper) scene.remove(stateRef.current.boxHelper)
-    const box = new THREE.Box3().setFromObject(partGroup)
+    const box = computeTightBounds(partGroup)
     const boxHelper = new THREE.Box3Helper(box, 0x3366cc)
     scene.add(boxHelper)
     stateRef.current.boxHelper = boxHelper
