@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import OrientationViewer from './components/OrientationViewer.jsx'
+import Drawing2D from './components/Drawing2D.jsx'
 
 const api = {
   async uploadStep(file) {
@@ -102,10 +103,19 @@ export default function App() {
           <input type="file" accept=".stp,.step" onChange={onFile} />
           {result && (
             <>
-              <OrientationViewer
-                glbUrl={result.glb_url}
-                candidate={result.candidates[selected]}
-              />
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 8 }}>
+                <div style={{ width: 300 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Isometric</div>
+                  <OrientationViewer
+                    glbUrl={result.glb_url}
+                    candidate={result.candidates[selected]}
+                  />
+                </div>
+                <Drawing2D glbUrl={result.glb_url} candidate={result.candidates[selected]}
+                  view="front" title="Front view" />
+                <Drawing2D glbUrl={result.glb_url} candidate={result.candidates[selected]}
+                  view="top" title="Top view" />
+              </div>
               <div style={{ display: 'flex', gap: 8, margin: '12px 0', flexWrap: 'wrap' }}>
                 {result.candidates.map((c, i) => (
                   <button key={i} onClick={() => pickCandidate(i)}

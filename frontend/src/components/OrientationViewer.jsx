@@ -10,6 +10,7 @@ import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { candidateMatrix } from '../lib/glbModel.js'
 
 export default function OrientationViewer({ glbUrl, candidate }) {
   const mountRef = useRef(null)
@@ -92,17 +93,19 @@ export default function OrientationViewer({ glbUrl, candidate }) {
   useEffect(() => { applyCandidate() }, [candidate])
 
   function applyCandidate() {
-    const { partGroup, mesh, camera, controls } = stateRef.current
+    const { scene, partGroup, mesh, camera, controls } = stateRef.current
     if (!mesh || !candidate) return
 
-    // Backend matrix is row-major, Z-up, mesh-space(mm) -> resting pose.
-    // Three.js Matrix4.set takes row-major; scene here is Y-up, so wrap with
-    // a Z-up -> Y-up basis swap.
-    const m = candidate.rotation_matrix.flat()
-    const T = new THREE.Matrix4().set(...m)
-    const zUpToYUp = new THREE.Matrix4().makeRotationX(-Math.PI / 2)
     partGroup.matrixAutoUpdate = false
-    partGroup.matrix.copy(zUpToYUp.multiply(T))
+    partGroup.matrix.copy(candidateMatrix(candidate))
+    partGroup.updateMatrixWorld(true)
+
+    // Wireframe OBB so the resting orientation/footprint is visible
+    if (stateRef.current.boxHelper) scene.remove(stateRef.current.boxHelper)
+    const box = new THREE.Box3().setFromObject(partGroup)
+    const boxHelper = new THREE.Box3Helper(box, 0x3366cc)
+    scene.add(boxHelper)
+    stateRef.current.boxHelper = boxHelper
 
     // Frame the camera on the part
     const [L, , H] = candidate.dims_lbh
@@ -111,5 +114,5 @@ export default function OrientationViewer({ glbUrl, candidate }) {
     controls.target.set(0, candidate.height / 2, 0)
   }
 
-  return <div ref={mountRef} style={{ width: '100%', height: 420 }} />
+  return <div ref={mountRef} style={{ width: '100%', height: 300 }} />
 }
