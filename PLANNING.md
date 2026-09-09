@@ -58,7 +58,7 @@ Y2V_YK9 Rack / IBJ / Housing (.igs), radiator assembly (.SLDASM).
 | Reality | Requirement |
 |---|---|
 | All are **surface models** — open shells, no `MANIFOLD_SOLID_BREP` | Hull/OBB path is fine. Volume and watertight checks are not — never report mass properties from these. |
-| 4 of 5 are **IGES** | cascadio is STEP-only. Need the fuller OpenCascade binding. |
+| 4 of 5 are **IGES** | cascadio is STEP-only. Need the fuller OpenCascade binding. Two readers total: STEP (`.stp` and `.step` are the same format) and IGES. |
 | **Stray reference geometry** | Housing: naive AABB = 4622×1470×1459. Largest connected body (99.1% of 45,249 pts) = **767×534×182**. v1 unions all bodies and would return the 4.6m answer. |
 | `.SLDASM` is proprietary binary, 48MB | **No open-source reader exists.** Fail loudly with guidance ("request STEP/IGES from customer"). Do not silently accept. |
 
@@ -127,22 +127,29 @@ box → truck and skipped the pallet tier entirely.
 | 5 | `Unit Dimension`, `Weight Dimension`, `Folded Volumetric Weight` empty in all 49 | Drop or populate. |
 | 6 | CRT6434 and CRT6435 both 550×360×340 | Deduplicate. |
 
-Catalogue is scoped per company (`company17`) — **multi-tenant from day one**,
-not retrofitted.
+The 49-asset catalogue is **global**, not per-customer. No multi-tenancy.
+(The `company17` export filename suggested otherwise; confirmed global.)
 
 ---
 
-## 6. Custom box synthesis (World B — confirmed in scope)
+## 6. Custom box synthesis — core, not a fallback
 
-When nothing in the catalogue fits well, solve *for* box dimensions rather than
-picking them. The constraint set is already visible in our own proposals:
+**Every run returns the top 2 catalogue solutions plus one custom design**, side
+by side. The engineer is making that comparison anyway; the tool should show both
+halves of it rather than making them ask.
+
+Consequence: synthesis is on the hot path. It must be fast enough to run on every
+job and constrained enough to always produce something sensible — not an
+occasional escape hatch.
+
+Solve *for* box dimensions rather than picking them. The constraint set is already visible in our own proposals:
 
 - Must land on a standard footprint (1200×1000 or 1200×800)
 - PP flute 1200 GSM; EVA at 100 / 150 / 180 kg/m³
 - Sheet thicknesses in use: 3mm, 5mm, 35mm
 - Divider wall 8–15mm, part clearance 5–10mm/side
 
-Bounded design space, not a blank sheet. Sequenced after the catalogue path works.
+Bounded design space, not a blank sheet.
 
 ---
 
@@ -174,25 +181,31 @@ and a tool the team doesn't trust is a tool they close.
 SLDASM hard fail. Verified against all five real files.
 
 **Phase 2 — Nesting engine.** 2D nest + layer stack, scored against Phase 0.
+Includes custom-box synthesis — the result set is always top-2 catalogue + 1 custom.
 
 **Phase 3 — Catalogue + tiering.** Cleaned catalogue, `type` column, multi-tenant,
 box → pallet → truck.
 
-**Phase 4 — Custom box synthesis.**
+**Phase 4 — Proposal export.** BOM + drawings + load plan.
 
-**Phase 5 — Proposal export.** BOM + drawings + load plan.
-
-**Phase 6 — UI.** Evolve the existing shell. Design system: Data-Dense Dashboard,
+**Phase 5 — UI.** Evolve the existing shell. Design system: Data-Dense Dashboard,
 Fira Sans / Fira Code, `#1E40AF` primary with `#D97706` accent, dense 8px rhythm.
 Ranked-solution comparison is the core screen. Not a generic dashboard.
 
-Phase 6 is last only because the engine defines what there is to show. The shell
+Phase 5 is last only because the engine defines what there is to show. The shell
 already exists and stays usable throughout.
 
 ---
 
-## 9. Open questions
+## 9. Resolved
 
-1. What share of jobs need a custom box vs catalogue selection? (Sequencing only.)
-2. SLDASM: demand STEP from customers, buy a converter, or keep a SolidWorks seat?
-3. Is the 49-asset catalogue per-customer or global?
+1. **Custom vs catalogue** — not a share. Always show top 2 catalogue + 1 custom.
+   Synthesis is core (§6).
+2. **Formats** — customers send STEP or IGES. Two readers. `.SLDASM` fails loudly
+   with a request for STEP/IGES; no converter purchase, no SolidWorks seat.
+3. **Catalogue is global.** No multi-tenancy.
+
+## 10. Still open
+
+- Nothing blocking. DOMAIN.md (clearances, wall thicknesses, foam selection rules)
+  still needs to be written by the packaging engineers — no agent can invent it.
