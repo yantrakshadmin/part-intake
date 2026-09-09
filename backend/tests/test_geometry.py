@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.geometry import extract_part  # noqa: E402
 
 SAMPLE = Path(__file__).parent / "fixtures" / "sample.step"
+SAMPLE_IGES = Path(__file__).parent / "fixtures" / "sample.igs"
 
 
 def test_extraction_end_to_end(tmp_path):
@@ -31,6 +32,19 @@ def test_extraction_end_to_end(tmp_path):
         assert sorted(c.dims_lbh, reverse=True) == sorted(
             r.canonical_dims_lbh, reverse=True
         )
+
+
+def test_iges_extraction(tmp_path):
+    """IGES goes through the OCP reader (no cascadio path) and must land in mm."""
+    assert SAMPLE_IGES.exists(), "Place a sample IGES at tests/fixtures/sample.igs"
+    r = extract_part(SAMPLE_IGES, tmp_path / "out.glb")
+
+    L, B, H = r.canonical_dims_lbh
+    assert L >= B >= H > 0
+    # Known extents of this fixture (Creo, MM unit flag) — catches a unit
+    # scaling regression, which is the failure mode that looks plausible.
+    assert (round(L), round(B), round(H)) == (339, 38, 37)
+    assert len(r.candidates) >= 2
 
 
 if __name__ == "__main__":

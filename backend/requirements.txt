@@ -8,6 +8,7 @@ pydantic>=2.6
 pydantic-settings>=2.2
 python-multipart>=0.0.9
 cascadio>=0.0.14
+cadquery-ocp>=7.7  # fallback STEP reader for files cascadio's healing rejects
 trimesh>=4.3
 numpy>=1.26
 scipy>=1.12

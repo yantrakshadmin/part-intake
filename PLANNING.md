@@ -1,106 +1,198 @@
-# Part Intake & Insert Designer — PLANNING.md
+# Part Intake & Insert Designer — PLANNING v2
 
-## Vision
+Internal tool for the Yantra Packs projects team. Not a product, not for sale.
+**Goal: cut the time spent on fitting analysis.** That is where the hours go.
 
-A web app for returnable-packaging insert design (Yantra Packs / Trakkia context).
-Users register parts (manually or by uploading a STEP file), the system selects
-predefined packaging, computes how many parts fit per box, and generates draft
-insert designs (pocket/cell, comb/slot, hybrid archetypes) for the projects
-team to refine. The tool is a **70% draft generator**, not a CAD replacement.
+v1 of this plan is preserved in `PLANNING.v1.md`. Read this one.
 
-## Phases
+---
 
-### Phase 1 — Part Intake  ← CURRENT
-Get trustworthy part data in. Two paths:
-- **Manual**: form with L/B/H (mm) + weight (kg), validated, canonicalized to L≥B≥H.
-- **STEP upload**: backend extracts true dimensions via minimum-volume OBB
-  (orientation-independent — auto OEM files are in vehicle coordinates, so
-  axis-aligned boxes are wrong). User confirms resting orientation in a 3D
-  viewer; dims are auto-filled but always editable, never silently accepted.
+## 1. What the team actually does
 
-Output contract — the **Part Profile**:
+A part arrives (3D model, 2D drawing, or bare dimensions). An engineer works out
+how to fit the most parts into one of our returnable assets, designs the insert
+that holds them, and writes a technical proposal.
+
+The value is **not** in fitting a box inside a box. It is in the cases where
+the part is *not* a box.
+
+### Ground truth (from real proposals — these are the acceptance targets)
+
+| Job | Part (mm) | Asset (internal) | Cuboid math | **Shipped** | Gain |
+|---|---|---|---|---|---|
+| Mubea stabiliser bar | 1085×190×285, 5kg | PLS12801, 1150×750×790 | 6 | **40** (4/layer × 10) | 6.7× |
+| TRW steering wheel | 370×360×135, 2.5kg | PLS1280, 1150×750×1000 | 42 | **48** (3×2 × 8 inserts) | 1.14× |
+
+Two archetypes, confirmed against real work:
+- **Compact prismatic** → pocket/cell matrix. Near-cuboid, small gain.
+- **Long/bent tubular** → interleaved comb/slot on MS rods. Enormous gain
+  (10 layers of a 285mm-tall part inside 790mm — the bars nest into each other).
+
+**Any engine that models parts as cuboids loses Mubea 34 parts per PLS.**
+This single fact drives the whole architecture.
+
+---
+
+## 2. What survives from v1
+
+This is a re-foundation, not a rewrite.
+
+| Component | Verdict |
+|---|---|
+| `backend/app/geometry.py` — OBB + resting-pose candidates | **Keep.** Becomes the *outer loop*, not the answer. Needs the fixes in §3. |
+| FastAPI + Celery + Postgres skeleton | **Keep.** Unchanged. |
+| Frontend shell (rail + stage), `OrientationViewer` | **Keep.** Evolve, don't rebuild. |
+| `InsertIso` / `TruckLoadIso` drawing code | **Keep.** Feed it real placements. |
+| `frontend/src/lib/packing.js` — client-side cuboid packing | **Delete.** Superseded by the server-side nester. It encodes the assumption we are removing. |
+| "part = cuboid" everywhere else | **Delete.** |
+
+---
+
+## 3. Input pipeline — what five real files taught us
+
+Tested against: QY2i steering wheel (.stp), YXA stabiliser bar (.igs),
+Y2V_YK9 Rack / IBJ / Housing (.igs), radiator assembly (.SLDASM).
+
+**Zero of five matched what v1 was validated against** (a SolidWorks solid demo part).
+
+| Reality | Requirement |
+|---|---|
+| All are **surface models** — open shells, no `MANIFOLD_SOLID_BREP` | Hull/OBB path is fine. Volume and watertight checks are not — never report mass properties from these. |
+| 4 of 5 are **IGES** | cascadio is STEP-only. Need the fuller OpenCascade binding. |
+| **Stray reference geometry** | Housing: naive AABB = 4622×1470×1459. Largest connected body (99.1% of 45,249 pts) = **767×534×182**. v1 unions all bodies and would return the 4.6m answer. |
+| `.SLDASM` is proprietary binary, 48MB | **No open-source reader exists.** Fail loudly with guidance ("request STEP/IGES from customer"). Do not silently accept. |
+
+### Pipeline
 ```
-part_number, part_name
-L ≥ B ≥ H (mm, canonical), weight (kg)
-source: manual | stp
-confirmed_orientation (4x4 matrix, STP only)  ← stored for Phase 3
-glb_path (STP only)                            ← stored for Phase 3
+STEP / IGES ─┐
+2D drawing ──┼─> extract ─> largest-body filter ─> hull ─> min OBB
+bare dims  ──┘                                        ─> resting-pose candidates
+SLDASM ──────> explicit unsupported error            ─> per-pose silhouette
+                                                            │
+                                              HUMAN CONFIRMS (never skipped)
+                                                            ▼
+                                                      Part Profile
 ```
 
-### Phase 2 — Packaging selection & packing
-- Predefined packaging master list (CRUD): inner dims, weight capacity, type
-- 3D arrangement with insert-aware clearances:
-  - divider wall thickness 8–15 mm (PP)
-  - part clearance 5–10 mm per side
-  - foam/bottom sheet thickness between layers (PP sheet + EVA foam)
-- Output: parts per layer, layers per box, cube utilization, weight check
+Rules:
+1. **Largest-connected-body filter is mandatory.** Drop bodies below a point/volume
+   threshold, surface the count. The Housing proves the cost of not doing this.
+2. **Human confirm stays.** On the Housing, automation alone is off by 6×.
+3. 2D drawings and PDFs: use a vision model to propose dims *and profile outlines*,
+   then the same confirm step. Do not write a CAD-drawing parser.
+4. **A part entered as bare dimensions can only ever get the cuboid answer.** The UI
+   must say so explicitly — "cuboid fit only, no nesting gain available" — or the
+   team will trust a number with no upside in it.
 
-### Phase 3 — Insert generation
-- Classify part → archetype:
-  - aspect ratio > ~5:1, tube-like → **comb/slot dunnage** (e.g. stabilizer bars)
-  - compact prismatic → **pocket/cell** with divider walls (e.g. gear shifters)
-  - else → hybrid tray
-- Pocket/cell: project part silhouette at confirmed orientation, offset by
-  clearance, generate divider layout → parametric model → STEP/DXF export
-- Comb/slot: find 3–4 stable support cross-sections along long axis,
-  generate slot profiles from local cross-section + clearance
+---
 
-### Phase 4 — Coupling / nesting optimization
-Interlocking complex parts to increase density. Hard problem — heuristics
-first (mirrored pairs), not full 3D nesting.
+## 4. The engine
 
-## Architecture (Phase 1)
+Inserts are **layered** (parts, foam/PP sheet, parts). So this is not 3D irregular
+packing. It is **2D irregular nesting per layer, then stack** — a tractable, well
+studied problem, and it matches how the team already works.
 
 ```
-Browser (React + Vite + Three.js)
-   │  multipart upload (dev) / S3 presigned PUT (prod)
-   ▼
-FastAPI ──> Postgres (jobs, part profiles)
-   │ enqueue
-   ▼
-Redis <── Celery worker: cascadio (STEP→GLB) → trimesh (hull → min OBB
-              → ranked resting orientations)
-   │
-   └─> GLB to shared volume (dev) / S3 (prod)
+for pose in candidate_resting_poses(part):        # existing geometry.py
+    silhouette = project(pose) offset by clearance
+    for asset in catalogue:                        # ~49, enumerable
+        layout  = nest_2d(silhouette, asset.inner_footprint)
+        layers  = stack(layout, asset.inner_height, asset.max_weight)
+        score(pose, asset, layout, layers)
+rank
 ```
 
-### Key technical decisions
-| Decision | Choice | Why |
+- **Do not write the nester.** Use `jagua-rs` (irregular shapes, continuous
+  rotation) or the NFP + bottom-left-fill Python implementations. Rung 5.
+- Angle ladder, in order of payoff: in-plane rotation θ → **mirrored/interlocked
+  pairs** (alternating 180°, where the stab-bar gain lives) → tilted poses.
+  **Stop before continuous 3D nesting.**
+- The catalogue is small and fixed. Brute force it. We do not need to be clever
+  because we can enumerate — that is a gift, not a limitation.
+
+### Tiers
+`part → box → pallet → truck`. 30 of 49 assets carry a pallet spec; v1 went
+box → truck and skipped the pallet tier entirely.
+
+---
+
+## 5. Catalogue (49 assets) — cleanup required before it drives anything
+
+| # | Issue | Action |
 |---|---|---|
-| STEP parsing | `cascadio` | pip-only OpenCascade wrapper, no conda; STEP→GLB direct |
-| Geometry math | `trimesh` + numpy/scipy | `oriented_bounds` = min-volume OBB; battle-tested |
-| Dimension basis | min OBB of convex hull | orientation-independent; solves the "unknown plane" problem |
-| Orientation | candidates + user confirm | full automation is unreliable; 2-second human confirm kills the error class |
-| Heavy work | Celery + Redis | STEP conversion is 2–30 s CPU-bound; never in request cycle; workers scale horizontally |
-| API | FastAPI + Pydantic | strict contracts, async, OpenAPI for free |
-| DB | Postgres | matches team's RDS experience |
-| GLB scale | **metres in file, ×1000 in app** | glTF spec is metres; backend scales mesh to mm for math, frontend scales model ×1000 — these MUST stay in sync |
+| 1 | `Can Be Palletized` true for only 7/49; PLS12801 and FLC12101 have full pallet specs but read `0` | Ignore the column. Derive from pallet spec. |
+| 2 | `PP Box_650x650x135`: inner 210×210×140 inside outer 650×650×160 | Impossible. Resolve — celled box or typo. |
+| 3 | `PLS-1200x1000x755` = 32kg vs near-twin at 600kg; `PLS_1200x1000x1100` = 6000kg | Trailing-zero errors. Verify. |
+| 4 | Racks, bare pallets and stacking frames sit alongside containers | **Add a `type` column** (container/pallet/rack/accessory). Without it the optimiser packs parts into a warehouse rack. |
+| 5 | `Unit Dimension`, `Weight Dimension`, `Folded Volumetric Weight` empty in all 49 | Drop or populate. |
+| 6 | CRT6434 and CRT6435 both 550×360×340 | Deduplicate. |
 
-### Gotchas already handled (do not regress)
-1. **GLB is in metres** — backend `load_unified_mesh` applies ×1000;
-   frontend `OrientationViewer` applies `model.scale.setScalar(1000)`.
-2. **STEP units**: `CONVERSION_BASED_UNIT ('INCH')` takes precedence over
-   `SI_UNIT($, .METRE.)`. Detection is warn-only; OpenCascade normalizes.
-3. **Assemblies**: multi-solid files are unioned into one packable unit,
-   with a warning surfaced (`solid_count`).
-4. **Non-watertight geometry**: dims still reliable (convex hull); volume is not.
-5. **Orientation matrices are Z-up** (backend convention). Three.js scene is
-   Y-up — viewer wraps with a `rotateX(-π/2)` basis swap.
-6. **Coordinate frame**: candidate transforms map *mesh space → resting pose
-   on z=0 floor*, OBB-centered. Phase 3 depends on this; don't change silently.
+Catalogue is scoped per company (`company17`) — **multi-tenant from day one**,
+not retrofitted.
 
-## Production path (when needed, not before)
-- Direct upload → S3 presigned PUT (files never transit the API)
-- GLB served via CloudFront
-- docker-compose on one EC2 → ECS Fargate (api / worker services, ElastiCache)
-- `Base.metadata.create_all` → Alembic migrations
-- Auth (none in v1 — internal tool)
+---
 
-## Milestones
-- [x] Geometry pipeline validated against real STEP file (inch-unit part,
-      exact extents recovered: 127.0 × 63.5 mm)
-- [ ] `docker-compose up` runs api + worker + db + redis
-- [ ] Upload → poll → viewer → confirm → save flow works in browser
-- [ ] Tested against 5+ real Yantra Packs part files (stab bar, shifter, etc.)
-- [ ] Part list page with search
-- [ ] Phase 2 kickoff: packaging master list
+## 6. Custom box synthesis (World B — confirmed in scope)
+
+When nothing in the catalogue fits well, solve *for* box dimensions rather than
+picking them. The constraint set is already visible in our own proposals:
+
+- Must land on a standard footprint (1200×1000 or 1200×800)
+- PP flute 1200 GSM; EVA at 100 / 150 / 180 kg/m³
+- Sheet thicknesses in use: 3mm, 5mm, 35mm
+- Divider wall 8–15mm, part clearance 5–10mm/side
+
+Bounded design space, not a blank sheet. Sequenced after the catalogue path works.
+
+---
+
+## 7. Output
+
+The insert BOM is already structured in the decks (element, size, foam density /
+GSM, qty per kit) — generatable, not free text. Mubea has six elements: bottom
+separator, top centre bar, top side bar, side separator, top separator, MS rod.
+
+**The tool produces the starting design. Physical trials still decide** — the
+Mubea deck shows a revision after trial 2 (15mm → 35mm side separator, slot
+replacing hole). Do not present output as final.
+
+Also: the TRW deck states 46 kits by weight where 155kg/kit against a 9,000kg
+payload gives 58, and calls 48 "the minimum of" 48 and 46. The final answer is
+right by volume; two numbers on the way there are not. Arithmetic consistency is
+a feature.
+
+---
+
+## 8. Phases (ordered by risk — riskiest first)
+
+**Phase 0 — Ground-truth harness.** Encode Mubea (40) and TRW (48) as regression
+fixtures. Any engine must reproduce them. *Nothing else starts until this exists* —
+without a known-good answer we cannot tell a better nester from a disagreeing one,
+and a tool the team doesn't trust is a tool they close.
+
+**Phase 1 — Input v2.** IGES reader, open-shell handling, largest-body filter,
+SLDASM hard fail. Verified against all five real files.
+
+**Phase 2 — Nesting engine.** 2D nest + layer stack, scored against Phase 0.
+
+**Phase 3 — Catalogue + tiering.** Cleaned catalogue, `type` column, multi-tenant,
+box → pallet → truck.
+
+**Phase 4 — Custom box synthesis.**
+
+**Phase 5 — Proposal export.** BOM + drawings + load plan.
+
+**Phase 6 — UI.** Evolve the existing shell. Design system: Data-Dense Dashboard,
+Fira Sans / Fira Code, `#1E40AF` primary with `#D97706` accent, dense 8px rhythm.
+Ranked-solution comparison is the core screen. Not a generic dashboard.
+
+Phase 6 is last only because the engine defines what there is to show. The shell
+already exists and stays usable throughout.
+
+---
+
+## 9. Open questions
+
+1. What share of jobs need a custom box vs catalogue selection? (Sequencing only.)
+2. SLDASM: demand STEP from customers, buy a converter, or keep a SolidWorks seat?
+3. Is the 49-asset catalogue per-customer or global?

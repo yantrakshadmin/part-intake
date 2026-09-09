@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part Intake — UI review</title>
+<style>
+  /* Tokens copied from src/index.css so this page matches the app */
+  :root {
+    --bg:#fafafa; --surface:#fff; --surface-2:#f7f7f8; --border:#e4e4e7;
+    --text:#18181b; --text-2:#52525b; --text-3:#a1a1aa;
+    --accent:#4f46e5; --accent-soft:#eef2ff; --green:#16a34a; --red:#dc2626;
+    --radius:10px;
+    --shadow-md:0 1px 3px rgba(0,0,0,.06), 0 4px 14px rgba(0,0,0,.05);
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+    -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1400px; margin:0 auto; padding:0 24px 80px; }
+
+  header { display:flex; align-items:center; justify-content:space-between;
+    gap:16px; padding:20px 0 16px; margin-bottom:12px;
+    border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  header h1 { font-size:17px; font-weight:650; margin:0; }
+  header p { margin:0; font-size:12.5px; color:var(--text-3); }
+  .controls { display:flex; gap:8px; align-items:center; }
+  .controls input { padding:7px 10px; border:1px solid var(--border);
+    border-radius:8px; font:inherit; width:180px; }
+  .btn { padding:7px 14px; border:0; border-radius:8px; font:inherit;
+    font-weight:550; cursor:pointer; background:var(--accent); color:#fff; }
+  .btn.ghost { background:var(--surface); color:var(--text-2);
+    border:1px solid var(--border); }
+
+  nav { position:sticky; top:0; z-index:5; background:var(--bg);
+    padding:8px 0 12px; display:flex; gap:6px; flex-wrap:wrap; }
+  nav a { font-size:12.5px; color:var(--text-2); text-decoration:none;
+    padding:4px 10px; border:1px solid var(--border); border-radius:99px;
+    background:var(--surface); }
+  nav a:hover { border-color:var(--accent); color:var(--accent); }
+
+  section.screen { margin:28px 0; }
+  .screen-head { display:flex; align-items:baseline; gap:10px; margin-bottom:8px; }
+  .screen-head h2 { font-size:15px; font-weight:650; margin:0; }
+  .screen-head .hint { font-size:12.5px; color:var(--text-3); }
+  .row { display:grid; grid-template-columns:1fr 340px; gap:16px;
+    align-items:stretch; }
+  @media (max-width:1000px) { .row { grid-template-columns:1fr; } }
+
+  .frame-card { background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--radius); box-shadow:var(--shadow-md); overflow:hidden; }
+  .frame-card iframe { display:block; width:100%; height:760px; border:0; }
+
+  .fb { background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--radius); box-shadow:var(--shadow-md);
+    display:flex; flex-direction:column; max-height:760px; }
+  .fb h3 { margin:0; padding:12px 14px; font-size:13px; font-weight:600;
+    border-bottom:1px solid var(--border); color:var(--text-2);
+    display:flex; justify-content:space-between; }
+  .fb h3 .count { color:var(--text-3); font-weight:500; }
+  .fb ul { list-style:none; margin:0; padding:8px; overflow-y:auto; flex:1; }
+  .fb li { display:flex; gap:8px; align-items:flex-start; padding:8px;
+    border-radius:8px; }
+  .fb li:hover { background:var(--surface-2); }
+  .fb li.done .text { text-decoration:line-through; color:var(--text-3); }
+  .fb .text { flex:1; }
+  .fb .meta { font-size:11.5px; color:var(--text-3); }
+  .fb .del { border:0; background:none; color:var(--text-3); cursor:pointer;
+    font-size:15px; line-height:1; padding:2px; }
+  .fb .del:hover { color:var(--red); }
+  .fb form { display:flex; gap:6px; padding:10px; border-top:1px solid var(--border); }
+  .fb textarea { flex:1; resize:none; padding:7px 10px; font:inherit;
+    border:1px solid var(--border); border-radius:8px; min-height:38px; }
+  .fb form button { align-self:flex-end; }
+  .empty { color:var(--text-3); font-size:12.5px; padding:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Part Intake — UI review</h1>
+      <p>Every screen below is the <b>live app</b> — click around, animations and 3D included. Leave feedback next to each screen, then Export.</p>
+    </div>
+    <div class="controls">
+      <input id="reviewer" placeholder="Your name">
+      <button class="btn ghost" id="copy">Copy as markdown</button>
+      <button class="btn" id="export">Download feedback</button>
+    </div>
+  </header>
+  <nav id="nav"></nav>
+  <div id="screens"></div>
+</div>
+
+<script>
+const SCREENS = [
+  { id:'intake-step', title:'New part — STEP upload',
+    url:'/?page=intake&mode=stp',
+    hint:'Drop a real .stp file into the frame to review the upload spinner and the Confirm-orientation screen (3D isometric + front/top drawings).' },
+  { id:'intake-manual', title:'New part — Manual entry',
+    url:'/?page=intake&mode=manual',
+    hint:'Empty form state. Type dimensions to watch the live packaging fit appear.' },
+  { id:'intake-results', title:'Packaging results (demo part pre-filled)',
+    url:'/?page=intake&mode=manual&demo=1',
+    hint:'Pre-filled 400×300×150 / 12 kg demo part — box fit, insert tray drawings, 3D tray and the animated truck loading plan.' },
+  { id:'parts', title:'Parts list', url:'/?page=parts',
+    hint:'Saved parts with search. Needs the backend running with some parts saved.' },
+  { id:'calc', title:'Load calculator', url:'/?page=calc',
+    hint:'Standalone truck load calculator.' },
+]
+
+const store = {
+  key: 'ui-feedback',
+  load() { return JSON.parse(localStorage.getItem(this.key) || '{}') },
+  save(d) { localStorage.setItem(this.key, JSON.stringify(d)) },
+}
+
+function render() {
+  const data = store.load()
+  document.getElementById('nav').innerHTML = SCREENS.map(s =>
+    `<a href="#${s.id}">${s.title}</a>`).join('')
+  document.getElementById('screens').innerHTML = SCREENS.map(s => {
+    const items = data[s.id] || []
+    const open = items.filter(i => !i.done).length
+    return `
+    <section class="screen" id="${s.id}">
+      <div class="screen-head"><h2>${s.title}</h2>
+        <span class="hint">${s.hint}</span></div>
+      <div class="row">
+        <div class="frame-card"><iframe src="${s.url}" loading="lazy" title="${s.title}"></iframe></div>
+        <div class="fb">
+          <h3>Feedback <span class="count">${open} open · ${items.length} total</span></h3>
+          <ul>${items.length ? items.map((it, i) => `
+            <li class="${it.done ? 'done' : ''}">
+              <input type="checkbox" ${it.done ? 'checked' : ''}
+                onchange="toggle('${s.id}',${i})" title="mark solved">
+              <div class="text">${esc(it.text)}
+                <div class="meta">${esc(it.who || 'anon')} · ${it.at}</div></div>
+              <button class="del" onclick="del('${s.id}',${i})" title="delete">×</button>
+            </li>`).join('') : '<div class="empty">No feedback yet.</div>'}
+          </ul>
+          <form onsubmit="add(event,'${s.id}')">
+            <textarea placeholder="What should change on this screen?" required
+              onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();this.form.requestSubmit()}"></textarea>
+            <button class="btn">Add</button>
+          </form>
+        </div>
+      </div>
+    </section>`
+  }).join('')
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML }
+
+window.add = (e, id) => {
+  e.preventDefault()
+  const ta = e.target.querySelector('textarea')
+  const data = store.load()
+  ;(data[id] ??= []).push({ text: ta.value.trim(),
+    who: document.getElementById('reviewer').value.trim(),
+    at: new Date().toISOString().slice(0, 16).replace('T', ' '), done: false })
+  store.save(data); render()
+}
+window.toggle = (id, i) => { const d = store.load(); d[id][i].done = !d[id][i].done; store.save(d); render() }
+window.del = (id, i) => { const d = store.load(); d[id].splice(i, 1); store.save(d); render() }
+
+function toMarkdown() {
+  const data = store.load()
+  let md = `# Part Intake — UI feedback (${new Date().toISOString().slice(0,10)})\n`
+  for (const s of SCREENS) {
+    const items = data[s.id] || []
+    if (!items.length) continue
+    md += `\n## ${s.title}\n`
+    for (const it of items)
+      md += `- [${it.done ? 'x' : ' '}] ${it.text} _(${it.who || 'anon'}, ${it.at})_\n`
+  }
+  return md
+}
+document.getElementById('export').onclick = () => {
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([toMarkdown()], { type: 'text/markdown' }))
+  a.download = 'ui-feedback.md'; a.click()
+}
+document.getElementById('copy').onclick = async (e) => {
+  await navigator.clipboard.writeText(toMarkdown())
+  e.target.textContent = 'Copied ✓'; setTimeout(() => e.target.textContent = 'Copy as markdown', 1500)
+}
+
+const who = document.getElementById('reviewer')
+who.value = localStorage.getItem('ui-feedback-who') || ''
+who.onchange = () => localStorage.setItem('ui-feedback-who', who.value)
+
+render()
+</script>
+</body>
+</html>

@@ -1,8 +1,9 @@
 """
-STEP file → dimensions extraction pipeline.
+STEP / IGES file → dimensions extraction pipeline.
 
 Pipeline:
-  1. cascadio converts STEP → GLB (OpenCascade under the hood, pip-only install)
+  1. cascadio converts STEP → GLB (OpenCascade under the hood, pip-only install).
+     IGES has no cascadio path, so it goes straight to the OCP reader.
   2. trimesh loads GLB, unions all solids into one mesh
   3. Minimum-volume Oriented Bounding Box (OBB) on the convex hull
      → true L/B/H regardless of how the part was oriented in the file
@@ -26,6 +27,10 @@ import numpy as np
 import trimesh
 
 logger = logging.getLogger(__name__)
+
+STEP_SUFFIXES = (".stp", ".step")
+IGES_SUFFIXES = (".igs", ".iges")
+SUPPORTED_SUFFIXES = STEP_SUFFIXES + IGES_SUFFIXES
 
 # ---------------------------------------------------------------------------
 # Data contracts
@@ -77,7 +82,9 @@ def detect_step_length_unit(step_path: str | Path) -> str:
     to sanity-check and warn — not to rescale.
     """
     try:
-        data = Path(step_path).read_bytes()[:500_000]
+        # SolidWorks writes unit entities late in large files (seen at ~2 MB
+        # in a 14 MB export), so scan the whole file — capped for safety.
+        data = Path(step_path).read_bytes()[:64_000_000]
     except OSError:
         return "unknown"
     # Conversion-based units (e.g. 'INCH', 'FOOT') take precedence — they are
@@ -113,15 +120,47 @@ def convert_step_to_glb(step_path: str | Path, glb_path: str | Path | None = Non
     if glb_path is None:
         glb_path = Path(tempfile.mkstemp(suffix=".glb")[1])
     glb_path = Path(glb_path)
+
+    if step_path.suffix.lower() in IGES_SUFFIXES:
+        from .step_fallback import iges_to_glb
+        iges_to_glb(step_path, glb_path)
+        if not _glb_has_geometry(glb_path):
+            raise ValueError("IGES conversion produced no geometry — file may "
+                             "be corrupt or contain unsupported entities.")
+        return glb_path
+
     cascadio.step_to_glb(
         str(step_path), str(glb_path),
         tol_linear=linear_deflection,
         tol_angular=angular_deflection,
     )
-    if not glb_path.exists() or glb_path.stat().st_size == 0:
+    if _glb_has_geometry(glb_path):
+        return glb_path
+
+    # cascadio writes a header-only GLB when OpenCascade's healing throws on
+    # degenerate geometry (e.g. SolidWorks exports with U1 == U2 trimmed
+    # curves). Retry with the OCP-based reader that skips healing.
+    logger.warning("cascadio produced an empty GLB for %s — retrying with "
+                   "OCP fallback reader", step_path.name)
+    from .step_fallback import step_to_glb_fallback
+    step_to_glb_fallback(step_path, glb_path)
+    if not _glb_has_geometry(glb_path):
         raise ValueError("STEP conversion produced no geometry — file may be "
                          "corrupt or contain unsupported entities.")
     return glb_path
+
+
+def _glb_has_geometry(glb_path: Path) -> bool:
+    """True if the GLB contains at least one triangle."""
+    if not glb_path.exists() or glb_path.stat().st_size == 0:
+        return False
+    try:
+        scene = trimesh.load(str(glb_path), file_type="glb")
+    except Exception:
+        return False
+    if isinstance(scene, trimesh.Scene):
+        return any(len(g.faces) > 0 for g in scene.geometry.values())
+    return len(getattr(scene, "faces", ())) > 0
 
 
 def load_unified_mesh(glb_path: str | Path) -> tuple:
@@ -260,7 +299,8 @@ def extract_part(step_path: str | Path, glb_out: str | Path | None = None) -> Ex
     step_path = Path(step_path)
     warnings: list = []
 
-    declared_unit = detect_step_length_unit(step_path)
+    declared_unit = ("mm" if step_path.suffix.lower() in IGES_SUFFIXES
+                     else detect_step_length_unit(step_path))
     if declared_unit == "inch":
         warnings.append("STEP file declares INCH units — verify extracted "
                         "dimensions (values shown are converted to mm).")

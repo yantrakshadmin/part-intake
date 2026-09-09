@@ -1,13 +1,30 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import OrientationViewer from './components/OrientationViewer.jsx'
 import Drawing2D from './components/Drawing2D.jsx'
+import PartList from './components/PartList.jsx'
+import LoadCalculator from './components/LoadCalculator.jsx'
+import PackingResults, {
+  PackingParams, usePackingData, defaultPackingParams,
+} from './components/PackingRecommendation.jsx'
+
+/** FastAPI errors: detail is a string (HTTPException) or an array of
+ *  validation objects (422) — render both as readable text. */
+async function readError(r, fallback) {
+  try {
+    const d = (await r.json()).detail
+    if (typeof d === 'string') return d
+    if (Array.isArray(d))
+      return d.map((e) => `${e.loc?.at(-1) ?? 'field'}: ${e.msg}`).join(' · ')
+    return JSON.stringify(d)
+  } catch { return fallback }
+}
 
 const api = {
   async uploadStep(file) {
     const fd = new FormData()
     fd.append('file', file)
     const r = await fetch('/api/parts/upload-step', { method: 'POST', body: fd })
-    if (!r.ok) throw new Error((await r.json()).detail || 'Upload failed')
+    if (!r.ok) throw new Error(await readError(r, 'Upload failed'))
     return r.json()
   },
   async jobStatus(id) {
@@ -20,21 +37,49 @@ const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
-    if (!r.ok) throw new Error((await r.json()).detail || 'Save failed')
+    if (!r.ok) throw new Error(await readError(r, 'Save failed'))
     return r.json()
   },
 }
 
+// Deep-link support for /feedback.html review page: ?page=&mode=&demo=1
+const q = new URLSearchParams(window.location.search)
+
 export default function App() {
-  const [mode, setMode] = useState('stp') // 'stp' | 'manual'
+  const [page, setPage] = useState(q.get('page') || 'intake') // 'intake' | 'parts' | 'calc'
+  const [mode, setMode] = useState(q.get('mode') || 'stp') // 'stp' | 'manual'
   const [job, setJob] = useState(null)
   const [result, setResult] = useState(null)
   const [selected, setSelected] = useState(0)
-  const [form, setForm] = useState({
-    part_number: '', part_name: '',
-    length_mm: '', breadth_mm: '', height_mm: '', weight_kg: '',
-  })
+  const [form, setForm] = useState(q.has('demo')
+    ? { part_number: 'DEMO-001', part_name: 'Demo part',
+        length_mm: '400', breadth_mm: '300', height_mm: '150', weight_kg: '12' }
+    : { part_number: '', part_name: '',
+        length_mm: '', breadth_mm: '', height_mm: '', weight_kg: '' })
   const [status, setStatus] = useState('')
+  const [dragging, setDragging] = useState(false)
+
+  // Packaging data + parameters are owned here so the params can live in
+  // the left rail while the results render in the stage.
+  const packing = usePackingData()
+  const [params, setParams] = useState(defaultPackingParams())
+
+  // Live packaging fit: valid dims + weight are enough — no save required.
+  const draftPart = useMemo(() => {
+    const l = +form.length_mm, b = +form.breadth_mm, h = +form.height_mm
+    const w = +form.weight_kg
+    if (!(l > 0 && b > 0 && h > 0 && w > 0)) return null
+    return {
+      part_number: form.part_number.trim() || 'unsaved part',
+      length_mm: l, breadth_mm: b, height_mm: h, weight_kg: w,
+    }
+  }, [form])
+
+  const busy = status === 'Uploading…' || status === 'Extracting dimensions…'
+  const statusClass =
+    status.startsWith('Saved') ? 'status ok'
+    : /failed|Failed|error|Error/.test(status) ? 'status err'
+    : 'status'
 
   // Poll job until done
   useEffect(() => {
@@ -55,8 +100,7 @@ export default function App() {
     return () => clearInterval(t)
   }, [job, result])
 
-  async function onFile(e) {
-    const file = e.target.files[0]
+  async function handleFile(file) {
     if (!file) return
     setResult(null); setSelected(0); setStatus('Uploading…')
     try {
@@ -66,6 +110,12 @@ export default function App() {
     } catch (err) { setStatus(err.message) }
   }
 
+  function onDrop(e) {
+    e.preventDefault()
+    setDragging(false)
+    handleFile(e.dataTransfer.files[0])
+  }
+
   function pickCandidate(i) {
     setSelected(i)
     const [L, B, H] = result.candidates[i].dims_lbh
@@ -73,6 +123,18 @@ export default function App() {
   }
 
   async function save() {
+    if (!form.part_number.trim() || !form.part_name.trim()) {
+      setStatus('Part number and part name are required.')
+      return
+    }
+    if (!(+form.weight_kg > 0)) {
+      setStatus('Weight (kg) is required and must be > 0.')
+      return
+    }
+    if (!(+form.length_mm > 0 && +form.breadth_mm > 0 && +form.height_mm > 0)) {
+      setStatus('All three dimensions (mm) are required and must be > 0.')
+      return
+    }
     try {
       const payload = {
         ...form,
@@ -89,79 +151,169 @@ export default function App() {
     } catch (err) { setStatus(err.message) }
   }
 
+  const fields = [
+    ['part_number', 'Part number', 'text'],
+    ['part_name', 'Part name', 'text'],
+    ['weight_kg', 'Weight (kg)', 'number'],
+    ['length_mm', 'Length (mm)', 'number'],
+    ['breadth_mm', 'Breadth (mm)', 'number'],
+    ['height_mm', 'Height (mm)', 'number'],
+  ]
+
   return (
-    <div style={{ maxWidth: 980, margin: '0 auto', padding: 24, fontFamily: 'system-ui' }}>
-      <h1>Part Intake</h1>
+    <div className="shell">
+      <header className="app-header">
+        <div className="brand">
+          <div className="brand-mark">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
+              <path d="M12 2 3 7v10l9 5 9-5V7l-9-5z" />
+              <path d="M3 7l9 5 9-5M12 12v10" />
+            </svg>
+          </div>
+          <div>
+            <h1>Part Intake</h1>
+            <p>Register parts for packaging &amp; insert design</p>
+          </div>
+        </div>
+        <div className="segmented">
+          <button className={page === 'intake' ? 'active' : ''}
+            onClick={() => setPage('intake')}>New part</button>
+          <button className={page === 'parts' ? 'active' : ''}
+            onClick={() => setPage('parts')}>Parts</button>
+          <button className={page === 'calc' ? 'active' : ''}
+            onClick={() => setPage('calc')}>Load calculator</button>
+        </div>
+      </header>
 
-      <div style={{ marginBottom: 16 }}>
-        <button onClick={() => setMode('stp')} disabled={mode === 'stp'}>STEP file</button>{' '}
-        <button onClick={() => setMode('manual')} disabled={mode === 'manual'}>Manual entry</button>
-      </div>
+      {page === 'parts' && <PartList packing={packing} />}
+      {page === 'calc' && <LoadCalculator />}
 
-      {mode === 'stp' && (
-        <div>
-          <input type="file" accept=".stp,.step" onChange={onFile} />
-          {result && (
-            <>
-              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 8 }}>
-                <div style={{ width: 300 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Isometric</div>
-                  <OrientationViewer
-                    glbUrl={result.glb_url}
-                    candidate={result.candidates[selected]}
-                  />
-                </div>
-                <Drawing2D glbUrl={result.glb_url} candidate={result.candidates[selected]}
-                  view="front" title="Front view" />
-                <Drawing2D glbUrl={result.glb_url} candidate={result.candidates[selected]}
-                  view="top" title="Top view" />
+      {page === 'intake' && (
+        <div className="workspace">
+          <aside className="rail">
+            <div className="segmented sub-mode">
+              <button className={mode === 'stp' ? 'active' : ''}
+                onClick={() => setMode('stp')}>STEP file</button>
+              <button className={mode === 'manual' ? 'active' : ''}
+                onClick={() => setMode('manual')}>Manual entry</button>
+            </div>
+
+            {mode === 'stp' && (
+              <div
+                className={`dropzone compact${dragging ? ' dragging' : ''}${busy ? ' busy' : ''}`}
+                onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+                onDragLeave={() => setDragging(false)}
+                onDrop={onDrop}
+              >
+                {busy ? (
+                  <>
+                    <div className="spinner" />
+                    <div className="dz-title">{status}</div>
+                    <div className="dz-hint">Large assemblies can take up to ~30 s</div>
+                  </>
+                ) : (
+                  <>
+                    <div className="dz-icon">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                        strokeLinejoin="round">
+                        <path d="M12 16V4m0 0L7 9m5-5 5 5" />
+                        <path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2" />
+                      </svg>
+                    </div>
+                    <div className="dz-title">
+                      Drop a STEP file, or <em>browse</em>
+                    </div>
+                    <div className="dz-hint">
+                      .stp / .step / .igs / .iges — dimensions extracted automatically
+                    </div>
+                    <input type="file" accept=".stp,.step,.igs,.iges"
+                      onChange={(e) => handleFile(e.target.files[0])} />
+                  </>
+                )}
               </div>
-              <div style={{ display: 'flex', gap: 8, margin: '12px 0', flexWrap: 'wrap' }}>
-                {result.candidates.map((c, i) => (
-                  <button key={i} onClick={() => pickCandidate(i)}
-                    style={{ fontWeight: i === selected ? 700 : 400 }}>
-                    {c.label}<br />
-                    {c.dims_lbh.join(' × ')} mm
-                  </button>
+            )}
+
+            <div className="card form-card">
+              <h2>Part profile</h2>
+              <div className="form-grid rail-grid">
+                {fields.map(([key, label, type]) => (
+                  <label key={key} className="field">
+                    <span>{label}</span>
+                    <input type={type} value={form[key]}
+                      onChange={(e) => setForm({ ...form, [key]: e.target.value })} />
+                  </label>
                 ))}
               </div>
-              {result.warnings.map((w, i) => (
-                <p key={i} style={{ color: '#a15c00' }}>⚠ {w}</p>
-              ))}
-            </>
-          )}
+              <div className="form-footer">
+                <button className="btn-primary" onClick={save}>Save &amp; calculate</button>
+              </div>
+              {status && !busy && <p className={statusClass}>{status}</p>}
+            </div>
+
+            <PackingParams params={params} onChange={setParams}
+              vehicles={packing.vehicles}
+              onAddBox={(b) => packing.setPackaging((p) => [...p, b])} />
+          </aside>
+
+          <main className="stage">
+            {mode === 'stp' && result && (
+              <div className="card form-card">
+                <h2>Confirm resting orientation</h2>
+                <div className="views-row">
+                  <div className="view-card">
+                    <div className="view-title">Isometric</div>
+                    <div style={{ width: 300 }}>
+                      <OrientationViewer
+                        glbUrl={result.glb_url}
+                        candidate={result.candidates[selected]}
+                      />
+                    </div>
+                  </div>
+                  <div className="view-card">
+                    <div className="view-title">Front view</div>
+                    <Drawing2D glbUrl={result.glb_url}
+                      candidate={result.candidates[selected]} view="front" />
+                  </div>
+                  <div className="view-card">
+                    <div className="view-title">Top view</div>
+                    <Drawing2D glbUrl={result.glb_url}
+                      candidate={result.candidates[selected]} view="top" />
+                  </div>
+                </div>
+
+                <div className="candidates">
+                  {result.candidates.map((c, i) => (
+                    <button key={i}
+                      className={`candidate${i === selected ? ' selected' : ''}`}
+                      onClick={() => pickCandidate(i)}>
+                      <div className="c-label">{c.label}</div>
+                      <div className="c-dims">{c.dims_lbh.join(' × ')} mm</div>
+                    </button>
+                  ))}
+                </div>
+
+                {result.warnings.map((w, i) => (
+                  <div key={i} className="warning">⚠ <span>{w}</span></div>
+                ))}
+              </div>
+            )}
+
+            {draftPart ? (
+              <PackingResults part={draftPart} params={params}
+                packaging={packing.packaging} vehicles={packing.vehicles} />
+            ) : (
+              <div className="card empty-stage">
+                <div className="es-icon">▦</div>
+                <h2>Packaging fit appears here</h2>
+                <p>Enter dimensions and weight (or drop a STEP file) — boxes,
+                  insert trays and the truck loading plan are calculated live.</p>
+              </div>
+            )}
+          </main>
         </div>
       )}
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginTop: 16 }}>
-        <label>Part number
-          <input value={form.part_number}
-            onChange={(e) => setForm({ ...form, part_number: e.target.value })} />
-        </label>
-        <label>Part name
-          <input value={form.part_name}
-            onChange={(e) => setForm({ ...form, part_name: e.target.value })} />
-        </label>
-        <label>Weight (kg)
-          <input type="number" value={form.weight_kg}
-            onChange={(e) => setForm({ ...form, weight_kg: e.target.value })} />
-        </label>
-        <label>Length (mm)
-          <input type="number" value={form.length_mm}
-            onChange={(e) => setForm({ ...form, length_mm: e.target.value })} />
-        </label>
-        <label>Breadth (mm)
-          <input type="number" value={form.breadth_mm}
-            onChange={(e) => setForm({ ...form, breadth_mm: e.target.value })} />
-        </label>
-        <label>Height (mm)
-          <input type="number" value={form.height_mm}
-            onChange={(e) => setForm({ ...form, height_mm: e.target.value })} />
-        </label>
-      </div>
-
-      <button onClick={save} style={{ marginTop: 16 }}>Save part profile</button>
-      {status && <p>{status}</p>}
     </div>
   )
 }

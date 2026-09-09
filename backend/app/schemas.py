@@ -62,6 +62,39 @@ class PartProfileIn(BaseModel):
         ))
 
 
+class PackagingIn(BaseModel):
+    """User-added custom box. Arrives as draft until the team verifies it."""
+
+    item_code: str = Field(min_length=1, max_length=32)
+    inner_l_mm: float = Field(gt=0, le=3000)
+    inner_b_mm: float = Field(gt=0, le=3000)
+    inner_h_mm: float = Field(gt=0, le=3000)
+    outer_l_mm: float = Field(gt=0, le=3000)
+    outer_b_mm: float = Field(gt=0, le=3000)
+    outer_h_mm: float = Field(gt=0, le=3000)
+    max_weight_kg: float = Field(gt=0, le=2000)
+
+
+class PackagingOut(PackagingIn):
+    id: int
+    status: str
+
+    class Config:
+        from_attributes = True
+
+
+class VehicleOut(BaseModel):
+    id: int
+    name: str
+    cargo_l_mm: float
+    cargo_b_mm: float
+    cargo_h_mm: float
+    payload_kg: float
+
+    class Config:
+        from_attributes = True
+
+
 class PartProfileOut(BaseModel):
     id: int
     part_number: str

@@ -98,13 +98,10 @@ export default function Drawing2D({ glbUrl, candidate, view, title }) {
   }, [glbUrl, candidate, view])
 
   return (
-    <div>
-      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>{title}</div>
-      <div style={{ position: 'relative', width: SIZE, height: SIZE, border: '1px solid #ddd' }}>
-        <div ref={mountRef} />
-        <svg ref={svgRef} width={SIZE} height={SIZE}
-          style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />
-      </div>
+    <div style={{ position: 'relative', width: SIZE, height: SIZE }}>
+      <div ref={mountRef} />
+      <svg ref={svgRef} width={SIZE} height={SIZE}
+        style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />
     </div>
   )
 }

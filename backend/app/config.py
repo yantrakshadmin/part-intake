@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     s3_bucket: str = ""
     aws_region: str = "ap-south-1"
 
-    max_upload_mb: int = 50
+    max_upload_mb: int = 200
 
     class Config:
         env_prefix = "INTAKE_"

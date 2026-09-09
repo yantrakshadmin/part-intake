@@ -26,6 +26,41 @@ class ExtractionJob(Base):
     )
 
 
+class Packaging(Base):
+    """Packaging master list (Phase 2). Seeded from the packaging_and_vehicles
+    sheet; user-added custom boxes get status='draft' until verified."""
+
+    __tablename__ = "packaging"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    item_code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    # Inner = usable cavity for parts; outer = footprint for truck loading. mm.
+    inner_l_mm: Mapped[float] = mapped_column(Float)
+    inner_b_mm: Mapped[float] = mapped_column(Float)
+    inner_h_mm: Mapped[float] = mapped_column(Float)
+    outer_l_mm: Mapped[float] = mapped_column(Float)
+    outer_b_mm: Mapped[float] = mapped_column(Float)
+    outer_h_mm: Mapped[float] = mapped_column(Float)
+    max_weight_kg: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(16), default="draft")  # checked | draft
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime, default=dt.datetime.utcnow
+    )
+
+
+class Vehicle(Base):
+    """Vehicle master list — cargo bay inner dims (mm) and payload (kg)."""
+
+    __tablename__ = "vehicles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    cargo_l_mm: Mapped[float] = mapped_column(Float)
+    cargo_b_mm: Mapped[float] = mapped_column(Float)
+    cargo_h_mm: Mapped[float] = mapped_column(Float)
+    payload_kg: Mapped[float] = mapped_column(Float)
+
+
 class PartProfile(Base):
     __tablename__ = "part_profiles"
 

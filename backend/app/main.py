@@ -1,11 +1,14 @@
 """FastAPI app — Phase 1: Part Intake.
 
 Endpoints:
-  POST /api/parts/upload-step   multipart .stp upload -> job_id (enqueues worker)
+  POST /api/parts/upload-step   multipart .stp/.igs upload -> job_id (enqueues worker)
   GET  /api/jobs/{job_id}       poll status; returns dims + candidates when done
   GET  /api/files/{name}        serves GLB to the Three.js viewer (dev/local)
   POST /api/parts               create Part Profile (manual or confirmed STP)
   GET  /api/parts               list profiles
+  GET  /api/packaging           packaging master list (seeded + custom)
+  POST /api/packaging           add a custom box (status=draft)
+  GET  /api/vehicles            vehicle master list
 
 Production notes (see PLANNING.md):
   - swap direct upload for S3 presigned PUT; pass the S3 key to the job
@@ -14,7 +17,9 @@ Production notes (see PLANNING.md):
 
 from __future__ import annotations
 
+import logging
 import shutil
+import threading
 import uuid
 from pathlib import Path
 
@@ -25,13 +30,22 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import settings
-from .models import Base, ExtractionJob, PartProfile
-from .schemas import JobStatusOut, PartProfileIn, PartProfileOut
-from .worker import extract_step
+from .models import Base, ExtractionJob, Packaging, PartProfile, Vehicle
+from .schemas import (
+    JobStatusOut, PackagingIn, PackagingOut, PartProfileIn, PartProfileOut,
+    VehicleOut,
+)
+from .seed_data import seed_master_data
+from .geometry import SUPPORTED_SUFFIXES
+from .worker import extract_step, run_extraction
+
+logger = logging.getLogger(__name__)
 
 engine = create_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False)
 Base.metadata.create_all(engine)  # v1; switch to Alembic when schema stabilizes
+with SessionLocal() as _db:
+    seed_master_data(_db)
 
 app = FastAPI(title="Part Intake", version="0.1.0")
 app.add_middleware(
@@ -53,13 +67,14 @@ def get_db():
 @app.post("/api/parts/upload-step", response_model=JobStatusOut)
 async def upload_step(file: UploadFile, db: Session = Depends(get_db)):
     name = (file.filename or "").lower()
-    if not name.endswith((".stp", ".step")):
-        raise HTTPException(400, "Only .stp / .step files are accepted.")
+    suffix = next((s for s in SUPPORTED_SUFFIXES if name.endswith(s)), None)
+    if suffix is None:
+        raise HTTPException(400, "Only .stp / .step / .igs / .iges files are accepted.")
 
     job_id = str(uuid.uuid4())
     dest_dir = Path(settings.local_storage_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"{job_id}.step"
+    dest = dest_dir / f"{job_id}{suffix}"
 
     size = 0
     with dest.open("wb") as out:
@@ -74,7 +89,21 @@ async def upload_step(file: UploadFile, db: Session = Depends(get_db)):
     db.add(job)
     db.commit()
 
-    extract_step.delay(job_id)
+    # Prefer the Celery worker; if the broker is unreachable (dev without
+    # redis, or a stale Celery client after a redis restart), fall back to a
+    # background thread so uploads never hard-fail. Extraction is CPU-bound
+    # (2–30 s) but releases the GIL inside OpenCascade/numpy, so the dev
+    # server stays responsive enough.
+    try:
+        extract_step.delay(job_id)
+    except Exception:
+        logger.warning(
+            "Celery enqueue failed for job %s — running extraction "
+            "in-process (dev fallback)", job_id, exc_info=True,
+        )
+        threading.Thread(
+            target=run_extraction, args=(job_id,), daemon=True,
+        ).start()
     return JobStatusOut(job_id=job_id, status="pending")
 
 
@@ -131,6 +160,34 @@ def create_part(payload: PartProfileIn, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(part)
     return _to_out(part)
+
+
+@app.get("/api/packaging", response_model=list[PackagingOut])
+def list_packaging(db: Session = Depends(get_db)):
+    return db.scalars(select(Packaging).order_by(Packaging.id)).all()
+
+
+@app.post("/api/packaging", response_model=PackagingOut)
+def create_packaging(payload: PackagingIn, db: Session = Depends(get_db)):
+    exists = db.scalars(
+        select(Packaging).where(Packaging.item_code == payload.item_code)
+    ).first()
+    if exists:
+        raise HTTPException(409, f"Item code '{payload.item_code}' already exists.")
+    if (payload.inner_l_mm > payload.outer_l_mm
+            or payload.inner_b_mm > payload.outer_b_mm
+            or payload.inner_h_mm > payload.outer_h_mm):
+        raise HTTPException(400, "Inner dimensions cannot exceed outer dimensions.")
+    box = Packaging(**payload.model_dump(), status="draft")
+    db.add(box)
+    db.commit()
+    db.refresh(box)
+    return box
+
+
+@app.get("/api/vehicles", response_model=list[VehicleOut])
+def list_vehicles(db: Session = Depends(get_db)):
+    return db.scalars(select(Vehicle).order_by(Vehicle.id)).all()
 
 
 @app.get("/api/parts", response_model=list[PartProfileOut])

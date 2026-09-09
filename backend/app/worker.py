@@ -29,6 +29,12 @@ _engine = create_engine(settings.database_url, pool_pre_ping=True)
 
 @celery_app.task(name="extract_step", time_limit=300, soft_time_limit=270)
 def extract_step(job_id: str) -> None:
+    run_extraction(job_id)
+
+
+def run_extraction(job_id: str) -> None:
+    """Plain function so the API can run it in a thread when the Celery
+    broker is unreachable (dev without redis) — see main.upload_step."""
     with Session(_engine) as db:
         job = db.get(ExtractionJob, job_id)
         if job is None:

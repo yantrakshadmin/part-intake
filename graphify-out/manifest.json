@@ -1,0 +1,94 @@
+{
+  "/Users/rahulsharma/PycharmProjects/part-intake/frontend/vite.config.js": {
+    "mtime": 1781160665.0,
+    "hash": "b8ad3c00df668f205234da7833837827"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/frontend/src/main.jsx": {
+    "mtime": 1781160720.0,
+    "hash": "83a5317c10b793663db9842df6b4dbc4"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/frontend/src/App.jsx": {
+    "mtime": 1781163278.6722388,
+    "hash": "93ff682fde41ab9785d0632524aaa9ae"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/frontend/src/components/Drawing2D.jsx": {
+    "mtime": 1781163245.5909238,
+    "hash": "fc4f02bfeebacb61209814d4d35ae6b7"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/frontend/src/components/OrientationViewer.jsx": {
+    "mtime": 1781169520.307631,
+    "hash": "acc3385583ba9ae69b635963f1db8b89"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/frontend/src/lib/glbModel.js": {
+    "mtime": 1781169512.2735977,
+    "hash": "40f0c987428bafb7b62019cb39bee7fa"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/backend/app/worker.py": {
+    "mtime": 1781160569.0,
+    "hash": "d3ddc87e323b0bf4d6a19aa63e4ed31a"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/backend/app/config.py": {
+    "mtime": 1781160558.0,
+    "hash": "39c39f5eac8518a272282752ed682eb5"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/backend/app/models.py": {
+    "mtime": 1781160549.0,
+    "hash": "51757f3eb7b4b5bdb874dab1d32cd70e"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/backend/app/__init__.py": {
+    "mtime": 1781160601.0,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/backend/app/schemas.py": {
+    "mtime": 1781160537.0,
+    "hash": "ab895e015671433430d901983cfb1122"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/backend/app/geometry.py": {
+    "mtime": 1781160517.0,
+    "hash": "0319597e8254d1804a244a04d48b9b49"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/backend/app/main.py": {
+    "mtime": 1781160594.0,
+    "hash": "33c4119b0ab6736b85cbd652c974792e"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/backend/tests/__init__.py": {
+    "mtime": 1781160601.0,
+    "hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/backend/tests/test_geometry.py": {
+    "mtime": 1781160732.0,
+    "hash": "a869cfa369c8c71b63058384faa8adb1"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/PLANNING.md": {
+    "mtime": 1781160766.0,
+    "hash": "b69134ba7673d4d18a4cf580564cc73f"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/README.md": {
+    "mtime": 1781160797.0,
+    "hash": "c1bbc948695ca70bdb649a7e30373019"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/docker-compose.yml": {
+    "mtime": 1781160720.0,
+    "hash": "53467fdeb44c44b4f46c06a328966e1f"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/CLAUDE.md": {
+    "mtime": 1781160785.0,
+    "hash": "917fe2d2a7f2170a75a89d578b5835b5"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/frontend/index.html": {
+    "mtime": 1781160665.0,
+    "hash": "9111b5d4721035e6292d89f2a51ac5df"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/frontend/PROGRESS.md": {
+    "mtime": 1781170525.1184752,
+    "hash": "fe50e244a0a13c221d31e4139bef845f"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/backend/requirements.txt": {
+    "mtime": 1781160601.0,
+    "hash": "ef1777059e8a11ddabf7070752b0b20b"
+  },
+  "/Users/rahulsharma/PycharmProjects/part-intake/backend/PROGRESS.md": {
+    "mtime": 1781170494.826428,
+    "hash": "d678e0b74864d854390224d45b0f1203"
+  }
+}

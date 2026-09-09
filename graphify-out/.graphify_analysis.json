@@ -1,0 +1,319 @@
+{
+  "communities": {
+    "0": [
+      "app_app",
+      "drawing2d_drawdimensions",
+      "drawing2d_drawing2d",
+      "drawing2d_svgel",
+      "geometry__rotation_axis_to_z",
+      "geometry_convert_step_to_glb",
+      "geometry_detect_step_length_unit",
+      "geometry_extract_part",
+      "geometry_extractionresult",
+      "geometry_generate_orientation_candidates",
+      "geometry_load_unified_mesh",
+      "geometry_minimum_obb",
+      "geometry_orientationcandidate",
+      "glbmodel_candidatematrix",
+      "glbmodel_computetightbounds",
+      "glbmodel_loadorientedmodel",
+      "glbmodel_zuptoyup",
+      "main_serve_file",
+      "orientationviewer_orientationviewer",
+      "planning_glb_metre_mm_scaling",
+      "planning_min_obb_dimension_basis",
+      "planning_orientation_confirmation",
+      "planning_zup_yup_convention",
+      "progress_box3_overestimate_bug",
+      "schemas_extractionresultout",
+      "schemas_orientationcandidateout",
+      "test_geometry_test_extraction_end_to_end"
+    ],
+    "1": [
+      "app_config_config",
+      "app_config_rationale_1",
+      "app_config_settings",
+      "app_main_create_part",
+      "app_main_get_db",
+      "app_main_list_parts",
+      "app_main_rationale_1",
+      "app_main_serve_file",
+      "app_main_to_out",
+      "app_main_upload_step",
+      "app_models_base",
+      "app_models_extractionjob",
+      "app_models_partprofile",
+      "app_models_rationale_1",
+      "app_schemas_partprofileout",
+      "app_worker_extract_step",
+      "app_worker_rationale_1",
+      "backend_app_config_py",
+      "backend_app_main_py",
+      "backend_app_models_py",
+      "backend_app_worker_py",
+      "basesettings",
+      "declarativebase"
+    ],
+    "2": [
+      "app_geometry_convert_step_to_glb",
+      "app_geometry_detect_step_length_unit",
+      "app_geometry_extract_part",
+      "app_geometry_extractionresult",
+      "app_geometry_generate_orientation_candidates",
+      "app_geometry_load_unified_mesh",
+      "app_geometry_minimum_obb",
+      "app_geometry_orientationcandidate",
+      "app_geometry_rationale_1",
+      "app_geometry_rationale_110",
+      "app_geometry_rationale_128",
+      "app_geometry_rationale_157",
+      "app_geometry_rationale_181",
+      "app_geometry_rationale_195",
+      "app_geometry_rationale_259",
+      "app_geometry_rationale_37",
+      "app_geometry_rationale_73",
+      "app_geometry_rotation_axis_to_z",
+      "backend_app_geometry_py",
+      "backend_tests_test_geometry_py",
+      "tests_test_geometry_rationale_1",
+      "tests_test_geometry_test_extraction_end_to_end"
+    ],
+    "3": [
+      "components_drawing2d_drawdimensions",
+      "components_drawing2d_drawing2d",
+      "components_drawing2d_svgel",
+      "components_orientationviewer_orientationviewer",
+      "frontend_src_app_jsx",
+      "frontend_src_components_drawing2d_jsx",
+      "frontend_src_components_orientationviewer_jsx",
+      "frontend_src_lib_glbmodel_js",
+      "frontend_src_main_jsx",
+      "lib_glbmodel_candidatematrix",
+      "lib_glbmodel_computetightbounds",
+      "lib_glbmodel_loadorientedmodel",
+      "lib_glbmodel_zuptoyup",
+      "src_app_api",
+      "src_app_app"
+    ],
+    "4": [
+      "app_api",
+      "main__to_out",
+      "main_create_part",
+      "main_job_status",
+      "main_list_parts",
+      "main_upload_step",
+      "models_extractionjob",
+      "models_partprofile",
+      "planning_celery_async_extraction",
+      "planning_part_profile",
+      "planning_phase3_insert_generation",
+      "schemas_partprofilein",
+      "schemas_partprofileout",
+      "worker_extract_step"
+    ],
+    "5": [
+      "app_main_job_status",
+      "app_schemas_config",
+      "app_schemas_extractionresultout",
+      "app_schemas_jobstatusout",
+      "app_schemas_noop",
+      "app_schemas_orientationcandidateout",
+      "app_schemas_partprofilein",
+      "app_schemas_partprofilein_canonical_dims",
+      "app_schemas_rationale_1",
+      "app_schemas_rationale_40",
+      "app_schemas_rationale_59",
+      "backend_app_schemas_py",
+      "basemodel"
+    ],
+    "6": [
+      "config_settings",
+      "docker_compose_api",
+      "docker_compose_db",
+      "docker_compose_redis",
+      "docker_compose_worker",
+      "main_app",
+      "vite_config_proxy",
+      "worker_celery_app"
+    ],
+    "7": [
+      "claude_dev_rules",
+      "planning_part_intake_insert_designer",
+      "progress_backend_notes",
+      "progress_frontend_notes",
+      "readme_part_intake"
+    ],
+    "8": [
+      "frontend_vite_config_js"
+    ],
+    "9": [
+      "backend_app_init_py"
+    ],
+    "10": [
+      "backend_tests_init_py"
+    ],
+    "11": [
+      "schemas_jobstatusout"
+    ]
+  },
+  "cohesion": {
+    "0": 0.09,
+    "1": 0.12,
+    "2": 0.13,
+    "3": 0.18,
+    "4": 0.21,
+    "5": 0.19,
+    "6": 0.25,
+    "7": 0.6,
+    "8": 1.0,
+    "9": 1.0,
+    "10": 1.0,
+    "11": 1.0
+  },
+  "gods": [
+    {
+      "id": "app_geometry_extract_part",
+      "label": "extract_part()",
+      "degree": 10
+    },
+    {
+      "id": "geometry_extract_part",
+      "label": "extract_part (full pipeline)",
+      "degree": 8
+    },
+    {
+      "id": "app_geometry_generate_orientation_candidates",
+      "label": "generate_orientation_candidates()",
+      "degree": 5
+    },
+    {
+      "id": "app_app",
+      "label": "App (React root component)",
+      "degree": 5
+    },
+    {
+      "id": "orientationviewer_orientationviewer",
+      "label": "OrientationViewer",
+      "degree": 5
+    },
+    {
+      "id": "worker_extract_step",
+      "label": "extract_step (Celery task)",
+      "degree": 5
+    },
+    {
+      "id": "geometry_generate_orientation_candidates",
+      "label": "generate_orientation_candidates",
+      "degree": 5
+    },
+    {
+      "id": "main_create_part",
+      "label": "POST /api/parts",
+      "degree": 5
+    },
+    {
+      "id": "app_models_base",
+      "label": "Base",
+      "degree": 4
+    },
+    {
+      "id": "app_schemas_jobstatusout",
+      "label": "JobStatusOut",
+      "degree": 4
+    }
+  ],
+  "surprises": [
+    {
+      "source": "Candidate Orientations + User Confirmation",
+      "target": "App (React root component)",
+      "source_files": [
+        "PLANNING.md",
+        "frontend/src/App.jsx"
+      ],
+      "confidence": "INFERRED",
+      "relation": "rationale_for",
+      "why": "inferred connection - not explicitly stated in source; crosses file types (doc \u2194 code); connects across different repos/directories; peripheral node `Candidate Orientations + User Confirmation` unexpectedly reaches hub `App (React root component)`"
+    },
+    {
+      "source": "Candidate Orientations + User Confirmation",
+      "target": "generate_orientation_candidates",
+      "source_files": [
+        "PLANNING.md",
+        "backend/app/geometry.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "rationale_for",
+      "why": "crosses file types (doc \u2194 code); connects across different repos/directories; peripheral node `Candidate Orientations + User Confirmation` unexpectedly reaches hub `generate_orientation_candidates`"
+    },
+    {
+      "source": "Celery + Redis Async Extraction",
+      "target": "extract_step (Celery task)",
+      "source_files": [
+        "PLANNING.md",
+        "backend/app/worker.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "rationale_for",
+      "why": "crosses file types (doc \u2194 code); connects across different repos/directories; peripheral node `Celery + Redis Async Extraction` unexpectedly reaches hub `extract_step (Celery task)`"
+    },
+    {
+      "source": "docker-compose api service",
+      "target": "FastAPI app (Part Intake API)",
+      "source_files": [
+        "docker-compose.yml",
+        "backend/app/main.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "references",
+      "why": "inferred connection - not explicitly stated in source; crosses file types (doc \u2194 code); connects across different repos/directories"
+    },
+    {
+      "source": "docker-compose api service",
+      "target": "Settings (INTAKE_ env config)",
+      "source_files": [
+        "docker-compose.yml",
+        "backend/app/config.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "references",
+      "why": "inferred connection - not explicitly stated in source; crosses file types (doc \u2194 code); connects across different repos/directories"
+    }
+  ],
+  "questions": [
+    {
+      "type": "bridge_node",
+      "question": "Why does `extract_part (full pipeline)` connect `Community 0` to `Community 4`?",
+      "why": "High betweenness centrality (0.040) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `extract_part()` connect `Community 2` to `Community 1`?",
+      "why": "High betweenness centrality (0.030) - this node is a cross-community bridge."
+    },
+    {
+      "type": "verify_inferred",
+      "question": "Are the 2 inferred relationships involving `App (React root component)` (e.g. with `PartProfileIn` and `Candidate Orientations + User Confirmation`) actually correct?",
+      "why": "`App (React root component)` has 2 INFERRED edges - model-reasoned connections that need verification."
+    },
+    {
+      "type": "isolated_nodes",
+      "question": "What connects `api`, `zUpToYUp`, `Celery worker: runs the CPU-heavy STEP extraction off the request cycle.  Run: c` to the rest of the system?",
+      "why": "35 weakly-connected nodes found - possible documentation gaps or missing edges."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 0` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.09 - nodes in this community are weakly interconnected."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 1` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.12 - nodes in this community are weakly interconnected."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 2` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.13 - nodes in this community are weakly interconnected."
+    }
+  ]
+}
