@@ -9,8 +9,12 @@ fitting analysis.
 
 ## The one fact that drives everything
 
-Real proposals: a Mubea stabiliser bar fits **40** per PLS12801. Cuboid math says
-**6**. A tool that treats parts as boxes is wrong by 34 parts per shipment.
+Real proposals: a Mubea stabiliser bar fits **40** per PLS12801. The best cuboid
+answer over all six orientations is **8**. A tool that treats parts as boxes is
+wrong by 32 parts per shipment.
+
+Baselines use the *best* orientation, never a fixed one — fixing the orientation
+flatters the nesting engine. `backend/tests/ground_truth.py` is the contract.
 
 Ground-truth targets — any engine change is measured against these:
 - Mubea stabiliser bar → **40** / PLS12801

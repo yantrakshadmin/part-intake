@@ -20,7 +20,7 @@ the part is *not* a box.
 
 | Job | Part (mm) | Asset (internal) | Cuboid math | **Shipped** | Gain |
 |---|---|---|---|---|---|
-| Mubea stabiliser bar | 1085×190×285, 5kg | PLS12801, 1150×750×790 | 6 | **40** (4/layer × 10) | 6.7× |
+| Mubea stabiliser bar | 1085×190×285, 5kg | PLS12801, 1150×750×790 | 8 | **40** (4/layer × 10) | 5.0× |
 | TRW steering wheel | 370×360×135, 2.5kg | PLS1280, 1150×750×1000 | 42 | **48** (3×2 × 8 inserts) | 1.14× |
 
 Two archetypes, confirmed against real work:
@@ -28,7 +28,7 @@ Two archetypes, confirmed against real work:
 - **Long/bent tubular** → interleaved comb/slot on MS rods. Enormous gain
   (10 layers of a 285mm-tall part inside 790mm — the bars nest into each other).
 
-**Any engine that models parts as cuboids loses Mubea 34 parts per PLS.**
+**Any engine that models parts as cuboids loses Mubea 32 parts per PLS.**
 This single fact drives the whole architecture.
 
 ---
@@ -126,6 +126,7 @@ box → truck and skipped the pallet tier entirely.
 | 4 | Racks, bare pallets and stacking frames sit alongside containers | **Add a `type` column** (container/pallet/rack/accessory). Without it the optimiser packs parts into a warehouse rack. |
 | 5 | `Unit Dimension`, `Weight Dimension`, `Folded Volumetric Weight` empty in all 49 | Drop or populate. |
 | 6 | CRT6434 and CRT6435 both 550×360×340 | Deduplicate. |
+| 7 | TRW deck's PLS1280 is internal 1150×750×**1000**, tare 35kg; catalogue PLS12803 says **1100** / 33kg at the same external size | Reconcile. The deck describes what shipped. |
 
 The 49-asset catalogue is **global**, not per-customer. No multi-tenancy.
 (The `company17` export filename suggested otherwise; confirmed global.)
