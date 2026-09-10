@@ -9,74 +9,92 @@ Read order for a new session: `CLAUDE.md` → `PLANNING.md` → the last entry h
 
 ## Now
 
-**Phase 2 is end to end. The engine is reachable at
-`POST /api/parts/{id}/solve` and the UI now reads it — `partsPerBox`, the
-client-side cuboid math, is deleted. Nothing in the app still guesses how many
-parts fit a box.**
+**Phases 2–4 are in and committed. The engine reaches ground truth, generates
+the insert BOM, draws it — and as of this session the whole stack has been
+driven end to end over real HTTP with a fresh Celery worker.**
 
-Verified live through real uvicorn + Celery, real STEP upload, real HTTP JSON
-into the frontend adapter: 48 in PLS12803 (3,2,8), 2304 parts/truck, five ranked
-options plus a custom design.
+Ground truth, the contract from `CLAUDE.md`, reproduced live:
 
-`/code-review high` on that change set found **ten defects, all of them real**;
-F2-2 closed all ten. The two that mattered most were a truck warning that named
-`catalogue[0]` as the per-box winner even when the custom box beat it, and a
-load drawing computed by a different algorithm than the number it illustrated.
+```
+40 in PLS12801 (1, 4, 10)  pitch (1097.0, 145.0, 68.0)
+48 in PLS1280  (3, 2, 8)   pitch (377.0, 361.0, 116.0)
+```
 
-**The interleaved insert design is generated, not blocked.** `app/dunnage.py`
-turns the measured lattice into the insert BOM, and `tests/test_dunnage.py`
-regenerates both shipped BOMs as a contract alongside the 40/48 counts. Two
-archetypes, one rule: parts interleave in plane -> layer bars and separators
-(Mubea); they do not -> pocket tray and sheets (TRW). Every element carries a
-`basis` of derived/pattern/unknown, and anything with no basis ships blank with
-"needs deck" rather than a plausible number. An earlier entry here called this
-"blocked on a reference drawing from the packaging engineers" — **that was
-wrong for two sessions**: `ground_truth.py` held the shipped BOMs all along.
+The tree was uncommitted through Phases 1 and 2. It no longer is — six commits
+on `master`, **no remote, nothing pushed**:
 
-**The UI has now been opened in a browser.** It returned six defects that 20+
-green automated checks had all missed, including a save flow that never passed
-an `id` to the results panel — closed by UI-1/UI-2/UI-4, along with the design
-system that had been documented and never implemented, and box selection.
-
-Next is Phase 3: catalogue cleanup, then the pallet tier.
-
-State of the tree at handoff — last commit `edb8d34`, **nothing committed since**.
-Phase 1's changes plus all of Phase 2 are uncommitted.
-
-| File | Change |
+| commit | what |
 |---|---|
-| `backend/app/nesting.py` | **New, ~255.** Lattice engine: voxel occupancy, min pitch, count, pose measurement, catalogue ranking. `clear_at` slices instead of `np.take(range(...))` — views, not two full-grid copies per probe. |
-| `backend/app/synthesis.py` | **New, 147.** Custom box — solves for height over the §6 bounded design space. |
-| `backend/app/engine.py` | **New, ~150.** `solve()` = top-2 catalogue + 1 custom; `parts_per_truck`. `TruckFit` carries `asset_name`, `floor_grid`, `floor_rotated`; a volume/weight tie reports "weight and volume". |
-| `backend/app/catalogue.py` | **New, 80.** `Container` + `containers(db=None)`, containers only, `+excluded_drafts()`. |
-| `backend/tests/test_nesting.py` `test_synthesis.py` `test_engine.py` `test_catalogue.py` | **New.** Ground truth, mechanism, and CAD-only accuracy checks. |
-| `backend/tests/ground_truth.py` | `+pose_lbh`, `+pitch_lbh`, two new selftest invariants. |
-| `backend/app/models.py` | `+Packaging.kind` (String(16), default "container"). |
-| `backend/app/seed_data.py` | `kind="container"` set explicitly on all 15 rows. |
-| `backend/app/geometry.py` | `+extract_dimensions(path)` — suffix guard, then existing `extract_part`. |
-| `backend/app/step_fallback.py` | OCP 8.x compat: `TopoDS.Face_s` → `TopoDS.Face`. |
-| `backend/tests/test_cad_import.py` | Rewritten — accuracy vs drift split. |
-| `frontend/src/lib/solve.js` | **New, ~135.** `runSolve` (POST + capped, abortable poll), `layoutToFit` (grid x pitch -> placements, `interleaved` flag), `floorPlanFromTruck`, `errorDetail`. |
-| `frontend/src/lib/packing.check.mjs` | **New.** Four blocks: wheel tray (48 / (3,2,8) / 6 pockets), Mubea interleave, `runSolve` abort + 422 detail, truck floor plan. All fixtures measured, not invented. |
-| `frontend/src/lib/packing.js` | **`partsPerBox` deleted (-99).** Drawing and truck helpers kept — `floorFit` needs `bestFill`. |
-| `frontend/src/components/PackingRecommendation.jsx` | Rewritten onto the endpoint. Warnings rendered verbatim; truck section keyed off `truck.asset_name`. |
-| `PLANNING.md` | §2 rescoped, §3 corrected, **§4 rewritten**, §5 items 6-7 resolved. |
-| `CLAUDE.md` | Hard rules 2–3 corrected, OCP gotchas added. |
+| `c650fcf` | Phases 2–4: nesting engine, insert BOM, packing recommendation (43 files) |
+| `c062ca1` | Session log, planning updates, the `/code-review` command |
+| `b85fc18` | G-UNIT — read the unit a CAD file declares instead of assuming it |
+| `7c1c00b` | G-POSE — audit `max_candidates=4`, and find the wrong ranking key |
+| `815bba0` | Record the picker/nester ranking mismatch as an open question |
+| `4d78f95` | Break ranking ties by box size, not by seed order |
 
-All seven backend suites pass (from `backend/`):
+**What the last review arc changed.** Five tickets; three of the five were
+**reporting** bugs rather than computation bugs — the engine had the right
+number and said the wrong thing, which is the class every unit test missed
+because every unit test asserted the computed value. Two of the five were
+defects I had introduced myself.
+
+| ticket | finding | cost | outcome |
+|---|---|---|---|
+| R1 | insert drawing dropped elements silently | drawing disagreed with its own BOM | fixed |
+| R2 | coplanar bars billed height twice | **reported DOES NOT FIT for stacks that fit** | fixed |
+| R3 | collision check never saw the diagonal | 640 mm³ of voxel skin | documented, engine untouched |
+| G-UNIT | unit warning lied on both formats | reporting only — conversion was always right | fixed |
+| G-POSE | pose cap, and area as the ranking key | zero parts today; mis-ranks 2 real files | audited, engine untouched |
+| — | ranking ties fell to seed order | dominated crate shown as runner-up | fixed |
+
+**The stack runs clean.** First true end-to-end HTTP run confirmed the plumbing,
+not just the numbers: extraction went through **Celery**, not the in-process
+fallback (landmine 6); `canonical_dims_lbh` came back byte-identical to the
+fixture; hard rule 9 holds on the solve payload (every ranked entry carries
+`asset_name`/`extent_lbh`/`pitch_lbh`/`grid`/`dunnage`/`drawing_url`, and
+`truck` carries its own `asset_name`); hard rule 4 holds too — `mesh_volume_mm3`
+is null on a non-watertight model, with a warning that says why.
+
+**Still unverified: the UI.** The browser has not been opened since the UI-4
+restructure. The BOM table, the Explode modal, the Truck Load tab and the Load
+Calculator result card have never been rendered for a human. The last browser
+session returned **six defects that 20+ green automated checks had all missed**,
+so this remains the largest untested surface in the project.
+
+Suites — 13 backend, all green (from `backend/`):
+
 ```
-./venv/bin/python tests/ground_truth.py    # 40 / 48, cuboid 8 / 42, selftest ok
-./venv/bin/python tests/test_nesting.py    ./venv/bin/python tests/test_catalogue.py
-./venv/bin/python tests/test_synthesis.py  ./venv/bin/python tests/test_engine.py
-./venv/bin/python tests/test_cad_import.py ./venv/bin/python tests/test_solve_api.py
+for s in ground_truth test_cad_import test_clearance test_dunnage test_nesting \
+         test_catalogue test_engine test_synthesis test_scale_contract \
+         test_solve_api test_iges_units test_pose_search; do
+  venv/bin/python tests/$s.py
+done
+venv/bin/python -m app.insert_drawing      # NOT tests/…; relative import needs -m
 ```
-Plus the frontend, from `frontend/`:
+
+Plus the frontend, all green (from `frontend/`):
+
 ```
-node src/lib/packing.check.mjs             # 4 blocks: wheel tray, bar
-                                           # interleave, runSolve abort/422,
-                                           # truck floor plan
+node src/lib/packing.check.mjs   node src/lib/bom.check.mjs
+node src/lib/scale.check.mjs     node src/lib/steps.check.mjs
 npm run build
 ```
+
+Bring the stack up (redis db 9 and port 8011 keep it clear of the Trakkia
+Django server on :8000 — landmine 1):
+
+```
+cd backend
+export INTAKE_DATABASE_URL=sqlite:///dev.db \
+       INTAKE_LOCAL_STORAGE_DIR=/tmp/intake \
+       INTAKE_REDIS_URL=redis://127.0.0.1:6379/9
+venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8011
+venv/bin/celery -A app.worker worker --loglevel=info
+cd ../frontend && API_URL=http://127.0.0.1:8011 npm run dev   # use localhost:5173, vite binds IPv6
+```
+
+`dev.db` holds part **1**, `YNT-TRW-SW-1704` (the TRW wheel, extracted from the
+real fixture, GLB linked, solve completed) — so the workspace opens populated.
 
 ---
 
@@ -1746,15 +1764,17 @@ reverting the sort: `tie not broken by outer volume: ['ROOMY', 'TIGHT']`.
    command file written first. 15 confirmed defects, all fixed; four of them
    were damage from the same session that produced them, which is the whole
    argument for step 4 of the cycle.
-6. ~~Commit~~ — **done**, `c650fcf` (engine) and `c062ca1` (log + command).
-   The entire engine had been living in the working tree, uncommitted since
-   `edb8d34`, and that was the one thing here not recoverable by rerunning
-   something.
-7. **Nobody has opened a browser** on UI-4's restructure, the BOM table or the
-   Explode modal. The last browser session found six defects that 20+ green
-   checks had missed, and the frontend reviewer asked specifically for a human
-   eye on the Truck Load tab and the Load Calculator result card. Needs the
-   stack up, which needs the stale workers killed first.
+6. ~~Commit~~ — **done**, six commits, `c650fcf` through `4d78f95`. The entire
+   engine had been living in the working tree, uncommitted since `edb8d34`, and
+   that was the one thing here not recoverable by rerunning something.
+7. **← START HERE. Open a browser.** Nobody has seen UI-4's restructure, the
+   BOM table or the Explode modal rendered. The last browser session found six
+   defects that 20+ green checks had missed, and the frontend reviewer asked
+   specifically for a human eye on the Truck Load tab and the Load Calculator
+   result card. **No longer blocked** — the stale workers are gone and `## Now`
+   has the three commands. Look first at the ranked-solution cards: the order
+   changed this session (`4d78f95`) and was verified only in JSON, never on
+   screen. It should read PLS12803, PLS1280, PLS12103.
 8. ~~IGES unit detection~~ — **done**, G-UNIT, and the answer was the
    reassuring one: OCC really does convert on read, so no customer dimension
    was ever wrong. Only the reporting lied. The same silence turned out to
@@ -1763,7 +1783,8 @@ reverting the sort: `tie not broken by outer volume: ['ROOMY', 'TIGHT']`.
    stand. The difference between "we reproduce the decks" and "we beat them",
    and it is one conversation with the packaging engineers.
 10. **Get a STEP export for the Bharat Forge suspension arm** — the only
-    shared case we cannot compute at all.
+    shared case we cannot compute at all. `.SLDPRT` is unreadable and we
+    support STEP only.
 11. ~~**Audit `max_candidates=4`**~~ — **done**, G-POSE: costs zero parts
     on all six computable cases. What it turned up instead: **footprint
     area is the wrong ranking key** — it mis-ranks the Nexon (16 vs 18) and
@@ -1772,18 +1793,28 @@ reverting the sort: `tie not broken by outer volume: ['ROOMY', 'TIGHT']`.
     search, ~25% *cheaper*), but it needs a failing test first and neither
     in-repo fixture can provide one — both win on pose 0. Needs the Nexon
     as a fixture, or a synthetic part whose best pose ranks third by area.
-11b. **Decide what the orientation picker should recommend** — it labels
-    rank 0 "most stable" while the count may come from rank 2. Needs the
-    browser session anyway, so it pairs with the UI verification below.
-12. **Phase 3** — catalogue cleanup (7 defects, remaining 32 of 49 assets),
+12. **Decide what the orientation picker should recommend** — it labels rank 0
+    "most stable" while the count may come from rank 2. Pairs with item 7.
+13. ~~**Ranking ties fell to `seed_data.PACKAGING` order**~~ — **done**,
+    `4d78f95`. Equal counts now go to the smaller box. The open half is
+    whether the ranking should be by parts-per-truck at all where counts
+    *differ* — see `## Open`; that one is `DOMAIN.md`.
+14. **Phase 3** — catalogue cleanup (7 defects, remaining 32 of 49 assets),
     then the pallet tier. Still blocked on pallet dims: `Can Be Palletized` is
     1 for 7 of 49 rows and pallet L/B/H read 0 for all 49.
-13. **Restart the two stale Celery workers** (pids 10375/10381/10382, 18 Aug,
-    pre-change geometry code) — needs `! kill 10375 10381 10382` from the
-    user; the permission classifier blocked it.
+15. ~~**Kill the stale Celery workers**~~ — **done** 10 Sep 2026: Rahul ran
+    `kill 10375 10381 10382`. The stack then came up clean on redis db 9 and
+    port 8011 and was driven end to end for the first time. **Services were
+    stopped again at session close — nothing of ours is listening.**
 
-Also outstanding: nothing on the Gemini key — **Rahul's call, 10 Sep 2026: keep
-it, rotate when he has to.** It is in `.env` (gitignored), the value is not in
-any tracked file or in git history, and no code in the repo reads it — the only
-references anywhere are `.env` itself and this log. Format note for later: the
-AI Studio key is the newer `AQ.`-prefixed kind, not `AIza`.
+Still needed from the packaging engineers or the customer: the correct PLS12801
+outer height; the CRT crate load rating (20 vs 14) and the FSC dims; and
+`DOMAIN.md`, which now carries the in-plane clearance budget, whether clearance
+can flip the dunnage archetype, the mixed-vector tolerance, and the
+rank-by-truck-throughput question.
+
+Nothing on the Gemini key — **Rahul's call, 10 Sep 2026: keep it, rotate when
+he has to.** It is in `.env` (gitignored), the value is not in any tracked file
+or in git history, and no code in the repo reads it — the only references
+anywhere are `.env` itself and this log. Format note for later: the AI Studio
+key is the newer `AQ.`-prefixed kind, not `AIza`.
