@@ -1,0 +1,54 @@
+# Build + deploy. Builds backend (api + worker share it) and frontend (Caddy +
+# dist) images, pushes both as :latest and :$_TAG, then over IAP ssh syncs the
+# compose file + Caddyfile to the VM and runs `docker compose pull && up -d`.
+# Runs from the push-to-main trigger (_TAG=$SHORT_SHA) or deploy/deploy.sh.
+# Source upload honours .gitignore (node_modules, dist, venv, customer CAD stay home).
+substitutions:
+  _TAG: manual
+  _REPO: asia-south1-docker.pkg.dev/yantra-part-intake/part-intake
+  _VM: part-intake-vm
+  _ZONE: asia-south1-a
+
+steps:
+  - id: backend
+    name: gcr.io/cloud-builders/docker
+    waitFor: ['-']
+    args: [build, -t, '${_REPO}/backend:latest', -t, '${_REPO}/backend:${_TAG}', backend]
+  - id: frontend
+    name: gcr.io/cloud-builders/docker
+    waitFor: ['-']
+    args: [build, -t, '${_REPO}/frontend:latest', -t, '${_REPO}/frontend:${_TAG}', frontend]
+
+  # Push explicitly (the `images:` list only pushes after ALL steps) so the VM
+  # pulls the new tags in the deploy step below.
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    waitFor: [backend, frontend]
+    entrypoint: bash
+    args: [-c, 'docker push -a ${_REPO}/backend && docker push -a ${_REPO}/frontend']
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    waitFor: [push]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -e
+        SSH="gcloud compute ssh ${_VM} --zone ${_ZONE} --tunnel-through-iap --quiet --strict-host-key-checking=no"
+        gcloud compute scp --zone ${_ZONE} --tunnel-through-iap --quiet --strict-host-key-checking=no \
+          deploy/docker-compose.prod.yml deploy/Caddyfile ${_VM}:/tmp/
+        $$SSH --command 'set -e; cd /opt/part-intake
+          sudo mv /tmp/docker-compose.prod.yml docker-compose.yml; sudo mv /tmp/Caddyfile Caddyfile
+          sudo docker compose pull -q && sudo docker compose up -d --remove-orphans
+          sudo docker image prune -f >/dev/null; sudo docker compose ps'
+
+images:
+  - '${_REPO}/backend:latest'
+  - '${_REPO}/backend:${_TAG}'
+  - '${_REPO}/frontend:latest'
+  - '${_REPO}/frontend:${_TAG}'
+
+options:
+  machineType: E2_HIGHCPU_8   # cadquery-ocp wheel is huge
+  dynamicSubstitutions: true
+timeout: 1800s

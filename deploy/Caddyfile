@@ -1,0 +1,39 @@
+# Production Caddyfile. Env placeholders come from /opt/part-intake/.env via
+# the caddy service in docker-compose.prod.yml:
+#   SITE_HOST        e.g. 34-93-1-2.sslip.io  (Let's Encrypt via HTTP-01 on :80)
+#   BASIC_AUTH_USER
+#   BASIC_AUTH_HASH  output of `caddy hash-password` (bcrypt)
+{
+	servers {
+		timeouts {
+			# Uploads are up to 200 MB over office links; never cut them off.
+			read_body 0
+			read_header 1m
+			write 0
+			idle 15m
+		}
+	}
+}
+
+{$SITE_HOST} {
+	basic_auth {
+		{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+	}
+
+	request_body {
+		max_size 220MB  # API max_upload_mb is 200; headroom for multipart framing
+	}
+
+	# Keep the /api prefix: FastAPI routes are /api/... (handle, not handle_path).
+	# reverse_proxy has no response/read timeout by default; the worker task
+	# limit is 600s and the upload route holds the request for the whole body.
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

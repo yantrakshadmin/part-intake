@@ -1,0 +1,65 @@
+# Production stack for one VM. Lives at /opt/part-intake/ next to Caddyfile
+# and .env (compose reads .env from this directory automatically).
+#
+# .env keys: POSTGRES_PASSWORD, SITE_HOST, BASIC_AUTH_USER, BASIC_AUTH_HASH,
+#            IMAGE_TAG (optional, default latest — set to a timestamp tag to roll back)
+#
+# NEVER `docker compose down -v`: pgdata and filedata are the only copies.
+x-backend: &backend
+  image: asia-south1-docker.pkg.dev/yantra-part-intake/part-intake/backend:${IMAGE_TAG:-latest}
+  restart: unless-stopped
+  environment:
+    INTAKE_DATABASE_URL: postgresql+psycopg://intake:${POSTGRES_PASSWORD}@db:5432/intake
+    INTAKE_REDIS_URL: redis://redis:6379/0
+    INTAKE_LOCAL_STORAGE_DIR: /data/files
+  volumes: [filedata:/data/files]   # api writes uploads, worker reads them
+  depends_on:
+    db: { condition: service_healthy }
+    redis: { condition: service_started }
+
+services:
+  api:
+    <<: *backend
+    # not published: only caddy reaches api:8000
+
+  worker:
+    <<: *backend
+    command: celery -A app.worker worker --loglevel=info --concurrency=2
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: intake
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: intake
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U intake -d intake"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  caddy:
+    image: asia-south1-docker.pkg.dev/yantra-part-intake/part-intake/frontend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      SITE_HOST: ${SITE_HOST}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data      # Let's Encrypt certs + account
+      - caddy_config:/config
+    depends_on: [api]
+
+volumes:
+  pgdata:
+  filedata:
+  caddy_data:
+  caddy_config:
