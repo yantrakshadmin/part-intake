@@ -1,6 +1,8 @@
 # CLAUDE.md — Part Intake
 
-Read `PLANNING.md` first. It is the plan of record (v1 archived as `PLANNING.v1.md`).
+Read `PLANNING.md` first — the plan of record (v1 archived as `PLANNING.v1.md`).
+Then `PROGRESS.md` for where the last session stopped. **Append a dated entry
+to `PROGRESS.md` at the end of every session.**
 
 Internal tool for the Yantra Packs projects team. Goal: cut time spent on
 fitting analysis.
@@ -45,9 +47,22 @@ See `.claude/agents/README.md` for why the team is four roles and not twelve.
    uvicorn to `127.0.0.1`. Run `lsof -i :8000` before assuming the API is yours.
 2. **Celery does not hot-reload.** Restart the worker after any change to worker
    or geometry code. A stale worker is the most common false bug report here.
+   Worse than stale code: a worker left running from an *earlier session* is
+   still subscribed to the same redis queue, so it consumes your task, fails to
+   find the job id in whatever database it was started with, logs "Job not
+   found" to its own log and returns. The job sits at `pending` forever with
+   `error: null` and nothing wrong on your side. `ps aux | grep celery` before
+   believing a hung job, or point your run at another redis db
+   (`INTAKE_REDIS_URL=redis://127.0.0.1:6379/9`).
 3. `INTAKE_REDIS_URL` defaults to a docker hostname. Outside compose it silently
    breaks uploads. Always set it.
-4. The API falls back to in-process STEP extraction when the broker is down.
+4. **OCP 8.x renamed the static downcasts**: `TopoDS.Face_s` → `TopoDS.Face`, and
+   `Bnd_Box.Get()` raises `Unregistered type` — use `CornerMin()`/`CornerMax()`.
+5. **There is no Alembic.** `create_all` creates missing tables but never
+   ALTERs an existing one, and `main.py` seeds at import time, so a new column
+   takes down the whole app on any existing dev.db or compose volume. Add it to
+   `main._ensure_added_columns` in the same commit as the model change.
+6. The API falls back to in-process STEP extraction when the broker is down.
    Deliberate dev convenience — it also masks a dead worker. When diagnosing,
    confirm which path actually ran.
 
@@ -81,16 +96,27 @@ cd backend && python tests/test_geometry.py path/to/part.stp
 1. **Never change the metre↔mm scaling in only one place.** Backend scales mesh
    ×1000; frontend scales model ×1000. A contract test enforces this.
 2. **Dims are never silently auto-filled.** The user sees the part and confirms;
-   fields stay editable. On the Y2V_YK9 Housing, automation alone is off by 6× —
-   this rule is why that doesn't ship.
-3. **Largest-connected-body filter is mandatory** on CAD import. Stray reference
-   geometry is normal in customer files.
+   fields stay editable.
+3. **Do not hand-parse IGES/STEP.** Use the OCP reader. Ad-hoc parameter-section
+   parsing mixes knot vectors and type-124 transformation matrices in with control
+   points — it produced four wrong reference dimensions for Phase 1 and cost a day.
+   Stray geometry is filtered by meshing `TopAbs_FACE` only.
 4. **Never report volume or mass** from customer CAD. They are open surface
    models; those values are meaningless.
 5. `.SLDASM` fails loudly with guidance. No silent partial handling.
 6. Orientation transforms are Z-up, mesh-space → resting-pose-on-floor.
 7. Heavy geometry work stays in the Celery worker.
 8. Surgical changes over rewrites.
+9. **If the backend computed it, ship it — never re-derive it client-side.**
+   Three times in one phase: the custom box arrived over HTTP as a count with no
+   `extent`/`pitch` (pydantic drops undeclared fields silently — not an error);
+   the truck block reported a correct number with no `asset_name`, so the
+   drawing used `catalogue[0]`'s dims; and the load drawing re-derived the floor
+   fit with `bestFill` and found 21 boxes/floor where the engine assumed 18. A
+   number and the drawing that illustrates it must come from the same
+   expression. Add a field to a dataclass the API returns and add it to the
+   response model **in the same edit** — then check it over real HTTP, because
+   direct route-function tests never exercise serialisation.
 
 ---
 
