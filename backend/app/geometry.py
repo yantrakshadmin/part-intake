@@ -52,7 +52,8 @@ class OrientationCandidate:
 @dataclass
 class ExtractionResult:
     glb_path: str
-    units_assumed: str              # "mm" (cascadio normalizes; see notes)
+    units_assumed: str              # unit of the values below, always "mm";
+                                    # describes our output, not the source file
     solid_count: int
     watertight: bool
     canonical_dims_lbh: tuple       # sorted extents of the min OBB, L >= B >= H
@@ -74,10 +75,15 @@ _SI_LEN_RE = re.compile(
 )
 
 
+# Readable names for what `detect_step_length_unit` returns. Bare `.upper()`
+# renders 'm' as "declares M units", which reads like a typo.
+_UNIT_LABEL = {"m": "METRE", "foot": "FOOT", "inch": "INCH"}
+
+
 def detect_step_length_unit(step_path: str | Path) -> str:
     """Best-effort read of the declared length unit from the STEP data section.
 
-    Returns one of: 'mm', 'm', 'inch', 'unknown'.
+    Returns one of: 'mm', 'm', 'inch', 'foot', 'unknown'.
     OpenCascade normalizes geometry during conversion, so this is used only
     to sanity-check and warn — not to rescale.
     """
@@ -312,14 +318,32 @@ def extract_part(step_path: str | Path, glb_out: str | Path | None = None) -> Ex
             "or IGES (.igs/.iges) export from the customer."
         )
 
-    declared_unit = ("mm" if step_path.suffix.lower() in IGES_SUFFIXES
-                     else detect_step_length_unit(step_path))
-    if declared_unit == "inch":
-        warnings.append("STEP file declares INCH units — verify extracted "
-                        "dimensions (values shown are converted to mm).")
-    elif declared_unit == "unknown":
-        warnings.append("Could not read length unit from STEP header — "
-                        "assuming mm. Verify dimensions.")
+    # The unit is read from the file in both formats -- IGES used to be
+    # hardcoded to "mm", which was true of every fixture we had and would have
+    # silenced an inch-authored IGES. The geometry is mm either way (OCC
+    # converts on read, see step_fallback.iges_to_glb); this is reporting only.
+    if suffix in IGES_SUFFIXES:
+        from .step_fallback import iges_declared_unit
+        declared_unit = iges_declared_unit(step_path)
+        if declared_unit != "mm":
+            warnings.append(f"IGES file declares {declared_unit.upper()} units "
+                            "— OpenCascade converted the geometry on read, so "
+                            "the values shown are already mm. Verify them.")
+    else:
+        declared_unit = detect_step_length_unit(step_path)
+        # Any non-mm unit, not just INCH. `detect_step_length_unit` has always
+        # been able to return "m" and "foot", and neither warned -- the same
+        # silence G-UNIT just removed from the IGES path, and a metre-declared
+        # file is a 1000x risk rather than 25.4x. Matches the IGES branch's
+        # `!= "mm"` above so the two formats cannot drift apart again.
+        if declared_unit not in ("mm", "unknown"):
+            label = _UNIT_LABEL.get(declared_unit, declared_unit.upper())
+            warnings.append(f"STEP file declares {label} units — verify "
+                            "extracted dimensions (values shown are "
+                            "converted to mm).")
+        elif declared_unit == "unknown":
+            warnings.append("Could not read length unit from STEP header — "
+                            "assuming mm. Verify dimensions.")
 
     glb_path = convert_step_to_glb(step_path, glb_out)
     mesh, solid_count = load_unified_mesh(glb_path)

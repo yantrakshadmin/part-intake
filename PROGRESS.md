@@ -1427,6 +1427,79 @@ test proving the engine *could* hit the ground truth while the product did not.
 E-CLEAR fixed the engine and the override became dead weight. At defaults the
 test now reports 40 in (1, 4, 10), agreeing with `test_clearance`.
 
+#### G-UNIT: the docstring was right, the reporting was lying
+
+`iges_to_glb` asserted that OpenCascade honours the IGES global-section unit
+flag and normalises to mm, and `geometry.py` hardcoded `"mm"` for every IGES on
+the strength of that one sentence. Two very different things could have been
+true: the claim is right and only our reporting lies, or the claim is wrong and
+every inch-authored IGES has been out by 25.4x in silence. **Nobody had ever
+run the non-mm path** -- all four IGES fixtures are mm, and IGES is 4 of our 5
+real customer files.
+
+Settled empirically rather than from documentation. OCP writes a cube that is
+1x1x1 *in the file's own declared units*, twice, and our own `extract_part`
+reads both back:
+
+| file declares | global-section max coord | `extract_part` |
+|---|---|---|
+| MM (flag 2, UnitValue 1.0) | 1.0 | **(1.0, 1.0, 1.0) mm** |
+| INCH (flag 1, UnitValue 25.4) | 1.0 | **(25.4, 25.4, 25.4) mm** |
+
+25.4x apart, so the reader does convert: no inch IGES was ever wrong. Isolated
+further by reading the *same* INCH file with `xstep.cascade.unit` set to INCH,
+which yields 0.03937 -- the raw file value. So the conversion is file-unit to
+cascade-unit, and the mm contract depends on that global static being MM.
+
+**The trap in my own ticket recipe.** I proposed writing `MakeBox(1,1,1)` as an
+INCH file and expecting 25.4 back. That would have been wrong:
+`IGESControl_Writer` converts too, so a 1mm solid written as INCH lands in the
+file as 0.03937in, reads back as 1mm, and **looks exactly like the reader not
+converting.** A double conversion masquerading as no conversion. The test
+therefore asserts the file's own max-coordinate field first, pinning the writer
+before it trusts the reader. Worth remembering: with a symmetric round trip,
+"no effect" and "two cancelling effects" are the same observation.
+
+So the fix is truthfulness, not arithmetic: the unit now comes from
+`IGESControl_Reader().WS().Model().GlobalSection()`, and a non-mm IGES warns
+that the values shown are *already* converted. `UnitValue()` is read rather
+than the unit flag mapped, because flag 3 is user-defined. And
+`_pin_cascade_unit_mm()` now sets the static the whole mm contract rests on
+instead of assuming its default.
+
+Three things I took further than the ticket:
+
+- **The pin was on one of two paths.** Its own docstring says
+  `_shape_to_glb`'s x0.001 depends on it, and `_shape_to_glb` is shared with
+  the STEP fallback, which did not pin. Same dependency, same risk, so it now
+  pins at both readers -- the guard belongs where every caller routes through.
+- **`detect_step_length_unit` can return `'m'` and `'foot'`, and
+  `extract_part` branched on `== "inch"`.** The identical silence, in the other
+  format, at 1000x instead of 25.4x. Now `not in ("mm", "unknown")`, matching
+  the IGES branch so the two cannot drift apart again. Its docstring also
+  omitted `'foot'` from the four values it claimed to return.
+- **A readable label.** `.upper()` on `'m'` renders as "declares M units",
+  which reads like a typo rather than a unit.
+
+The metre case cannot be built the way the IGES cubes were:
+`SetCVal_s("write.step.unit", "M")` is **silently rejected** by this OCC build
+-- it reads back as `"MM"` and the file still says `SI_UNIT(.MILLI.,.METRE.)`.
+INCH does take, as a `CONVERSION_BASED_UNIT`. So the metre file is an OCP-written
+mm STEP with its one `SI_UNIT` line rewritten, and the check asserts the
+reporting only, since a file declaring metres while holding mm-magnitude
+coordinates has no meaningful dimensions by construction. Reverting the
+predicate to `== "inch"` fails it.
+
+Every real fixture is byte-identical before and after -- Housing
+(590.0, 132.62, 105.08), Rack (663.5, 109.77, 27.59), IBJ
+(338.57, 38.45, 37.13), YXA bar (1091.58, 298.25, 142.57), wheel
+(371.0, 353.9, 137.71) -- and the bar is an IGES file, so 40/PLS12801 was
+directly in the blast radius and did not move.
+
+Left alone deliberately: `declared_unit` is not a field on `ExtractionResult`.
+Adding it would pull `schemas.py` and the frontend in under hard rule 9 to
+carry information the warning already delivers.
+
 ## Open
 
 | Item | Owner | Blocks |
@@ -1449,7 +1522,7 @@ test now reports 40 in (1, 4, 10), agreeing with `test_clearance`.
 | ~~**Dunnage charges bars height they do not occupy**~~ | — | **Done** — R2. My first diagnosis had two details wrong: it is not "three element groups each claiming their full width", it is the centre bar and side bars being **coplanar** at one layer boundary while `bom()` sums their heights; and the real-CAD bar's nest depth is 80mm, not 218. The two candidate formulas reduce to the same expression, so the fix charges the bar once rather than changing the arithmetic. Mubea unchanged at 790.0/790. |
 | **No in-plane budget check at all.** `lattice_count` charges zero wall clearance, then the BOM emits two 35mm side panels: 1085 + 70 = 1155 in an inner L of 1150, and `Bom.fits` reports True because it only budgets H. | packaging engineers | Nothing yet — the shipped deck has the same tension, so this is probably the DOMAIN.md wall-clearance datum rather than a bug. But nothing detects or reports it, and the drawing paints only into empty cells so the picture hides it too. |
 | **`max_candidates=4` now gates the engine's search.** Six resting poses are generated, sorted by footprint area, truncated to 4 — and near-duplicate poses eat the slots (the bar's flips survive dedup as separate entries), so only 2 distinct footprints reach the nester. A Phase-1 UI constant, with a ranking key that predates the nester. | geometry | Unproven — no case found where it loses parts. Worth auditing before trusting a close ranking. |
-| **IGES unit detection is skipped entirely.** An inch-authored STEP gets a warning; an inch-authored IGES gets none — and IGES is 4 of our 5 real files. The IGES global section carries the flag, so the information is there. | geometry | Nothing today (all four IGES fixtures are mm and land within 2% of their decks). A silent 25x error if a supplier ever sends inches. |
+| ~~**IGES units rest on an untested docstring**~~ | — | **Done** — G-UNIT. The claim was true: OCC converts on read, measured 1.0mm vs 25.4mm on cubes that are 1x1x1 in their own file units. So no geometry was ever wrong; the reporting was. Unit now read from the reader's global section, non-mm warns in both formats, and the cascade-unit static is pinned at both readers rather than assumed. No real fixture dimension moved. |
 | **Clearance baked into the pitch can flip the dunnage archetype.** `archetype_of` tests `pitch < extent`, but the pitch already carries the 5mm in-plane clearance, so a part with a genuine 3mm interleave reports `pitch = extent + 2` and gets `pocket_tray` — the wrong dunnage system from the wrong generator. | geometry | Unproven; no real fixture exhibits it. |
 | **Exploded-drawing leader angles** — the dotted leaders run from an evenly-spread label column back to component mid-heights, so several cross the drawing at a shallow angle and read as pointing at the wrong component. User: "pointing in the exploded view is not at the right angle, we'll work on that but for now this will do." | PM | Nothing — cosmetic. Fix is the leader routing in `insert_drawing._labels`, not the geometry. |
 | Is 200kg a sane `tare_kg` ceiling? A steel returnable may exceed it | packaging engineers | Nothing yet — over the cap the UI now shows a readable 422 instead of "[object Object]". |
@@ -1466,30 +1539,38 @@ test now reports 40 in (1, 4, 10), agreeing with `test_clearance`.
 1. ~~Wire `engine.solve()` to an endpoint~~ — **done**, B3-1.
 2. ~~Retire `partsPerBox` in the frontend~~ — **done**, F2-1.
 3. ~~Close the `/code-review` findings on F2-1~~ — **done**, F2-2.
-4. ~~Open the UI in a browser~~ — **done**, and it found six real defects that
-   every automated check had missed. See the seventh entry. What is *still*
-   unseen by any human eye: all of UI-4's restructure, and the insert BOM,
-   which ships over the wire with nothing yet rendering it.
-5. ~~The interleaved-pose insert drawing~~ — **done**, P4-1. It was never
-   blocked on the packaging engineers; the shipped BOMs were in the repo.
-6. **`/code-review` on this session's ten tickets** — UI-1, UI-2, UI-4, P4-1,
-   G-DRAW, F-BOM, B-DRAW, C-TARE, E-CLEAR, E-DECK, G-DRAW2. CLAUDE.md: before
-   anything lands. Still not run, and the last review on a change set this size
-   found ten real defects. This is now the largest single piece of process debt.
+4. ~~The interleaved-pose insert drawing~~ — **done**, P4-1.
+5. ~~`/code-review` on the eleven tickets~~ — **done**, and it needed the
+   command file written first. 15 confirmed defects, all fixed; four of them
+   were damage from the same session that produced them, which is the whole
+   argument for step 4 of the cycle.
+6. ~~Commit~~ — **done**, `c650fcf` (engine) and `c062ca1` (log + command).
+   The entire engine had been living in the working tree, uncommitted since
+   `edb8d34`, and that was the one thing here not recoverable by rerunning
+   something.
 7. **Nobody has opened a browser** on UI-4's restructure, the BOM table or the
    Explode modal. The last browser session found six defects that 20+ green
-   checks had missed.
-8. **Answer the Tata pose question**, then decide whether the engine's +4/+2
-   stand. It is the difference between "we reproduce the decks" and "we beat
-   them", and it is one conversation with the packaging engineers.
-9. **Get a STEP export for the Bharat Forge suspension arm** — the only shared
-   case we cannot compute at all.
-10. **Phase 3** — catalogue cleanup (7 defects, remaining 32 assets), then the
-    pallet tier. Still blocked on pallet dims: `Can Be Palletized` is 1 for 7 of
-    49 rows and pallet L/B/H read 0 for all 49.
-11. **Restart the two stale Celery workers** (pids 10375/10381/10382, 18 Aug,
-    pre-change geometry code) — needs `! kill 10375 10381 10382` from the user;
-    the permission classifier blocked it.
+   checks had missed, and the frontend reviewer asked specifically for a human
+   eye on the Truck Load tab and the Load Calculator result card. Needs the
+   stack up, which needs the stale workers killed first.
+8. ~~IGES unit detection~~ — **done**, G-UNIT, and the answer was the
+   reassuring one: OCC really does convert on read, so no customer dimension
+   was ever wrong. Only the reporting lied. The same silence turned out to
+   exist on the STEP side for metres and feet, and is closed too.
+9. **Answer the Tata pose question**, then decide whether the engine's +4/+2
+   stand. The difference between "we reproduce the decks" and "we beat them",
+   and it is one conversation with the packaging engineers.
+10. **Get a STEP export for the Bharat Forge suspension arm** — the only
+    shared case we cannot compute at all.
+11. **Audit `max_candidates=4`** — six poses generated, truncated to 4, and
+    near-duplicates eat the slots so only 2 distinct footprints reach the
+    nester. No case found where it loses parts; measurement, not a fix.
+12. **Phase 3** — catalogue cleanup (7 defects, remaining 32 of 49 assets),
+    then the pallet tier. Still blocked on pallet dims: `Can Be Palletized` is
+    1 for 7 of 49 rows and pallet L/B/H read 0 for all 49.
+13. **Restart the two stale Celery workers** (pids 10375/10381/10382, 18 Aug,
+    pre-change geometry code) — needs `! kill 10375 10381 10382` from the
+    user; the permission classifier blocked it.
 
 Also outstanding: **the working Gemini key passed through a chat transcript and
 should be rotated.**

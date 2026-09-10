@@ -33,6 +33,15 @@ _MESH_ATTEMPTS = (
 )
 
 
+def _pin_cascade_unit_mm() -> None:
+    """OCC converts file units to the global static `xstep.cascade.unit` on
+    read. MM is its default, and `_shape_to_glb`'s x0.001 depends on it, so pin
+    it: a stray SetCVal elsewhere in the process would otherwise rescale
+    customer geometry silently."""
+    from OCP.Interface import Interface_Static
+    Interface_Static.SetCVal_s("xstep.cascade.unit", "MM")
+
+
 def step_to_glb_fallback(step_path: str | Path, glb_path: str | Path) -> Path:
     """Convert STEP → GLB, tolerating degenerate faces. Raises ValueError if
     no usable geometry can be extracted at all."""
@@ -45,6 +54,10 @@ def step_to_glb_fallback(step_path: str | Path, glb_path: str | Path) -> Path:
 
     # Skip the ShapeProcess healing sequence — FixShape is what throws.
     Interface_Static.SetCVal_s("read.step.sequence", "")
+    # Both readers convert file units to the cascade unit, and `_shape_to_glb`
+    # is shared, so its x0.001 depends on that static on THIS path too. G-UNIT
+    # pinned it on the IGES side only; the dependency is the same here.
+    _pin_cascade_unit_mm()
 
     reader = STEPControl_Reader()
     if reader.ReadFile(str(step_path)) != IFSelect_RetDone:
@@ -61,13 +74,46 @@ def step_to_glb_fallback(step_path: str | Path, glb_path: str | Path) -> Path:
     return _shape_to_glb(reader.OneShape(), glb_path)
 
 
+def iges_declared_unit(iges_path: str | Path) -> str:
+    """The length unit the IGES *file* declares: 'mm', 'inch', ... or 'unknown'.
+
+    Informational only — the reader has already converted the geometry to mm
+    (see `iges_to_glb`), so this never rescales anything. Cheap: parses the
+    entity table but transfers no shapes (~0.1 s on an 18k-entity file).
+    """
+    from OCP.IFSelect import IFSelect_RetDone
+    from OCP.IGESControl import IGESControl_Reader
+
+    _pin_cascade_unit_mm()
+    reader = IGESControl_Reader()
+    if reader.ReadFile(str(iges_path)) != IFSelect_RetDone:
+        return "unknown"
+    section = reader.WS().Model().GlobalSection()
+    # UnitValue() is target-units-per-file-unit, and the target is the cascade
+    # unit just pinned to MM — so 1.0 means the file itself is already in mm.
+    # Reading the value beats mapping IGES unit flags: flag 3 is user-defined.
+    if abs(section.UnitValue() - 1.0) < 1e-9:
+        return "mm"
+    name = section.UnitName()
+    label = name.ToCString().strip().lower() if name is not None else ""
+    return label or f"{section.UnitValue():g}mm"
+
+
 def iges_to_glb(iges_path: str | Path, glb_path: str | Path) -> Path:
-    """Convert IGES → GLB. OpenCascade honours the global-section unit flag and
-    normalises to mm, so the output contract matches the STEP path."""
+    """Convert IGES → GLB. Output is mm-scaled like the STEP path.
+
+    OpenCascade reads the global-section unit flag and converts geometry to the
+    cascade unit (pinned to MM above), verified empirically in
+    tests/test_iges_units.py: a 1x1x1 box in a file declaring INCH comes back
+    as 25.4 mm, the same box in a file declaring MM as 1.0 mm. Note that "mm"
+    is therefore a fact about *our output*, not about the file — for what the
+    file declared, ask `iges_declared_unit`.
+    """
     from OCP.IFSelect import IFSelect_RetDone
     from OCP.IGESControl import IGESControl_Reader
 
     iges_path = Path(iges_path)
+    _pin_cascade_unit_mm()
     reader = IGESControl_Reader()
     if reader.ReadFile(str(iges_path)) != IFSelect_RetDone:
         raise ValueError(f"OCP could not read IGES file: {iges_path.name}")
