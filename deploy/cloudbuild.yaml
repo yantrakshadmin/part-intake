@@ -53,4 +53,5 @@ images:
 options:
   machineType: E2_HIGHCPU_8   # cadquery-ocp wheel is huge
   dynamicSubstitutions: true
+  logging: CLOUD_LOGGING_ONLY   # required when the trigger names a service account
 timeout: 1800s
