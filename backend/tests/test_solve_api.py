@@ -253,7 +253,8 @@ def main() -> int:
 
         # --- 2. tare_kg supplied -> a truck block appears --------------------
         posted2 = app_main.solve_part_endpoint(
-            wheel.id, SolveIn(tare_kg=30.0), db=db
+            wheel.id, SolveIn(tare_kg=30.0, assets=["PLS12101", "PLS12801"]),
+            db=db
         )
         _run_enqueued()
         status2 = app_main.solve_job_status(posted2.solve_job_id, db=db)
@@ -262,10 +263,21 @@ def main() -> int:
               f": status={status2.status} truck={getattr(status2.result, 'truck', None)}")
 
         # --- 2a. the truck number is the BEST ranked option, not the first --
-        # rank_catalogue sorts on -count and is stable, so a tie on
-        # parts-per-box left catalogue order deciding the truck answer. For
-        # this wheel PLS12803 gives 2304 parts/truck and PLS12103 gives 1728 --
-        # a 25% swing from reordering seed_data.PACKAGING and nothing else.
+        # Restricted (above) to a pair whose count order and truck order
+        # DISAGREE: PLS12101 takes 42 of the wheel per box against PLS12801's
+        # 36, but its 1000mm outer breadth costs a floor row, so it ships 1512
+        # parts/truck against 1728. Ranking is by parts-per-box, so PLS12101
+        # comes first and the truck answer must still come from PLS12801.
+        #
+        # This used to run unrestricted, where PLS12803 and PLS12103 tied at 48
+        # per box and split 2304 vs 1728 on the truck. That divergence existed
+        # only because a stable sort on -count left seed order to break the tie
+        # -- reordering seed_data.PACKAGING moved the truck answer by 25%.
+        # `rank_catalogue` now breaks ties by outer volume (equal count, smaller
+        # box, so strictly more per truck), which is a fix but it also made the
+        # non-vacuity guard below pass trivially: both ranked options came back
+        # at 2304. A divergence from DIFFERENT counts is the case that
+        # genuinely survives the tie-break, so that is what this pins now.
         veh_row = db.scalars(
             select(Vehicle).where(Vehicle.name == "32_ft_sxl")
         ).first()
@@ -284,19 +296,30 @@ def main() -> int:
                             _tare(by_name[l.asset_name]), veh).parts
             for l in status2.result.catalogue if l.asset_name in by_name
         ]
+        ranked_names = [l.asset_name for l in status2.result.catalogue
+                        if l.asset_name in by_name]
+        # The engine scores [*catalogue, custom]. `assets` restricts the
+        # CATALOGUE half only, so a restricted request can leave the synthesised
+        # box the outright best -- and it is here, 2304 against 1728. Scoring
+        # only the catalogue entries compares the engine's answer against a
+        # smaller option set than the engine had, and then calls it wrong.
+        cust = status2.result.custom
+        if cust is not None:
+            alt.append(parts_per_truck(tuple(cust.outer), cust.count,
+                                       WHEEL_KG, 30.0, veh).parts)
+            ranked_names.append("custom")
+
         # Guard against a vacuous assertion: if every option gave the same
         # parts/truck this check would pass regardless of which one was picked.
         check(len(set(alt)) > 1,
               "ranked options really do differ on parts/truck",
-              f": {dict(zip([l.asset_name for l in status2.result.catalogue], alt))}")
+              f": {dict(zip(ranked_names, alt))}")
         check(status2.result.truck.parts == max(alt),
               "truck fit is the best ranked option, not catalogue[0]",
               f": reported={status2.result.truck.parts} best={max(alt)} all={alt}")
 
         # ...and it says WHICH option, so the reader (and the load drawing)
         # cannot attach the right number to the wrong box.
-        ranked_names = [l.asset_name for l in status2.result.catalogue
-                        if l.asset_name in by_name]
         want_name = ranked_names[alt.index(max(alt))]
         check(status2.result.truck.asset_name == want_name,
               "truck fit names the option it belongs to",

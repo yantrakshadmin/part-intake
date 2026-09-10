@@ -1600,10 +1600,111 @@ that is the mandatory regression path and this was an audit. One import line
 and ~30s if we want it enforced.
 
 
+### First real end-to-end run, and the runner-up nobody checked
+
+Rahul killed the stale workers (pids 10375/10381/10382), so for the first time
+the whole stack ran end to end over real HTTP: upload -> extract -> confirm ->
+solve, API on `127.0.0.1:8011`, worker on redis db 9, vite on 5173. Three things
+worth recording, one of them a defect.
+
+**The plumbing is honest.** The TRW wheel went through **Celery**, not the
+in-process fallback (landmine 6 -- confirmed in the worker log, `extract_step
+succeeded in 2.83s`, and no fallback line in the API log). `canonical_dims_lbh`
+came back `[371.0, 353.9, 137.71]`, byte-identical to the fixture. Hard rule 9
+holds on the solve payload: every ranked entry carries `asset_name`,
+`extent_lbh`, `pitch_lbh`, `grid`, `dunnage`, `drawing_url`, `silhouette`,
+`interleave`, `limited_by`, `pose_label`, and `truck` carries its own
+`asset_name` rather than leaving the drawing to guess. Hard rule 4 holds too:
+`mesh_volume_mm3` is **null** because the model is not watertight, and only
+`obb_volume_mm3` (plain L x B x H) is reported, with a warning that says so.
+
+**G-POSE is visible in the live payload.** `candidates` comes back with **four
+entries and only two distinct footprints** -- `[371, 353.9, 137.71]` twice,
+`[371, 137.71, 353.9]` twice -- and the third pose absent. Exactly the flip-twin
+duplication the audit measured, now confirmed in the JSON the UI consumes.
+
+**The defect: equal counts were ranked by seed order.** For the wheel, three
+assets tie at 48 per box, and the tie was broken by nothing but position in
+`seed_data.PACKAGING`:
+
+| asset | inner L x B x H | outer volume | per box | parts/truck |
+|---|---|---|---|---|
+| PLS12803 | 1150x750x1000 | 1,148 L | 48 | **2304** |
+| PLS12103 | 1150x**950**x1000 | **1,435 L** | 48 | **1728** |
+| PLS1280 | 1150x750x1000 | 1,152 L | 48 | **2304** |
+
+PLS12103 is a 25% larger crate holding the same 48 parts -- the wheel's 3x2
+floor grid never uses the extra 200mm of breadth -- and it was presented as the
+**runner-up recommendation**, 576 parts/truck worse than the box it displaced.
+
+**Correction to my own first reading of this.** I initially called it 25% worse
+advice. The truck *number* was never wrong: `tests/test_solve_api.py` §2a and
+§2d already pin that the truck block reports the best ranked option and names
+it, and both passed throughout. What was wrong is narrower and still worth
+fixing -- the **order of the comparison cards**, which CLAUDE.md calls the core
+screen. An engineer comparing crates saw a strictly dominated one ranked above a
+better one.
+
+`rank_catalogue` ended with `best.sort(key=lambda l: -l.count)`. Python's sort is
+stable, so equal counts kept catalogue order. Now:
+
+    vol[asset.name] = d[0] * d[1] * d[2]        # outer, falling back to inner
+    best.sort(key=lambda l: (-l.count, vol[l.asset_name]))
+
+This only ever reorders equals, so it cannot change which count wins. Confirmed
+over HTTP after restarting both services (landmine 2 -- uvicorn has no
+`--reload` here and Celery never hot-reloads): PLS12103 moved from **rank 1 to
+rank 2**, behind PLS1280, and `best_count` stayed 48.
+
+**What the fix does NOT do**, and this is the interesting half. Ranking is still
+by parts-per-box, and count order still disagrees with truck order wherever the
+counts differ -- measured across the whole catalogue for this wheel:
+
+| asset | per box | parts/truck |
+|---|---|---|
+| PLS12101 | 42 | 1512 |
+| PLS12801 | 36 | **1728** |
+| PLS12802 / PLS12804 | 24 | **1728** |
+| FLC12101 | 36 | 1296 |
+| CRT6435 | 2 | 1152 |
+| CRT6418 | 1 | **1248** |
+
+A 42-per-box crate shipping fewer parts than a 24-per-box crate is not a bug --
+the engine already scores every option on the truck and warns when the two
+winners split (§2d, `Best per box is X, but best per truck is Y`). Whether the
+*ranking itself* should be by truck throughput is a real question and it is not
+mine to answer: it depends on tare, vehicle and whether the customer buys a
+crate or a shipment. Left for `DOMAIN.md`.
+
+**The fix broke a test, and the test was right.** §2a's non-vacuity guard
+("ranked options really do differ on parts/truck") had been relying on the
+PLS12803/PLS12103 tie for its divergence -- i.e. on the very behaviour just
+removed. Re-pinned to a divergence that survives the tie-break, from
+**different** counts: restricted to `["PLS12101", "PLS12801"]`, ranking puts
+PLS12101 first at 42/box while PLS12801 ships 1728 against 1512.
+
+That re-pinning exposed a second gap in the same check. The engine scores
+`[*catalogue, custom]`, but `assets` restricts only the catalogue half, so a
+restricted request can leave the **synthesised box** the outright winner -- and
+it does here, 2304 against 1728. The check's option list omitted `custom`, so it
+was comparing the engine's answer against a smaller option set than the engine
+had, and calling the engine wrong. Now scores all three:
+`{'PLS12101': 1512, 'PLS12801': 1728, 'custom': 2304}`.
+
+**The check:** `tests/test_nesting.py::test_ties_go_to_the_smaller_box`. Two
+containers with identical inner and different outer, listed roomy-first so the
+order cannot come from input order; asserts equal counts rank smaller-outer
+first, and that a genuinely higher count still outranks a smaller box. No CAD
+needed -- `Pose` takes bare numbers the way synthesis builds them, so it drives
+`rank_catalogue` with `mesh=None` and a synthetic pose. Proved to fail on
+reverting the sort: `tie not broken by outer volume: ['ROOMY', 'TIGHT']`.
+
+
 ## Open
 
 | Item | Owner | Blocks |
 |---|---|---|
+| **Should the ranking be by parts-per-truck, not parts-per-box?** Ties are now broken by box size, but where COUNTS differ the two orders still disagree: for the TRW wheel PLS12101 takes 42/box and ships 1512, while PLS12801 takes 36/box and ships 1728. The engine scores both and warns on a split (§2d), so nothing is wrong — but the card order is still per-box. | packaging engineers | Nothing today. It decides what the core screen ranks by, and the answer depends on tare, vehicle, and whether the customer buys a crate or a shipment. `DOMAIN.md`. |
 | ~~**Tare weight per asset**~~ | — | **Done** — C-TARE. `Packaging.tare_kg`/`.material` from the SCS report, 15 assets. The 1560/1625 inversion was an artefact of assuming 30kg for both boxes; with PLS12103's real 39kg it is an exact tie, 1560/1560. |
 | Why did Mubea ship in a PLS12801 when a PLS12103 holds 65? | team | Mostly answered by per-asset tare: the two tie at 1560 parts/truck, so there was no per-truck gain to capture. Still worth confirming nothing else drove it. |
 | Real envelope dims for Housing / Rack / IBJ / YXA bar | team | IGES accuracy is unaudited. `TODO(team)` in the test. |
@@ -1681,5 +1782,8 @@ and ~30s if we want it enforced.
     pre-change geometry code) — needs `! kill 10375 10381 10382` from the
     user; the permission classifier blocked it.
 
-Also outstanding: **the working Gemini key passed through a chat transcript and
-should be rotated.**
+Also outstanding: nothing on the Gemini key — **Rahul's call, 10 Sep 2026: keep
+it, rotate when he has to.** It is in `.env` (gitignored), the value is not in
+any tracked file or in git history, and no code in the repo reads it — the only
+references anywhere are `.env` itself and this log. Format note for later: the
+AI Studio key is the newer `AQ.`-prefixed kind, not `AIza`.

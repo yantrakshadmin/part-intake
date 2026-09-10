@@ -316,13 +316,58 @@ def test_catalogue_ranking():
         print(f"     {l.asset_name:<10} {l.count:>4}  {l.grid}  pitch {l.pitch_lbh}")
 
 
+def test_ties_go_to_the_smaller_box():
+    """Equal parts-per-box is NOT equal value -- the truck is volume-limited.
+
+    Real case, measured over real HTTP on the TRW wheel: PLS12103 (inner
+    1150x950x1000) ties PLS12803 (1150x750x1000) at 48 per box, because the
+    wheel's 3x2 floor grid never uses the extra 200mm of breadth. Sorting by
+    count alone is a STABLE sort, so PLS12103 placed second on nothing but its
+    position in the catalogue -- and it ships 1728 parts/truck against 2304, a
+    25% loss offered to the engineer as the runner-up recommendation.
+
+    No CAD needed: `Pose` takes bare numbers (synthesis builds them that way),
+    so this drives `rank_catalogue` with a synthetic pose and mesh=None.
+    """
+    from app.catalogue import Container
+    from app.nesting import rank_catalogue
+
+    # 100mm cube, pitch == extent: no interleave, so counts are pure division.
+    pose = Pose("test", (100.0, 100.0, 100.0), (100.0, 100.0, 100.0))
+    inner = (300.0, 300.0, 300.0)                    # 3x3x3 = 27 either way
+    roomy = Container("ROOMY", inner, (900.0, 900.0, 900.0), 1000.0, "container")
+    tight = Container("TIGHT", inner, (310.0, 310.0, 310.0), 1000.0, "container")
+
+    # Identical inner, so identical counts -- only the outer differs. ROOMY is
+    # listed first to prove the order comes from volume and not from input order.
+    ranked = rank_catalogue(None, None, [roomy, tight], part_kg=1.0, top_n=0,
+                            poses=[pose])
+    assert [l.count for l in ranked] == [27, 27], [l.count for l in ranked]
+    assert [l.asset_name for l in ranked] == ["TIGHT", "ROOMY"], \
+        f"tie not broken by outer volume: {[l.asset_name for l in ranked]}"
+
+    # ...and the tie-break must never outrank a genuinely higher count, however
+    # much bigger the winning box is.
+    big = Container("BIG", (600.0, 300.0, 300.0), (2000.0, 2000.0, 2000.0),
+                    1000.0, "container")
+    ranked = rank_catalogue(None, None, [tight, big], part_kg=1.0, top_n=0,
+                            poses=[pose])
+    assert (ranked[0].asset_name, ranked[0].count) == ("BIG", 54), \
+        f"a smaller box outranked a higher count: " \
+        f"{[(l.asset_name, l.count) for l in ranked]}"
+
+    print("  equal counts -> smaller outer first (TIGHT before ROOMY); "
+          "higher count still wins over a smaller box")
+
+
 if __name__ == "__main__":
     for fn in (test_ground_truth, test_exact_fit_is_not_off_by_one, test_weight_cap,
                test_pitch_is_clear_at_every_lattice_multiple,
                test_cuboid_has_no_interleave,
                test_silhouette_round_trips_and_permutes_with_the_footprint,
                test_cuboid_silhouette_is_solid, test_bar_silhouette_is_not_solid,
-               test_real_bar, test_catalogue_ranking):
+               test_real_bar, test_catalogue_ranking,
+               test_ties_go_to_the_smaller_box):
         print(f"{fn.__name__}:")
         fn()
     print("\nall checks passed")

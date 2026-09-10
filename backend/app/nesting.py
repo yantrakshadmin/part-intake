@@ -378,7 +378,20 @@ def rank_catalogue(mesh: trimesh.Trimesh, candidates, assets,
         layouts = layouts_for(poses, asset, part_kg)
         if layouts:
             best.append(layouts[0])
-    best.sort(key=lambda l: -l.count)
+    # Ties on count go to the SMALLER box. Equal parts-per-box is NOT equal
+    # value: the truck is volume-limited (`truck.limited_by` says so itself),
+    # so a bigger crate holding the same count ships strictly fewer parts.
+    # Measured on the TRW wheel over real HTTP -- PLS12103 ties PLS12803 at 48
+    # per box and, on a stable sort, was ranked second by nothing but its
+    # position in the catalogue: 1728 parts/truck against 2304, a 25% loss
+    # presented as the runner-up recommendation. This only reorders equals; it
+    # can never change which count wins. `outer` falls back to `inner` because
+    # this function accepts anything with .name/.inner/.max_weight_kg.
+    vol = {}
+    for asset in assets:
+        d = getattr(asset, "outer", None) or asset.inner
+        vol[asset.name] = d[0] * d[1] * d[2]
+    best.sort(key=lambda l: (-l.count, vol[l.asset_name]))
     return best[:top_n] if top_n else best
 
 
