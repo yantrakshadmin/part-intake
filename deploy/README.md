@@ -6,7 +6,8 @@
 | gcloud config | `gcloud config configurations activate part-intake` |
 | VM | `part-intake-vm`, zone `asia-south1-a`, e2-standard-2, 50 GB pd-balanced, Debian 12 |
 | Static IP | `part-intake-ip` = 34.47.230.213 |
-| URL | https://34-47-230-213.sslip.io (Let's Encrypt via Caddy, HTTP basic auth site-wide) |
+| URL | https://packit.trakkia.com (Let's Encrypt via Caddy, HTTP basic auth site-wide) |
+| DNS | A record `packit.trakkia.com` → 34.47.230.213 in Cloud DNS zone `trakkia-com`, project `trakkia-uat` (TTL 300). Fallback name 34-47-230-213.sslip.io needs no DNS: set `SITE_HOST` in `.env` and `docker compose up -d caddy`. |
 | Images | `asia-south1-docker.pkg.dev/yantra-part-intake/part-intake/{backend,frontend}` |
 | Secrets | `part-intake-basic-auth` (username=/password= lines), `part-intake-db-password` |
 | Stack on VM | `/opt/part-intake/{docker-compose.yml,Caddyfile,.env}` — compose project `part-intake` |

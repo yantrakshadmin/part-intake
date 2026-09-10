@@ -1,6 +1,6 @@
 # Production Caddyfile. Env placeholders come from /opt/part-intake/.env via
 # the caddy service in docker-compose.prod.yml:
-#   SITE_HOST        e.g. 34-93-1-2.sslip.io  (Let's Encrypt via HTTP-01 on :80)
+#   SITE_HOST        packit.trakkia.com (Let's Encrypt; any name pointing at the VM works)
 #   BASIC_AUTH_USER
 #   BASIC_AUTH_HASH  output of `caddy hash-password` (bcrypt)
 {
