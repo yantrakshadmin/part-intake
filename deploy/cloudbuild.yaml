@@ -34,9 +34,11 @@ steps:
       - -c
       - |
         set -e
-        SSH="gcloud compute ssh ${_VM} --zone ${_ZONE} --tunnel-through-iap --quiet --strict-host-key-checking=no"
-        gcloud compute scp --zone ${_ZONE} --tunnel-through-iap --quiet --strict-host-key-checking=no \
-          deploy/docker-compose.prod.yml deploy/Caddyfile ${_VM}:/tmp/
+        # As a named user, not root: the guest agent will not install keys for root.
+        # Keys expire so they do not pile up in instance metadata.
+        OPTS="--zone ${_ZONE} --tunnel-through-iap --quiet --strict-host-key-checking=no --ssh-key-expire-after=1h"
+        SSH="gcloud compute ssh deploy@${_VM} $$OPTS"
+        gcloud compute scp $$OPTS deploy/docker-compose.prod.yml deploy/Caddyfile deploy@${_VM}:/tmp/
         $$SSH --command 'set -e; cd /opt/part-intake
           sudo mv /tmp/docker-compose.prod.yml docker-compose.yml; sudo mv /tmp/Caddyfile Caddyfile
           sudo docker compose pull -q && sudo docker compose up -d --remove-orphans
