@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { loadPlan } from '../lib/packing.js'
+import { errorDetail } from '../lib/solve.js'
 
 /** Standalone box-into-vehicle calculator. No part required. */
 export default function LoadCalculator() {
@@ -58,7 +59,7 @@ export default function LoadCalculator() {
           max_weight_kg: +weightPerBox || 1,
         }),
       })
-      if (!r.ok) throw new Error((await r.json()).detail || 'Save failed')
+      if (!r.ok) throw new Error(errorDetail((await r.json().catch(() => null))?.detail, 'Save failed'))
       const saved = await r.json()
       setPackaging((p) => [...p, saved])
       setBoxId(String(saved.id))
@@ -155,12 +156,12 @@ export default function LoadCalculator() {
                 {plan.binding === 'none' && "box doesn't fit this vehicle"}
               </div>
               <dl className="result-facts">
-                <div><dt>Floor</dt><dd>{plan.floor.count} positions — {plan.floor.desc}</dd></div>
-                <div><dt>Stacking</dt><dd>{plan.layers} high
+                <div><dt>Floor</dt><dd className="mono">{plan.floor.count} positions — {plan.floor.desc}</dd></div>
+                <div><dt>Stacking</dt><dd className="mono">{plan.layers} high
                   ({box.outer_h_mm} mm × {plan.layers} = {box.outer_h_mm * plan.layers} ≤ {vehicle.cargo_h_mm} mm)</dd></div>
-                <div><dt>By volume</dt><dd>{plan.byVolume} boxes
+                <div><dt>By volume</dt><dd className="mono">{plan.byVolume} boxes
                   ({Math.round(plan.cubeUtilization * 100)}% cube at final count)</dd></div>
-                <div><dt>By payload</dt><dd>
+                <div><dt>By payload</dt><dd className="mono">
                   {plan.byWeight === Infinity ? '— (no box weight given)' :
                     `${plan.byWeight} boxes (${Math.round(plan.weightUtilization * 100)}% of ${vehicle.payload_kg} kg)`}
                 </dd></div>

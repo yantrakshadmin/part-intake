@@ -82,7 +82,7 @@ function dimension({ a, b, dir, off, label, k }) {
       <text x={lp[0]} y={lp[1]} textAnchor="middle" dominantBaseline="middle"
         fontSize={13.5 * k} fontWeight="700" fill={COL.text}
         stroke="#fff" strokeWidth={3 * k} paintOrder="stroke"
-        fontFamily="Inter, system-ui, sans-serif">
+        fontFamily="'Fira Sans', system-ui, sans-serif">
         {label}
       </text>
     </g>

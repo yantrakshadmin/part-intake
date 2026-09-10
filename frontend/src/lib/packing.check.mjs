@@ -1,0 +1,170 @@
+/**
+ * packing.check.mjs — acceptance self-check for F2-1 (plain node, no
+ * framework). Feeds layoutToFit a real backend layout — a shipped TRW
+ * proposal, PLS12803, 48 wheels / (3,2,8) / 6 pockets — not a snapshot of
+ * our own output. If the adapter is wrong, this number moves.
+ *
+ * Run: node src/lib/packing.check.mjs
+ */
+import assert from 'node:assert/strict'
+import { layoutToFit, runSolve, errorDetail, floorPlanFromTruck } from './solve.js'
+import { groupInserts, trayGeometry } from './packing.js'
+
+// Copied verbatim from a real backend /api/parts/{id}/solve run.
+const layout = {
+  asset_name: 'PLS12803', pose_label: 'Largest face down (most stable)',
+  count: 48, grid: [3, 2, 8], extent_lbh: [372.0, 356.0, 140.0],
+  pitch_lbh: [377.0, 361.0, 121.0], limited_by: 'geometry',
+  interleave: [1.013, 1.014, 0.864],
+}
+// PLS12803 inner is 1150 x 750 x 1000, outer 1200 x 800 x 1196, 600 kg
+const box = { inner_l_mm: 1150, inner_b_mm: 750, inner_h_mm: 1000 }
+
+const fit = layoutToFit(layout)
+
+assert.equal(fit.total, 48)
+assert.equal(fit.layers, 8)
+assert.equal(fit.perLayer, 6)
+assert.equal(fit.layerConfig.length, 8)
+for (const l of fit.layerConfig) {
+  assert.equal(l.filled, layout.count / layout.grid[2]) // 6
+  assert.equal(l.filled, l.count)
+}
+assert.equal(fit.fill.placements.length, 6)
+assert.equal(fit.interleaved, false) // non-interleaving path is unchanged (F2-2 F1)
+
+const group = groupInserts(fit)[0]
+const geom = trayGeometry({ box, group, clearance: 7.5, wall: 10, foam: 10 })
+
+assert.equal(geom.pockets.length, 6)
+for (const p of geom.pockets) {
+  assert.equal(p.w, 372.0)
+  assert.equal(p.h, 356.0)
+  assert.ok(p.x >= 0, `pocket x ${p.x} < 0`)
+  assert.ok(p.x + p.w <= box.inner_l_mm, `pocket x+w ${p.x + p.w} > ${box.inner_l_mm}`)
+  assert.ok(p.y >= 0, `pocket y ${p.y} < 0`)
+  assert.ok(p.y + p.h <= box.inner_b_mm, `pocket y+h ${p.y + p.h} > ${box.inner_b_mm}`)
+}
+
+// Derived from fit.layerConfig (partH/layerH), not from the input literals
+// directly — this exercises what layoutToFit did with them, not just the
+// fixture arithmetic.
+const [firstLayer] = fit.layerConfig
+const stackHeight = firstLayer.partH + (fit.layers - 1) * firstLayer.layerH
+assert.equal(stackHeight, 987)
+assert.ok(stackHeight <= box.inner_h_mm, `stack ${stackHeight} > inner H ${box.inner_h_mm}`)
+
+console.log('packing.check.mjs: all assertions passed —', fit.total, '/',
+  layout.grid.join(','), '/', geom.pockets.length, 'pockets')
+
+// Mubea stabiliser bar, PLS12801 — the real interleaved case: 40/PLS12801,
+// the number this whole project is founded on (best cuboid answer is 8).
+// Measured verbatim from tests/test_nesting.py::test_real_bar. Pitch across
+// (140) is less than the part's own extent (300): consecutive pockets in
+// this pose overlap by 160 mm. layoutToFit must flag this (F2-2 F1) so the
+// caller renders a note instead of an unmanufacturable pocket-per-part
+// tray — trayGeometry is deliberately never called for it below.
+const barLayout = {
+  asset_name: 'PLS12801', count: 40, grid: [1, 4, 10],
+  extent_lbh: [1092.0, 300.0, 148.0], pitch_lbh: [1092.0, 140.0, 68.0],
+  limited_by: 'geometry', interleave: [1.0, 0.467, 0.459],
+  pose_label: 'Largest face down (most stable)',
+}
+const barFit = layoutToFit(barLayout)
+assert.equal(barFit.total, 40)
+assert.equal(barFit.layers, 10)
+assert.equal(barFit.perLayer, 4)
+assert.equal(barFit.interleaved, true)
+
+console.log('packing.check.mjs: interleave check passed —', barFit.total,
+  '/', barLayout.grid.join(','), '/ interleaved:', barFit.interleaved)
+
+// --- runSolve: the two F2-2 fixes that had no check at all -----------------
+// `fetch` is stubbed, not mocked with a library — this is a self-check, not a
+// test suite. Each case asserts the branch that was broken.
+
+// F5: FastAPI puts a LIST of {loc, msg} in `detail`; String() rendered that
+// as "[object Object]" in the warning bar. Real payload shape, real bound:
+// SolveIn.tare_kg is gt=0, le=200, so 250 produces exactly this.
+assert.equal(
+  errorDetail([{ loc: ['body', 'tare_kg'], msg: 'Input should be less than or equal to 200' }],
+              'fallback'),
+  'tare_kg: Input should be less than or equal to 200')
+assert.equal(errorDetail('plain string detail', 'fallback'), 'plain string detail')
+assert.equal(errorDetail(undefined, 'fallback'), 'fallback')
+assert.equal(errorDetail([], 'fallback'), 'fallback')  // empty list -> not ''
+
+const jsonRes = (body, ok = true, status = 200) =>
+  ({ ok, status, json: async () => body })
+
+// A 422 must surface the field message, not "[object Object]".
+globalThis.fetch = async () => jsonRes(
+  { detail: [{ loc: ['body', 'tare_kg'], msg: 'Input should be greater than 0' }] },
+  false, 422)
+await assert.rejects(runSolve(1, { tareKg: 0 }),
+  (e) => { assert.match(e.message, /tare_kg: Input should be greater than 0/); return true })
+
+// F4: abort mid-poll must reject with AbortError and stop polling. The job
+// never leaves "pending", so without the signal this would run to MAX_POLLS.
+let polls = 0
+globalThis.fetch = async (url) => {
+  // Discriminate on '/solve-jobs/', NOT '/solve' — the status URL
+  // (/api/solve-jobs/j1) contains '/solve' too, so the loose match answered
+  // every poll with the POST body, left `polls` at 0, and made the
+  // "polling stopped" assertion below pass without polling ever happening.
+  if (String(url).includes('/solve-jobs/')) { polls++; return jsonRes({ status: 'pending' }) }
+  return jsonRes({ solve_job_id: 'j1' })
+}
+const ac = new AbortController()
+const pending = runSolve(1, { tareKg: 30, signal: ac.signal })
+setTimeout(() => ac.abort(), 50)
+await assert.rejects(pending, (e) => { assert.equal(e.name, 'AbortError'); return true })
+const pollsAtAbort = polls
+assert.ok(pollsAtAbort > 0, 'no poll ever happened — the stub never answered a status GET')
+await new Promise((r) => setTimeout(r, 200))
+assert.equal(polls, pollsAtAbort, `polling continued after abort: ${pollsAtAbort} -> ${polls}`)
+
+// An already-aborted signal must not sit out a poll interval first.
+const ac2 = new AbortController()
+ac2.abort()
+const t0 = Date.now()
+await assert.rejects(runSolve(1, { signal: ac2.signal }),
+  (e) => { assert.equal(e.name, 'AbortError'); return true })
+assert.ok(Date.now() - t0 < 500, `pre-aborted signal waited ${Date.now() - t0}ms`)
+
+console.log('packing.check.mjs: runSolve checks passed — 422 detail readable,'
+  + ` abort stops polling (${pollsAtAbort} poll(s), none after)`)
+
+// --- floorPlanFromTruck: the drawing must not disagree with the number -----
+// Real backend output for the wheel (tests/test_solve_api.py block 2):
+// PLS12803, 48 boxes, 2304 parts, floor_grid (8,3), floor_rotated false.
+// 32ft SXL cargo is 9754 x 2438 x 2438 (app/seed_data.py VEHICLES),
+// so 2438 / 1196mm box outer height = 2 layers.
+// 8 x 3 x 2 = 48 == truck.boxes. That equality is the whole point.
+const truck = {
+  vehicle: '32_ft_sxl', asset_name: 'PLS12803', boxes: 48, parts: 2304,
+  kg_per_box: 150.0, limited_by: 'volume', floor_grid: [8, 3], floor_rotated: false,
+}
+const truckBox = { outer_l_mm: 1200, outer_b_mm: 800, outer_h_mm: 1196 }
+const plan = floorPlanFromTruck(truck, truckBox)
+assert.equal(plan.floor.count, 24)
+assert.equal(plan.floor.placements.length, 24)
+assert.equal(plan.layers, 2)
+assert.equal(plan.floor.count * plan.layers, truck.boxes)   // drawing == number
+assert.equal(plan.total, 48)
+// Every box on the floor, inside the trailer, un-rotated footprint.
+for (const p of plan.floor.placements) {
+  assert.equal(p.w, 1200)
+  assert.equal(p.h, 800)
+  assert.ok(p.x + p.w <= 9754, `box overruns cargo length: ${p.x + p.w}`)
+  assert.ok(p.y + p.h <= 2438, `box overruns cargo breadth: ${p.y + p.h}`)
+}
+// Rotated: the footprint swaps, and the grid is read in the rotated frame.
+const rot = floorPlanFromTruck(
+  { ...truck, floor_grid: [3, 2], floor_rotated: true, boxes: 6 }, truckBox)
+assert.equal(rot.floor.placements[0].w, 800)
+assert.equal(rot.floor.placements[0].h, 1200)
+assert.equal(rot.floor.count, 6)
+
+console.log('packing.check.mjs: truck floor plan passed —',
+  `${truck.floor_grid.join(' x ')}/floor x ${plan.layers} = ${truck.boxes} boxes`)

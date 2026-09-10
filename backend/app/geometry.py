@@ -299,6 +299,19 @@ def extract_part(step_path: str | Path, glb_out: str | Path | None = None) -> Ex
     step_path = Path(step_path)
     warnings: list = []
 
+    # The gate lives HERE, not only in `extract_dimensions`. Upload goes
+    # through this function, so a .SLDPRT used to be handed straight to
+    # cascadio, fail, retry the OCP fallback, fail again, and surface as
+    # "OCP could not read STEP file" -- which reads as our bug, not as
+    # "this format has no reader, ask for a STEP export". Hard rule 5.
+    suffix = step_path.suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        raise ValueError(
+            f"Unsupported CAD format '{suffix or step_path.name}': no "
+            "open-source reader exists for it. Request a STEP (.stp/.step) "
+            "or IGES (.igs/.iges) export from the customer."
+        )
+
     declared_unit = ("mm" if step_path.suffix.lower() in IGES_SUFFIXES
                      else detect_step_length_unit(step_path))
     if declared_unit == "inch":
@@ -340,3 +353,20 @@ def extract_part(step_path: str | Path, glb_out: str | Path | None = None) -> Ex
         candidates=candidates,
         warnings=warnings,
     )
+
+
+def extract_dimensions(path: str) -> tuple[float, float, float]:
+    """Part dimensions in mm from a STEP or IGES file, sorted L >= B >= H.
+
+    Min-volume OBB over the tessellated faces of the model. Free curves,
+    datum points and other non-surface entities are never part of the answer:
+    only faces are meshed. Never returns volume or mass — these files are open
+    surface models and both are meaningless for them.
+    """
+    # Format gate is in `extract_part`, which this delegates to.
+    # Dimensions-only callers never want the GLB, and `extract_part` otherwise
+    # leaves one behind per call via `tempfile.mkstemp`. Give it a directory
+    # that cleans itself up.
+    with tempfile.TemporaryDirectory() as tmp:
+        glb_out = Path(tmp) / "dims.glb"
+        return extract_part(path, glb_out=glb_out).canonical_dims_lbh

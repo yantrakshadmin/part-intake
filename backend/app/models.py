@@ -42,7 +42,21 @@ class Packaging(Base):
     outer_b_mm: Mapped[float] = mapped_column(Float)
     outer_h_mm: Mapped[float] = mapped_column(Float)
     max_weight_kg: Mapped[float] = mapped_column(Float)
+    # Per-asset tare (kg). Nullable, NO default, deliberately: the SCS report
+    # this is seeded from (see seed_data.PACKAGING_TARE) reads 0 for 13 of 49
+    # rows and 0 there means "no tare on file," not weightless -- a false 0
+    # would silently win the truck-tier ranking in engine.parts_per_truck.
+    tare_kg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    material: Mapped[str | None] = mapped_column(String(16), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="draft")  # checked | draft
+    # container | pallet | rack | accessory. PLANNING §5 item 4: the export mixes
+    # these and an optimiser that doesn't distinguish packs parts into a rack.
+    # server_default too: there is no Alembic, so an existing dev.db needs a
+    # manual ALTER TABLE ADD COLUMN, and that is only correct if the DB
+    # itself knows the default. PLANNING §5 item 4 -- without this column
+    # the optimiser packs parts into a warehouse rack.
+    kind: Mapped[str] = mapped_column(String(16), default="container",
+                                      server_default="container")
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime, default=dt.datetime.utcnow
     )
@@ -59,6 +73,26 @@ class Vehicle(Base):
     cargo_b_mm: Mapped[float] = mapped_column(Float)
     cargo_h_mm: Mapped[float] = mapped_column(Float)
     payload_kg: Mapped[float] = mapped_column(Float)
+
+
+class SolveJob(Base):
+    """Phase 2 nesting solve, run async because voxelising is ~11s+ (B3-1).
+
+    A new table, not a column on ExtractionJob or PartProfile: `create_all`
+    makes new tables for free; there is no Alembic here (see Packaging.kind
+    above), so a new column needs a manual ALTER TABLE on every dev.db.
+    """
+
+    __tablename__ = "solve_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)  # uuid4
+    part_id: Mapped[int] = mapped_column(Integer, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime, default=dt.datetime.utcnow
+    )
 
 
 class PartProfile(Base):

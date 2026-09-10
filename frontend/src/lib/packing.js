@@ -78,103 +78,6 @@ function gridDesc(L, B, pl, pb, wall = 0) {
 }
 
 /**
- * Parts into one box (insert-aware, PLANNING.md Phase 2 numbers).
- *
- * Pocket/cell model: each part sits in a pocket of
- *   part + clearance on each side, with a shared divider wall between
- *   pockets, and a foam/PP sheet between layers. Parts stay in their
- *   confirmed resting orientation — only 0°/90° footprint rotation.
- *
- *   n pockets across a span need n*pitch - wall  (walls are shared, none
- *   against the box sides), so n = floor((inner + wall) / pitch).
- */
-export function partsPerBox({ part, box, clearance = 7.5, wall = 10, foam = 10,
-                              thisSideUp = true }) {
-  const [L, B, H] = [part.length_mm, part.breadth_mm, part.height_mm]
-
-  // Orientation set, named like the reference sheets: footprint_height.
-  // "This side up" locks the part to its confirmed resting pose (H up).
-  const orientations = [{ f1: L, f2: B, h: H, code: 'L_B_H', label: 'upright (H up)' }]
-  if (!thisSideUp) {
-    orientations.push({ f1: L, f2: H, h: B, code: 'L_H_B', label: 'on side (B up)' })
-    orientations.push({ f1: B, f2: H, h: L, code: 'B_H_L', label: 'on end (L up)' })
-  }
-
-  // Floor fill per orientation is height-independent — compute once.
-  for (const o of orientations) {
-    o.fill = bestFill(
-      box.inner_l_mm, box.inner_b_mm,
-      o.f1 + 2 * clearance + wall, o.f2 + 2 * clearance + wall, wall,
-    )
-  }
-
-  // Greedy layer stacking: each layer independently picks the orientation
-  // with the most parts that still fits the remaining height — so a box can
-  // end with a shorter, differently-oriented top layer (mixed layers).
-  const layerConfig = []
-  let remaining = box.inner_h_mm
-  while (layerConfig.length < 60) {
-    let pick = null
-    for (const o of orientations) {
-      if (remaining < o.h + clearance || o.fill.count === 0) continue
-      if (!pick || o.fill.count > pick.fill.count
-          || (o.fill.count === pick.fill.count && o.h < pick.h))
-        pick = o
-    }
-    if (!pick) break
-    layerConfig.push({
-      code: pick.code, label: pick.label, count: pick.fill.count,
-      fill: pick.fill, partH: pick.h, layerH: pick.h + clearance,
-    })
-    remaining -= pick.h + clearance + foam
-  }
-
-  const byVolume = layerConfig.reduce((s, l) => s + l.count, 0)
-  const byWeight = part.weight_kg > 0
-    ? Math.floor(box.max_weight_kg / part.weight_kg)
-    : Infinity
-  const total = Math.min(byVolume, byWeight)
-
-  // When weight-bound, drop the layers that would hold zero parts — nobody
-  // builds an empty tray. Each kept layer records its filled count; only
-  // the top kept layer can have dummy pockets.
-  const usedLayers = []
-  let leftToPlace = total
-  for (const l of layerConfig) {
-    if (leftToPlace <= 0) break
-    const filled = Math.min(l.count, leftToPlace)
-    usedLayers.push({ ...l, filled })
-    leftToPlace -= filled
-  }
-  const usedCapacity = usedLayers.reduce((s, l) => s + l.count, 0)
-  const usedHeight = usedLayers.reduce((s, l) => s + l.layerH + foam, 0)
-
-  const codes = [...new Set(usedLayers.map((l) => l.code))]
-  const partVol = L * B * H
-  const innerVol = box.inner_l_mm * box.inner_b_mm * box.inner_h_mm
-
-  return {
-    perLayer: usedLayers[0]?.count ?? 0,
-    layers: usedLayers.length,
-    layerConfig: usedLayers,
-    byVolume,
-    byWeight,
-    total,
-    binding: total === 0 ? 'none'
-      : byWeight < byVolume ? 'weight'
-      : byWeight === byVolume ? 'both' : 'volume',
-    contentWeight: total * part.weight_kg,
-    orientation: codes.length > 1 ? `mixed (${codes.join(' + ')})` : (codes[0] ?? '—'),
-    fill: usedLayers[0]?.fill ?? { count: 0, placements: [], desc: '' },
-    dummies: Math.max(0, usedCapacity - total),
-    remainingHeight: Math.max(0, box.inner_h_mm - usedHeight),
-    volumeUtilization: innerVol > 0 ? (total * partVol) / innerVol : 0,
-    weightUtilization: box.max_weight_kg > 0
-      ? (total * part.weight_kg) / box.max_weight_kg : 0,
-  }
-}
-
-/**
  * Human layer summary for a fit: "3 × 22" / "2 × 22 + 1" / "42 + 42 + 24"
  * — consecutive layers with the same filled count are grouped.
  */
@@ -191,7 +94,7 @@ export function layerSummary(fit) {
 }
 
 /**
- * Group a partsPerBox layer config into distinct insert trays: layers with
+ * Group a fit's layer config into distinct insert trays: layers with
  * the same orientation code share one tray design (fill is computed once
  * per orientation, so the placements are identical too).
  */

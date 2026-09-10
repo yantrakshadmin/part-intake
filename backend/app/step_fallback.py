@@ -77,6 +77,11 @@ def iges_to_glb(iges_path: str | Path, glb_path: str | Path) -> Path:
     return _shape_to_glb(reader.OneShape(), Path(glb_path))
 
 
+def _topods_face(TopoDS, shape):
+    """OCP renamed the static downcast helper: TopoDS.Face_s (<=7.x) -> Face (8.x)."""
+    return (getattr(TopoDS, "Face_s", None) or TopoDS.Face)(shape)
+
+
 def _shape_to_glb(shape, glb_path: Path) -> Path:
     """Mesh a TopoDS shape face-by-face and write a metres-scaled GLB.
     Face-at-a-time so one degenerate face cannot abort the rest."""
@@ -92,7 +97,7 @@ def _shape_to_glb(shape, glb_path: Path) -> Path:
     n_faces = n_skipped = 0
     explorer = TopExp_Explorer(shape, TopAbs_FACE)
     while explorer.More():
-        face = TopoDS.Face_s(explorer.Current())
+        face = _topods_face(TopoDS, explorer.Current())
         n_faces += 1
         tri = None
         loc = TopLoc_Location()

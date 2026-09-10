@@ -6,6 +6,7 @@ import LoadCalculator from './components/LoadCalculator.jsx'
 import PackingResults, {
   PackingParams, usePackingData, defaultPackingParams,
 } from './components/PackingRecommendation.jsx'
+import { currentStep } from './lib/steps.js'
 
 /** FastAPI errors: detail is a string (HTTPException) or an array of
  *  validation objects (422) — render both as readable text. */
@@ -58,13 +59,20 @@ export default function App() {
         length_mm: '', breadth_mm: '', height_mm: '', weight_kg: '' })
   const [status, setStatus] = useState('')
   const [dragging, setDragging] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [savedPart, setSavedPart] = useState(null)
+  // The confirm-orientation block is a question; once a save answers it,
+  // collapse it to a one-line summary — "Change" re-expands in one click.
+  const [confirmOpen, setConfirmOpen] = useState(true)
 
   // Packaging data + parameters are owned here so the params can live in
   // the left rail while the results render in the stage.
   const packing = usePackingData()
   const [params, setParams] = useState(defaultPackingParams())
 
-  // Live packaging fit: valid dims + weight are enough — no save required.
+  // Valid dims + weight are enough to know there's something worth solving
+  // for — gates the solve-controls rail card on (UI-4 #2); the solve itself
+  // still needs a saved part id (see lib/steps.js).
   const draftPart = useMemo(() => {
     const l = +form.length_mm, b = +form.breadth_mm, h = +form.height_mm
     const w = +form.weight_kg
@@ -74,6 +82,11 @@ export default function App() {
       length_mm: l, breadth_mm: b, height_mm: h, weight_kg: w,
     }
   }, [form])
+
+  // A saved part's fit goes stale the moment the form (or the uploaded
+  // file) changes again — never keep showing a solve for numbers that no
+  // longer match what's on screen.
+  useEffect(() => { setSavedPart(null) }, [form])
 
   const busy = status === 'Uploading…' || status === 'Extracting dimensions…'
   const statusClass =
@@ -89,6 +102,7 @@ export default function App() {
       if (s.status === 'done') {
         clearInterval(t)
         setResult(s.result)
+        setConfirmOpen(true)
         const [L, B, H] = s.result.candidates[0].dims_lbh
         setForm((f) => ({ ...f, length_mm: L, breadth_mm: B, height_mm: H }))
         setStatus('')
@@ -102,7 +116,7 @@ export default function App() {
 
   async function handleFile(file) {
     if (!file) return
-    setResult(null); setSelected(0); setStatus('Uploading…')
+    setResult(null); setSelected(0); setStatus('Uploading…'); setSavedPart(null)
     try {
       const j = await api.uploadStep(file)
       setJob(j)
@@ -123,6 +137,7 @@ export default function App() {
   }
 
   async function save() {
+    if (saving) return
     if (!form.part_number.trim() || !form.part_name.trim()) {
       setStatus('Part number and part name are required.')
       return
@@ -135,6 +150,7 @@ export default function App() {
       setStatus('All three dimensions (mm) are required and must be > 0.')
       return
     }
+    setSaving(true)
     try {
       const payload = {
         ...form,
@@ -148,7 +164,10 @@ export default function App() {
       }
       const p = await api.createPart(payload)
       setStatus(`Saved part #${p.id} (${p.part_number})`)
+      setSavedPart(p)
+      if (mode === 'stp' && result) setConfirmOpen(false)
     } catch (err) { setStatus(err.message) }
+    finally { setSaving(false) }
   }
 
   const fields = [
@@ -159,6 +178,11 @@ export default function App() {
     ['breadth_mm', 'Breadth (mm)', 'number'],
     ['height_mm', 'Height (mm)', 'number'],
   ]
+
+  // Sequence, not a pile: intake -> confirm orientation (STEP only) ->
+  // results. Results only exist once there's a saved part id to solve
+  // against; see lib/steps.js.
+  const step = currentStep({ mode, result, savedPart })
 
   return (
     <div className="shell">
@@ -247,69 +271,98 @@ export default function App() {
                 ))}
               </div>
               <div className="form-footer">
-                <button className="btn-primary" onClick={save}>Save &amp; calculate</button>
+                <button className="btn-primary" onClick={save} disabled={saving}>
+                  {saving ? 'Saving…' : 'Save & calculate'}
+                </button>
+                {saving && <div className="spinner" />}
               </div>
               {status && !busy && <p className={statusClass}>{status}</p>}
             </div>
 
-            <PackingParams params={params} onChange={setParams}
-              vehicles={packing.vehicles}
-              onAddBox={(b) => packing.setPackaging((p) => [...p, b])} />
+            {/* Solve controls only matter once there's something to solve —
+                first load stays a single dropzone + form (UI-4 #2). */}
+            {draftPart && (
+              <PackingParams params={params} onChange={setParams}
+                vehicles={packing.vehicles} packaging={packing.packaging}
+                onAddBox={(b) => packing.setPackaging((p) => [...p, b])} />
+            )}
           </aside>
 
           <main className="stage">
+            {step === 'intake' && (
+              <div className="card empty-stage">
+                <div className="es-icon">▦</div>
+                <h2>Packaging fit appears here</h2>
+                <p>Fill in the part profile (or drop a STEP file), confirm
+                  how it rests if extracted, then Save &amp; calculate —
+                  boxes, insert trays and the truck loading plan follow.</p>
+              </div>
+            )}
+
             {mode === 'stp' && result && (
               <div className="card form-card">
-                <h2>Confirm resting orientation</h2>
-                <div className="views-row">
-                  <div className="view-card">
-                    <div className="view-title">Isometric</div>
-                    <div style={{ width: 300 }}>
-                      <OrientationViewer
-                        glbUrl={result.glb_url}
-                        candidate={result.candidates[selected]}
-                      />
-                    </div>
-                  </div>
-                  <div className="view-card">
-                    <div className="view-title">Front view</div>
-                    <Drawing2D glbUrl={result.glb_url}
-                      candidate={result.candidates[selected]} view="front" />
-                  </div>
-                  <div className="view-card">
-                    <div className="view-title">Top view</div>
-                    <Drawing2D glbUrl={result.glb_url}
-                      candidate={result.candidates[selected]} view="top" />
-                  </div>
-                </div>
-
-                <div className="candidates">
-                  {result.candidates.map((c, i) => (
-                    <button key={i}
-                      className={`candidate${i === selected ? ' selected' : ''}`}
-                      onClick={() => pickCandidate(i)}>
-                      <div className="c-label">{c.label}</div>
-                      <div className="c-dims">{c.dims_lbh.join(' × ')} mm</div>
+                <div className="confirm-head">
+                  <h2>Confirm resting orientation</h2>
+                  {savedPart && (
+                    <button className="btn-ghost" onClick={() => setConfirmOpen((o) => !o)}>
+                      {confirmOpen ? 'Collapse ▴' : 'Change ▾'}
                     </button>
-                  ))}
+                  )}
                 </div>
 
+                {confirmOpen || !savedPart ? (
+                  <>
+                    <div className="views-row">
+                      <div className="view-card">
+                        <div className="view-title">Isometric</div>
+                        <div style={{ width: 300 }}>
+                          <OrientationViewer
+                            glbUrl={result.glb_url}
+                            candidate={result.candidates[selected]}
+                          />
+                        </div>
+                      </div>
+                      <div className="view-card">
+                        <div className="view-title">Front view</div>
+                        <Drawing2D glbUrl={result.glb_url}
+                          candidate={result.candidates[selected]} view="front" />
+                      </div>
+                      <div className="view-card">
+                        <div className="view-title">Top view</div>
+                        <Drawing2D glbUrl={result.glb_url}
+                          candidate={result.candidates[selected]} view="top" />
+                      </div>
+                    </div>
+
+                    <div className="candidates">
+                      {result.candidates.map((c, i) => (
+                        <button key={i}
+                          className={`candidate${i === selected ? ' selected' : ''}`}
+                          onClick={() => pickCandidate(i)}>
+                          <div className="c-label">{c.label}</div>
+                          <div className="c-dims">{c.dims_lbh.join(' × ')} mm</div>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="confirm-summary">
+                    <span className="orient-chip">{result.candidates[selected].label}</span>
+                    <span className="mono">{result.candidates[selected].dims_lbh.join(' × ')} mm</span>
+                  </div>
+                )}
+
+                {/* D8: extraction warnings render verbatim regardless of the
+                    collapse state above — never hidden behind a disclosure. */}
                 {result.warnings.map((w, i) => (
                   <div key={i} className="warning">⚠ <span>{w}</span></div>
                 ))}
               </div>
             )}
 
-            {draftPart ? (
-              <PackingResults part={draftPart} params={params}
+            {step === 'results' && (
+              <PackingResults part={savedPart} params={params}
                 packaging={packing.packaging} vehicles={packing.vehicles} />
-            ) : (
-              <div className="card empty-stage">
-                <div className="es-icon">▦</div>
-                <h2>Packaging fit appears here</h2>
-                <p>Enter dimensions and weight (or drop a STEP file) — boxes,
-                  insert trays and the truck loading plan are calculated live.</p>
-              </div>
             )}
           </main>
         </div>

@@ -10,7 +10,7 @@ import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
-import { candidateMatrix, computeTightBounds } from '../lib/glbModel.js'
+import { MM_PER_M, candidateMatrix, computeTightBounds } from '../lib/glbModel.js'
 
 export default function OrientationViewer({ glbUrl, candidate }) {
   const mountRef = useRef(null)
@@ -75,7 +75,7 @@ export default function OrientationViewer({ glbUrl, candidate }) {
     new GLTFLoader().load(glbUrl, (gltf) => {
       partGroup.clear()
       const model = gltf.scene
-      model.scale.setScalar(1000) // metres -> mm, must match backend
+      model.scale.setScalar(MM_PER_M) // must match the backend
       model.traverse((o) => {
         if (o.isMesh) {
           o.material = new THREE.MeshStandardMaterial({

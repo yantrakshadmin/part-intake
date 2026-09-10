@@ -78,7 +78,7 @@ export default function PartList({ packing }) {
         </div>
 
         <PackingParams params={params} onChange={setParams}
-          vehicles={packing.vehicles}
+          vehicles={packing.vehicles} packaging={packing.packaging}
           onAddBox={(b) => packing.setPackaging((prev) => [...prev, b])} />
       </aside>
 

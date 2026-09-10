@@ -1,0 +1,1031 @@
+"""The insert drawing: every dunnage component at its TRUE position in the
+asset, the dunnage translucent so the parts inside it stay visible.
+
+Drawn the way the customer decks draw it (TP_TRW slide 4): a translucent
+pocket-tray stack on a base, inside the box, every layer countable and a part
+visible in each one. An opaque stack is a striped block -- only the top layer
+reads -- and that was the whole legibility problem.
+
+Ported from the working prototype (`build_gif3d.py`), whose projection and
+painter are kept unchanged in substance because the reasons they are right
+were the expensive part:
+
+1. Labelled `int16` voxel volumes painted far->near by x+y+z. A cuboid
+   carrying a single depth key gets painted in front of a mass it is actually
+   behind -- that is how the bottom separator once covered every part in the
+   box. No z-buffer, one ordering.
+   Parts and dunnage are TWO volumes because one `int16` cell holds one label
+   and a part inside a pocket would erase, or be erased by, the tray. Both
+   volumes go into ONE globally sorted quad list (`_paint`), so far->near
+   ordering still holds across them -- which is exactly what back-to-front
+   alpha compositing needs.
+2. Camera-facing faces only (+x/+y/+z) as a flat 2D `PolyCollection`, shaded
+   per face normal. Edges in the FACE colour inside a component (`"none"`
+   leaves antialiasing seams that read as graph paper), a DARK edge only where
+   a component meets air or another component, and no edge at all on a
+   translucent face -- restroking a 26%-alpha face in its own colour
+   composites twice and brings the graph paper back.
+3. Labels are spread evenly down a column with dotted leaders back to real
+   component instances. Anchoring text to geometry stacks it: the components
+   share one stack now, so several would land on the same millimetre.
+4. Component counts are asserted against the BOM's own `qty`. The prototype
+   drew 8 centre bars where the BOM said 10 (one per layer BOUNDARY, so one
+   above the top row) and the picture looked entirely plausible. The counts
+   come off the LATTICE, never off `qty`, or the check compares the BOM with
+   itself.
+
+Nothing here is retyped: every dimension, qty, spec and basis in the drawing
+comes off the `dunnage.Bom` for the same lattice, so the number and the
+drawing that illustrates it are one expression (CLAUDE.md hard rule 9).
+Anything invented to make a component visible -- the pocket wall, the base
+slab, every alpha -- is DRAW-ONLY: it may move pixels, it never appears in
+text. Bar width is NOT one of those: the BOM emits it, so the drawing reads
+it off the element and the constants here are only a fallback.
+
+Pure render over numbers. No DB, no HTTP, no CAD reading. Meshes arrive in mm
+(`geometry.load_unified_mesh` already applied the metre->mm x1000), so nothing
+here rescales.
+
+Self-check (renders both archetypes off the ground-truth lattices):
+    venv/bin/python -m app.insert_drawing [outdir]
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from io import BytesIO
+from typing import Callable
+
+import numpy as np
+import trimesh
+
+import matplotlib
+matplotlib.use("Agg")               # Celery worker, no display. Before pyplot.
+import matplotlib.pyplot as plt     # noqa: E402
+from matplotlib.collections import LineCollection, PolyCollection   # noqa: E402
+
+from . import dunnage                               # noqa: E402
+from .nesting import occupancy                      # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+# Voxel edge for the drawing. Coarser than nesting.VOXEL_MM (4mm): this is a
+# 14x13in figure, and at 4mm the 1150x750 footprint is 288x188 cells of
+# invisible detail and ~10x the quads.
+CELL_MM = 12.0
+
+# ---------------------------------------------------------------------------
+# DRAW-ONLY constants: the BOM holds no basis for them, so they set how a
+# component LOOKS and appear in no label. The bar widths below are the one
+# exception -- a FALLBACK for a dimension the BOM normally states itself.
+# ---------------------------------------------------------------------------
+# Bar width FALLBACKS only. `dunnage.bom` emits the width (dims_mm[1], and it
+# takes `centre_bar_w_mm` / `side_bar_w_mm`), so the drawing reads it off the
+# element -- a label saying 120 over a 60mm bar is exactly hard rule 9. These
+# apply only to a BOM that carries no width for the element at all.
+W_SIDE_BAR, W_CENTRE_BAR = 70.0, 60.0
+BASE_MM = 70.0           # the black pallet base every deck image sits on
+# Pocket wall. The pockets ARE the pitch (376.6 x 367.5 of a 1150 x 750 tray),
+# so the real walls are ~10mm -- under one cell, and they vanish into the
+# rounding, which draws the tray as a flat sheet. The drawn pocket is inset by
+# half of this per side purely so the wall survives rasterising; the label
+# states the BOM's own pocket size. The pocket is cut clean THROUGH the tray:
+# a drawn floor puts a translucent surface between the camera and the part in
+# every one of 8 layers, and 8 of those is an opaque grey wash.
+POCKET_WALL_MM = 36.0
+
+# Per-component alpha. Parts are opaque; dunnage is not, or it hides them.
+# 0.26 is the prototype's DUNNAGE_ALPHA. Anything that spans the FULL
+# footprint (separator sheets, the bottom assembly) is lower still: nine
+# sheets at 0.26 leave 7% transmittance and the stack goes solid grey.
+A_TRAY, A_BAR, A_SLAB, A_PANEL = 0.30, 0.42, 0.13, 0.16
+
+COS30, SIN30 = np.cos(np.pi / 6), 0.5
+C_INK, C_MUTE, C_BASE, C_ACCENT = "#0F172A", "#64748B", "#1E293B", "#D97706"
+C_PART, PART_ALT = "#E8DFA0", "#CBBF77"   # warm part vs cool dunnage:
+# the deck's own contrast. Blue parts inside a blue tray read as one mass
+# however good the alpha is, which defeats drawing them translucent at all.
+LABEL0 = 10              # first component label in the voxel volume
+
+# BOM elements we DELIBERATELY do not draw, and the reason, which goes on the
+# label. Narrow on purpose: any other element carrying a size and a qty that
+# reaches no geometry is a GAP, not a decision, and `explode_png` warns --
+# `_check_undrawn_warns` holds that line. The rod is loose stock with no
+# position in the lattice, so there is nothing to place it against.
+LABEL_ONLY = {"MS Rod": "not drawn: loose stock, no lattice position"}
+
+FACES = {"z": np.array([(0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)], float),
+         "x": np.array([(1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1)], float),
+         "y": np.array([(0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)], float)}
+SHADE = {"z": 1.0, "x": 0.80, "y": 0.62}    # brightness per face normal
+TAG = {"derived": ("#166534", "DERIVED"), "measured": ("#1E40AF", "MEASURED"),
+       "pattern": ("#B45309", "PATTERN"), "unknown": ("#B91C1C", "UNKNOWN")}
+
+
+# ---------------------------------------------------------------------------
+# Voxels
+# ---------------------------------------------------------------------------
+def pose_voxels(mesh: trimesh.Trimesh, rotation_matrix,
+                cell_mm: float = CELL_MM) -> np.ndarray:
+    """Bool occupancy of `mesh` rotated into a resting pose, z up, reseated to
+    the origin. Rotation ONLY, then reseat -- do not re-centre.
+
+    `rotation_matrix` is a 3x3 or a 4x4 (`geometry.OrientationCandidate.
+    rotation_matrix`); any translation in a 4x4 is irrelevant because the dense
+    voxel matrix is seated at the occupied region's own lower corner, which is
+    the reseat. Same subdivide voxeliser as the engine measured the pitch with
+    -- it works on the open shells every customer file is.
+    """
+    r = np.asarray(rotation_matrix, dtype=float)
+    if r.shape == (3, 3):
+        t = np.eye(4)
+        t[:3, :3] = r
+        r = t
+    return occupancy(mesh, r, voxel_mm=cell_mm)
+
+
+def _fill(vol: np.ndarray, origin, size, label: int, cell_mm: float,
+          over: bool = False) -> None:
+    """Rasterise a mm-space cuboid into the voxel volume.
+
+    `over=False` paints only into empty cells, so a component listed EARLIER
+    survives a later one drawn through it (a layer bar lying inside the bottom
+    separator assembly is the real case -- the assembly is the nest depth the
+    bottom row sits down into). `over=True` with `label=0` erases, which is how
+    the tray's pockets are cut.
+    """
+    lo = [max(0, int(round(a / cell_mm))) for a in origin]
+    hi = [max(lo[i] + 1, int(round((origin[i] + size[i]) / cell_mm)))
+          for i in range(3)]
+    sub = vol[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+    if over:
+        sub[:] = label
+    else:
+        np.putmask(sub, sub == 0, label)
+
+
+# ---------------------------------------------------------------------------
+# Projection and painter -- unchanged in substance from the prototype
+# ---------------------------------------------------------------------------
+def _proj(p: np.ndarray) -> np.ndarray:
+    """Isometric, camera at (+1,+1,+1), z up. Depth is x+y+z."""
+    x, y, z = p[..., 0], p[..., 1], p[..., 2]
+    return np.stack([(x - y) * COS30, z - (x + y) * SIN30], axis=-1)
+
+
+def _shift(a: np.ndarray, axis: int, step: int) -> np.ndarray:
+    """`a` rolled by `step` along `axis`, with the wrapped face zeroed --
+    outside the volume reads as empty, never as the far side of it."""
+    out = np.roll(a, step, axis=axis)
+    sl = [slice(None)] * 3
+    sl[axis] = slice(0, 1) if step > 0 else slice(-1, None)
+    out[tuple(sl)] = 0
+    return out
+
+
+def _exposed(vol: np.ndarray, cell_mm: float) -> tuple:
+    """Camera-facing faces of a labelled volume.
+
+    -> (quads, depth, label, shade, edge). `edge` marks a face where the
+    surface STOPS: no face of the same label continues into the in-plane
+    neighbour, give or take one cell along the face normal. That one-cell
+    tolerance is the whole rule -- without it every step of a voxelised
+    cylinder counts as a boundary and the part comes out knitted. What
+    survives is the silhouette against air, the join with another component
+    and real creases, which is the deck's line-work; per-voxel edges
+    everywhere read as graph paper at these cell sizes.
+    """
+    quads, depth, label, shade, edge = [], [], [], [], []
+    filled = vol > 0
+    for axis, key in ((2, "z"), (0, "x"), (1, "y")):
+        vis = filled & ~_shift(filled, axis, -1)
+        idx = np.argwhere(vis)
+        if not len(idx):
+            continue
+        face = np.where(vis, vol, 0)        # label of the drawn face, 0 = none
+        rim = np.zeros(vol.shape, dtype=bool)
+        for plane in (a for a in range(3) if a != axis):
+            for step in (-1, 1):
+                nb = _shift(face, plane, step)
+                goes_on = np.zeros(vol.shape, dtype=bool)
+                for off in (-1, 0, 1):      # the surface may step by one cell
+                    goes_on |= (nb if off == 0 else _shift(nb, axis, off)) == face
+                rim |= ~goes_on
+        quads.append(_proj((idx[:, None, :] + FACES[key][None]) * cell_mm))
+        depth.append(idx.sum(axis=1))
+        label.append(vol[idx[:, 0], idx[:, 1], idx[:, 2]])
+        shade.append(np.full(len(idx), SHADE[key]))
+        edge.append(rim[idx[:, 0], idx[:, 1], idx[:, 2]])
+    if not quads:
+        return (np.empty((0, 4, 2)), np.empty(0), np.empty(0, int),
+                np.empty(0), np.empty(0, bool))
+    return tuple(np.concatenate(a) for a in (quads, depth, label, shade, edge))
+
+
+def _paint(ax, vols: list, rgba_for, cell_mm: float, lw: float = 0.35) -> int:
+    """ONE far->near ordering across ALL volumes. Returns the quad count.
+
+    Alpha compositing needs strictly back-to-front, and the depth key is per
+    CELL, so the volumes cannot be painted one after another -- they are
+    concatenated and sorted together. A tie in depth resolves in favour of the
+    LATER volume, so pass the opaque parts first and the translucent dunnage
+    after it: on an equal-depth cell the tint lands over the part, which is
+    what the deck shows.
+    """
+    got = [_exposed(v, cell_mm) for v in vols]
+    got = [g for g in got if len(g[0])]
+    if not got:
+        return 0
+    q, d, lab, sh, eg = (np.concatenate([g[i] for g in got]) for i in range(5))
+    order = np.argsort(d, kind="stable")
+    q, lab, sh, eg = q[order], lab[order], sh[order], eg[order]
+    fc = rgba_for(lab)
+    fc[:, :3] *= sh[:, None]                    # shade by face normal
+    ec = fc.copy()
+    # Inside a component: edge in the face colour, closing the antialiasing
+    # seams between adjacent quads. On a translucent face that second stroke
+    # composites over the first, so those get no edge -- at alpha 0.26 the
+    # seam error is ~0.02 and invisible, a doubled stroke is not.
+    ec[~eg & (fc[:, 3] < 1.0), 3] = 0.0
+    # Silhouettes and creases: the deck's black line-work at every boundary.
+    ec[eg, :3] = fc[eg, :3] * 0.38
+    ec[eg, 3] = np.clip(fc[eg, 3] * 2.4, 0.5, 1.0)
+    ax.add_collection(PolyCollection(q, facecolors=fc, edgecolors=ec,
+                                     linewidths=lw, zorder=2))
+    return len(q)
+
+
+def _draw_asset(ax, inner, mark_z: float | None) -> None:
+    """The asset itself: a base slab plus the inner box as a wireframe.
+
+    "Does the stack fit inside the box" is a question the drawing cannot
+    answer with the box off-screen. `mark_z` rings the top of the build, so
+    the headroom under the box lid is the gap between two lines.
+    """
+    l, b, h = inner
+    slab = [[(0, 0, 0), (l, 0, 0), (l, b, 0), (0, b, 0)],               # +z
+            [(l, 0, -BASE_MM), (l, b, -BASE_MM), (l, b, 0), (l, 0, 0)],  # +x
+            [(0, b, -BASE_MM), (l, b, -BASE_MM), (l, b, 0), (0, b, 0)]]  # +y
+    base = np.array([matplotlib.colors.to_rgba(C_BASE)] * 3)
+    base[:, :3] *= np.array([SHADE["z"], SHADE["x"], SHADE["y"]])[:, None]
+    ax.add_collection(PolyCollection([_proj(np.array(f, float)) for f in slab],
+                                     facecolors=base, edgecolors=base,
+                                     linewidths=0.6, zorder=0))
+
+    # index = 4*(x==l) + 2*(y==b) + (z==h)
+    p = _proj(np.array([(x, y, z) for x in (0.0, l) for y in (0.0, b)
+                        for z in (0.0, h)], float))
+    wire = [(0, 1), (2, 3), (4, 5), (6, 7),             # verticals
+            (0, 2), (2, 6), (6, 4), (4, 0),             # at the base
+            (1, 3), (3, 7), (7, 5), (5, 1)]             # at the lid
+    ax.add_collection(LineCollection([p[list(e)] for e in wire], colors=C_INK,
+                                     linewidths=0.9, alpha=0.5, zorder=3))
+    if mark_z is not None:
+        r = _proj(np.array([(x, y, mark_z) for x, y in
+                            ((0, 0), (l, 0), (l, b), (0, b))], float))
+        ax.add_collection(LineCollection(
+            [r[[0, 1]], r[[1, 2]], r[[2, 3]], r[[3, 0]]], colors=C_ACCENT,
+            linewidths=1.1, linestyles="--", zorder=3))
+
+
+# ---------------------------------------------------------------------------
+# Rows: one per BOM element, plus one for the parts themselves
+# ---------------------------------------------------------------------------
+@dataclass
+class _Row:
+    name: str | None                # BOM element name; None = the parts row
+    colour: str
+    # geo() -> (solids, voids); each cuboid is (origin_mm, size_mm) at its TRUE
+    # position in the asset. Voids are zeroed after the solids (the tray's
+    # pockets). None = label only, or the parts row, which is rasterised from
+    # the pose voxels instead.
+    geo: Callable | None
+    alpha: float = 1.0
+    z0: float = 0.0                 # parts row: z of the bottom layer
+
+    @property
+    def is_parts(self) -> bool:
+        return self.name is None
+
+    @property
+    def drawn(self) -> bool:
+        return self.is_parts or self.geo is not None
+
+
+def _bar_w(e, fallback: float) -> float:
+    """Bar width off the BOM element (`dims_mm` is (L, width, H) for a bar).
+
+    The drawn width and the labelled width must be one expression; the
+    constant is the fallback for a BOM that states no width.
+    """
+    w = e.dims_mm[1] if len(e.dims_mm) > 1 else None
+    return float(w) if w is not None else fallback
+
+
+def _origins(extent, pitch, grid, inner) -> tuple:
+    """Lattice origin so the occupied span is centred in the asset footprint."""
+    return tuple((inner[a] - (extent[a] + (grid[a] - 1) * pitch[a])) / 2
+                 for a in (0, 1))
+
+
+def _bar_and_rod_rows(el: dict, extent, pitch, grid, inner, cell_mm) -> list:
+    """Mubea archetype. Bars run ACROSS the breadth (their stated length is the
+    asset inner breadth), so they are spaced along the length.
+
+    Heights are the real ones. A bar sits in a layer BOUNDARY at k x pitch_H
+    and the parts nest down into it -- that is why `dunnage` gives it zero net
+    height -- so the bottom bar lies inside the bottom separator assembly and
+    the parts start at z=0. The sum comes to `bom.stack_height_mm`.
+    """
+    inner_l, inner_b = inner[0], inner[1]
+    ox, _oy = _origins(extent, pitch, grid, inner)
+    layers = grid[2]
+    stack_top = extent[2] + (layers - 1) * pitch[2]     # == stack_height_mm
+
+    def top_sep() -> tuple:
+        l, b, h = el["Top Separator"].dims_mm
+        return [(((inner_l - l) / 2, (inner_b - b) / 2, stack_top - h),
+                 (l, b, h))], []
+
+    # How many of each we draw comes off the LATTICE, never off `element.qty`
+    # -- otherwise the count check below compares the BOM with itself and the
+    # prototype's 8-instead-of-10 centre bars would have passed it.
+    def centre_bars() -> tuple:
+        e = el["Top Center Bar"]
+        length, h = e.dims_mm[0], e.dims_mm[2]
+        w = _bar_w(e, W_CENTRE_BAR)                 # the BOM's width, not ours
+        x = ox + extent[0] / 2 - w / 2
+        # One per layer BOUNDARY, so one above the top row: layers + 1.
+        return [((x, 0.0, k * pitch[2]), (w, length, h))
+                for k in range(layers + 1)], []
+
+    def side_bars() -> tuple:
+        e = el["Top Side Bar"]
+        length, h = e.dims_mm[0], e.dims_mm[2]
+        w = _bar_w(e, W_SIDE_BAR)
+        x0, x1 = ox, ox + extent[0] - w
+        out = []
+        for k in range(layers):                     # 2 per layer, one each side
+            out.append(((x0, 0.0, k * pitch[2]), (w, length, h)))
+            out.append(((x1, 0.0, k * pitch[2]), (w, length, h)))
+        return out, []
+
+    def bottom_sep() -> tuple:
+        l, b, h = el["Bottom Separator Sheet Assy"].dims_mm
+        return [((0.0, 0.0, 0.0), (l, b, h))], []
+
+    def side_seps() -> tuple:
+        # dims are (L=inner breadth, B=inner height, H=thickness): vertical
+        # panels, not a layer in the stack.
+        b_span, h_span, t = el["Side Separator"].dims_mm
+        return [((0.0, 0.0, 0.0), (t, b_span, h_span)),
+                ((inner_l - t, 0.0, 0.0), (t, b_span, h_span))], []
+
+    return [
+        _Row("Top Separator", "#7DD3FC", top_sep, A_SLAB),
+        _Row("Top Center Bar", "#D97706", centre_bars, A_BAR),
+        _Row("Top Side Bar", "#F59E0B", side_bars, A_BAR),
+        _Row(None, C_PART, None),                        # the parts
+        _Row("Bottom Separator Sheet Assy", "#94A3B8", bottom_sep, A_SLAB),
+        # Last, so the full-height panels have nothing under them to cut
+        # through: `_fill` paints only into empty cells.
+        _Row("Side Separator", "#A3A3A3", side_seps, A_PANEL),
+    ]
+
+
+def _pocket_tray_rows(el: dict, extent, pitch, grid, inner, cell_mm) -> list:
+    """TRW archetype. The tray is a slab with the pocket cells CUT out of it: a
+    featureless slab would hide the only thing that makes it a tray.
+
+    Real heights: pocket depth + layer sheet == the vertical pitch, so layer k
+    is a sheet at k x pitch_H with its tray sitting straight on top. The part
+    is 135 tall in a 117 pocket, so it pokes 18mm through the sheet above --
+    which is what the deck's own picture shows (image9: the hub stands proud of
+    the grey sheets capping the pockets).
+    """
+    tray = next(e for e in el.values() if e.matrix)
+    sheet = next(e for e in el.values()
+                 if e.matrix is None and e is not tray)
+    ox, oy = _origins(extent, pitch, grid, inner)
+    sheet_h = sheet.dims_mm[2]
+    layers = grid[2]
+
+    def trays() -> tuple:
+        l, b, h = tray.dims_mm
+        pl, pb, pd = tray.cell_mm
+        cols, rows = tray.matrix
+        solids, voids = [], []
+        for k in range(layers):                     # one insert per layer
+            z = k * pitch[2] + sheet_h
+            solids.append(((0.0, 0.0, z), (l, b, h)))
+            for i in range(cols):
+                for j in range(rows):
+                    # Pocket centred on where the part actually lands.
+                    px = max(0.0, ox + i * pitch[0] - (pl - extent[0]) / 2)
+                    py = max(0.0, oy + j * pitch[1] - (pb - extent[1]) / 2)
+                    voids.append(((px + POCKET_WALL_MM / 2,
+                                   py + POCKET_WALL_MM / 2, z),
+                                  (pl - POCKET_WALL_MM, pb - POCKET_WALL_MM, pd)))
+        return solids, voids
+
+    def sheets() -> tuple:
+        l, b, h = sheet.dims_mm
+        # One per layer, plus one capping the top layer's pockets.
+        return [((0.0, 0.0, k * pitch[2]), (l, b, h))
+                for k in range(layers + 1)], []
+
+    return [
+        _Row(None, C_PART, None, 1.0, z0=sheet_h),
+        _Row(tray.name, "#38BDF8", trays, A_TRAY),
+        _Row(sheet.name, "#94A3B8", sheets, A_SLAB),
+    ]
+
+
+def _labels(rows: list, el: dict, extent, pitch, grid, count: int) -> list:
+    """(title, lines, basis) per row, straight off the BOM. Nothing retyped."""
+    out = []
+    for row in rows:
+        if row.name is None:
+            span_b = extent[1] + (grid[1] - 1) * pitch[1]
+            lines = ["%g x %g x %g mm in this pose" % tuple(extent),
+                     "%d x %d per layer at %g / %g mm pitch  (span %g mm)"
+                     % (grid[0], grid[1], pitch[0], pitch[1], span_b),
+                     "%d layers at %g mm pitch  =  %d parts"
+                     % (grid[2], pitch[2], count)]
+            lines.append(
+                "pitch %g < width %g, so layers interleave"
+                % (pitch[1], extent[1]) if pitch[1] < extent[1] else
+                "pitch %g > width %g: clearance / pocket wall"
+                % (pitch[1], extent[1]))
+            out.append(("Part  (the thing being packed)", lines, "measured"))
+            continue
+        e = el[row.name]
+        lines = ["%s mm" % e.size if e.size else "size: not derivable",
+                 "qty %s" % (e.qty if e.qty is not None else "?")]
+        if e.matrix:
+            lines.append("%d x %d pockets, %g x %g x %g mm each"
+                         % (*e.matrix, *e.cell_mm))
+        if row.geo is None:
+            lines.append(LABEL_ONLY.get(e.name, "not drawn: nothing to draw"))
+        if e.spec:
+            lines.append(e.spec)
+        if e.unknown:
+            lines.append("needs deck: " + ", ".join(e.unknown))
+        out.append((e.name, lines, e.basis))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The drawing
+# ---------------------------------------------------------------------------
+def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
+                bom: dunnage.Bom, asset_name: str, count: int,
+                cell_mm: float = CELL_MM) -> bytes:
+    """The insert component breakdown as PNG bytes.
+
+    `bom` is a `dunnage.Bom`; every dimension, qty, spec and basis in the
+    drawing comes off it. Never retype a dimension the BOM already carries.
+
+    Takes voxels, not a mesh, deliberately: several ranked layouts share one
+    pose, so the caller voxelises once per distinct pose (`pose_voxels`).
+
+    Raises AssertionError if the number of cuboids drawn for any element does
+    not equal that element's `qty`, or if the parts that actually RASTERISED
+    into the volume do not equal the engine's count -- see the header, bug 4.
+    Counting the placement loop's trips instead made that second one
+    `product(grid) == product(grid)`, which passed on an empty picture.
+    """
+    extent = tuple(float(v) for v in extent_lbh)
+    pitch = tuple(float(v) for v in pitch_lbh)
+    inner = tuple(float(v) for v in inner_lbh)
+    grid = tuple(int(v) for v in grid)
+    el = {e.name: e for e in bom.elements}
+
+    builder = (_bar_and_rod_rows if bom.archetype == "bar_and_rod"
+               else _pocket_tray_rows)
+    # An archetype builder offers a row per element it knows how to draw; the
+    # BOM decides which of those exist. `bar_and_rod` omits the bottom
+    # separator assembly when the pose has no vertical interleave (nest depth
+    # 0: there is no depth to provide), and indexing it anyway was a KeyError
+    # the worker swallowed into `drawing_url: None` with an empty `warnings`.
+    rows = [r for r in builder(el, extent, pitch, grid, inner, cell_mm)
+            if r.is_parts or r.name in el]
+    drawn_names = {r.name for r in rows}
+    for e in bom.elements:                  # e.g. the MS Rod: label only
+        if e.name not in drawn_names:
+            rows.append(_Row(e.name, "#CBD5E1", None))
+            if (e.name not in LABEL_ONLY
+                    and e.size is not None and e.qty is not None):
+                logger.warning("insert drawing has no geometry for %r "
+                               "(size %s, qty %s)", e.name, e.size, e.qty)
+
+    # One volume for the parts, one for the dunnage: an int16 cell holds one
+    # label, and a part in a pocket has to survive the tray drawn through it.
+    top = max(inner[2], bom.build_height_mm)
+    shape = (int(np.ceil(inner[0] / cell_mm)),
+             int(np.ceil(inner[1] / cell_mm)),
+             int(np.ceil(top / cell_mm)) + 2)
+    dun, prt = (np.zeros(shape, dtype=np.int16) for _ in range(2))
+    # Two labels for the parts, alternating on (column + row + layer): a
+    # 48-part stack of one colour is a solid blue block. Touching parts (the
+    # Mubea pose interleaves in plane, and the TRW parts nest 15mm into the
+    # layer below) would also merge into one mass with no boundary between
+    # them -- the parity flips between every pair of neighbours, in plane and
+    # between layers, so each part keeps its own silhouette and the layers
+    # stay countable.
+    alt = LABEL0 + len(rows)
+    per_part = int(np.count_nonzero(voxels))    # cells one part should occupy
+    cells = 0                                   # cells the parts actually got
+    counts: dict = {}
+    inst_z: dict = {}           # per row: mid-height of every instance drawn
+    cuboids: list = []          # (volume, row, solids, voids), filled smallest-first
+    for i, row in enumerate(rows):
+        if row.is_parts:
+            ox, oy = _origins(extent, pitch, grid, inner)
+            n = 0
+            for k in range(grid[2]):
+                z0 = max(0, int(round((row.z0 + k * pitch[2]) / cell_mm)))
+                for a in range(grid[0]):
+                    for b in range(grid[1]):
+                        xa = max(0, int(round((ox + a * pitch[0]) / cell_mm)))
+                        y0 = max(0, int(round((oy + b * pitch[1]) / cell_mm)))
+                        sub = prt[xa:xa + voxels.shape[0],
+                                  y0:y0 + voxels.shape[1],
+                                  z0:z0 + voxels.shape[2]]
+                        src = voxels[:sub.shape[0], :sub.shape[1],
+                                     :sub.shape[2]]
+                        np.putmask(sub, src,
+                                   LABEL0 + i if (a + b + k) % 2 == 0 else alt)
+                        # Read back OUT OF THE VOLUME. Counting loop trips
+                        # counted the instances we tried to draw, and
+                        # `np.putmask` on a slice that fell outside the volume
+                        # writes nothing and says nothing: an all-empty
+                        # `voxels` rendered 40 parts' worth of nothing and
+                        # asserted clean.
+                        got = int(np.count_nonzero(sub[src]))
+                        cells += got
+                        n += got > 0
+            counts[None] = n
+            inst_z[i] = [row.z0 + k * pitch[2] + extent[2] / 2
+                         for k in range(grid[2])]
+            continue
+        if row.geo is None:
+            continue
+        solids, voids = row.geo()
+        counts[row.name] = len(solids)
+        inst_z[i] = [o[2] + s[2] / 2 for o, s in solids]
+        cuboids.append((sum(np.prod(sz) for _o, sz in solids), i, solids, voids))
+
+    # Smallest component first. `_fill` paints only into empty cells, so the
+    # first one to reach a cell keeps it, and at a 12mm cell the thin part is
+    # the one that loses: a 3mm separator sheet and a 117mm tray share a 120mm
+    # pitch, which is 10 cells for 11 cells of component. Filling in BOM order
+    # left the nine sheets with cells only where the tray's pockets had been
+    # cut away -- i.e. underneath the parts, where they cannot be seen -- and
+    # every count still asserted, because the counts come off the lattice and
+    # not off the pixels. Same for a layer bar lying inside the bottom
+    # separator assembly.
+    for _v, i, solids, voids in sorted(cuboids, key=lambda c: c[0]):
+        for o, sz in solids:
+            _fill(dun, o, sz, LABEL0 + i, cell_mm)
+        for o, sz in voids:                 # the tray's pockets, cut out
+            _fill(dun, o, sz, 0, cell_mm, over=True)
+        if not (dun == LABEL0 + i).any():
+            logger.warning("insert drawing: %r is in the BOM but no cell of "
+                           "it survives at a %gmm cell", rows[i].name, cell_mm)
+
+    # The check the prototype's plausible-looking picture needed: 8 centre bars
+    # where the BOM said 10 (one per layer BOUNDARY) read as fine. Every count
+    # here was produced by the lattice, not read off the BOM.
+    assert per_part > 0, "the part occupies no voxel at a %gmm cell" % cell_mm
+    assert counts.get(None) == grid[0] * grid[1] * grid[2], \
+        "rasterised %s of %d part instances into the volume" \
+        % (counts.get(None), np.prod(grid))
+    if cells != per_part * grid[0] * grid[1] * grid[2]:
+        # Every instance landed something, but not all of it: a part clipped
+        # at the edge of the volume. Not fatal for the picture; still wrong.
+        logger.warning("insert drawing: %d of %d part cells landed (%d "
+                       "instances x %d) -- parts clipped by the volume",
+                       cells, per_part * np.prod(grid), np.prod(grid),
+                       per_part)
+    assert grid[0] * grid[1] * grid[2] == count, \
+        "grid %s = %d parts, engine says %d" % (grid, np.prod(grid), count)
+    for name, n in counts.items():
+        if name is None:
+            continue
+        assert n == el[name].qty, \
+            "drew %d %r, BOM says qty %s" % (n, name, el[name].qty)
+
+    # Leaders out to a label column, poster-style. Every component now lives in
+    # the SAME stack, so anchoring each label at its own component's mid-height
+    # would pile them all at mid-box: each label points instead at one real
+    # INSTANCE of its component, picked high for the labels at the top of the
+    # column and low for the ones at the bottom.
+    labels = _labels(rows, el, extent, pitch, grid, count)
+    drawn = [i for i, r in enumerate(rows) if r.drawn]
+    anchors: list = [None] * len(rows)
+    for rank, i in enumerate(drawn):
+        zi = inst_z.get(i) or [top / 2]
+        f = 1.0 - rank / max(len(drawn) - 1, 1)
+        anchors[i] = zi[int(round(f * (len(zi) - 1)))] - inner[0] * SIN30
+    y_top = top + 140
+    y_bot = -(inner[0] + inner[1]) * SIN30 - BASE_MM - 140
+    # 0.5 of a row of headroom, so the header block cannot land on row 0.
+    step = (y_top - y_bot) / (len(labels) + 0.5)
+    lx, tx = inner[0] + 10.0, inner[0] + 150.0
+    x_lo, x_hi = -inner[1] * COS30 - 300, tx + 820
+    y_lo, y_hi = y_bot - 380, y_top
+
+    # Equal aspect, so let the figure follow the drawing.
+    fig, ax = plt.subplots(
+        figsize=(14.0, float(np.clip(14.0 * (y_hi - y_lo) / (x_hi - x_lo),
+                                     10.0, 22.0))), dpi=110)
+    palette = np.zeros((alt + 1, 4))
+    for i, row in enumerate(rows):
+        palette[LABEL0 + i] = matplotlib.colors.to_rgba(row.colour, row.alpha)
+        if row.is_parts:
+            palette[alt] = matplotlib.colors.to_rgba(PART_ALT, row.alpha)
+    _draw_asset(ax, inner, bom.build_height_mm)
+    # Parts FIRST: on a depth tie the later volume wins, and the tint belongs
+    # over the part, not the part over the tray it sits in.
+    _paint(ax, [prt, dun], lambda lab: palette[lab], cell_mm, lw=0.35)
+
+    for n, ((title, lines, basis), a) in enumerate(zip(labels, anchors)):
+        y = y_top - 0.6 * step - n * step
+        if a is not None:
+            ax.plot([lx, tx - 20], [a, y], ls=":", lw=0.9, color=C_MUTE, zorder=4)
+            ax.plot([lx], [a], marker="o", ms=2.6, color=C_MUTE, zorder=4)
+        col, txt = TAG[basis]
+        ax.text(tx, y + 0.13 * step, txt, fontsize=7.5, weight="bold",
+                color=col, va="bottom")
+        ax.text(tx, y, title.upper(), fontsize=10.5, weight="bold", va="bottom",
+                color=C_INK)
+        ax.text(tx, y - 0.07 * step, "\n".join(lines), fontsize=9, va="top",
+                color=C_MUTE, linespacing=1.55, family="DejaVu Sans Mono")
+
+    # The build height against the inner height, called out on the box itself:
+    # the drawing exists to answer "does the stack fit". The two ticks are
+    # only the headroom apart -- 22mm on the TRW box -- so they share one
+    # text block rather than overprinting each other.
+    ticks = [_proj(np.array([0.0, inner[1], z], float))
+             for z in (inner[2], bom.build_height_mm)]
+    for t in ticks:
+        ax.plot([t[0] - 90, t[0]], [t[1], t[1]], lw=1.0, color=C_INK,
+                alpha=0.6, zorder=4)
+    ax.text(ticks[0][0] - 100, (ticks[0][1] + ticks[1][1]) / 2,
+            "inner H %g mm\nbuild %g mm  %s"
+            % (inner[2], round(bom.build_height_mm, 1),
+               "FITS" if bom.fits else "DOES NOT FIT"),
+            fontsize=9, ha="right", va="center", weight="bold",
+            linespacing=1.5, family="DejaVu Sans Mono",
+            color=C_ACCENT if bom.fits else "#B91C1C")
+
+    head = ("%s  -  %s insert, %d layers assembled\n"
+            "%d parts  =  %d layers x %d per layer, grid %dx%dx%d, "
+            "pitch %g/%g/%g mm"
+            % (asset_name, bom.archetype.replace("_", "-"), grid[2], count,
+               grid[2], grid[0] * grid[1], *grid, *pitch))
+    ax.text(0.0, 1.0, head, transform=ax.transAxes, fontsize=13, weight="bold",
+            va="top", color=C_INK)
+    foot = ("build %g of %g mm inner  -  %s        nest depth %g mm "
+            "(extent H %g - pitch H %g): dunnage inside that depth is free\n%s"
+            % (round(bom.build_height_mm, 1), bom.inner_h_mm,
+               "fits" if bom.fits else "DOES NOT FIT",
+               round(bom.nest_depth_mm, 1), extent[2], pitch[2], bom.caveat))
+    ax.text(0.0, 0.0, foot, transform=ax.transAxes, fontsize=8.5, va="bottom",
+            color=C_MUTE, wrap=True, linespacing=1.6)
+
+    ax.set_aspect("equal")
+    ax.set_axis_off()
+    ax.set_xlim(x_lo, x_hi)
+    ax.set_ylim(y_lo, y_hi)             # room under the last block for the caveat
+    fig.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", facecolor="white")
+    plt.close(fig)
+    logger.info("drew %s %s: %d components, build %g of %g mm inner",
+                asset_name, bom.archetype, len(rows),
+                round(bom.build_height_mm, 1), bom.inner_h_mm)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Self-check
+# ---------------------------------------------------------------------------
+def _demo_voxels(extent, cell_mm: float, kind: str) -> np.ndarray:
+    """Stand-in occupancy for the self-check: no CAD file, no network.
+
+    The real caller passes `pose_voxels(mesh, ...)`. A box would pass the
+    count checks and tell the reviewer nothing, so this is a bent tube for the
+    bar and an annulus for the wheel -- enough shape to see the interleave and
+    to see through the tray pockets.
+    """
+    n = [max(1, int(np.ceil(e / cell_mm))) for e in extent]
+    c = [(np.arange(n[a]) + 0.5) * cell_mm for a in range(3)]
+    out = np.zeros(tuple(n), dtype=bool)
+    if kind == "bar":
+        d = min(extent[1], extent[2]) / 4.0
+        gy, gz = np.meshgrid(c[1], c[2], indexing="ij")
+        for i, x in enumerate(c[0]):
+            t = x / extent[0]
+            cy = d / 2 + (extent[1] - d) * (1 - np.cos(2 * np.pi * t)) / 2
+            cz = d / 2 + (extent[2] - d) * (1 - np.cos(4 * np.pi * t)) / 2
+            out[i] = (gy - cy) ** 2 + (gz - cz) ** 2 <= (d / 2) ** 2
+        return out
+    # A wheel is a DISH: rim low, spokes lower, hub boss standing proud -- an
+    # extruded ring is 135mm of solid wall and eight of them stack into one
+    # unbroken column, which is exactly the thing the drawing has to show is
+    # not happening.
+    r = min(extent[0], extent[1]) / 2.0
+    gx, gy = np.meshgrid(c[0] - extent[0] / 2, c[1] - extent[1] / 2, indexing="ij")
+    rad = np.hypot(gx, gy)
+    zt = ((np.arange(n[2]) + 0.5) / n[2])[None, None, :]
+    rim = ((rad <= r) & (rad >= 0.68 * r))[:, :, None]
+    spoke = ((rad < 0.72 * r) & ((np.abs(gy) < 0.10 * r)
+                                 | (np.abs(gx) < 0.10 * r)))[:, :, None]
+    hub = (rad <= 0.26 * r)[:, :, None]
+    out |= (rim & (zt < 0.42)) | (spoke & (zt < 0.20)) | hub
+    return out
+
+
+def _check_pose_voxels() -> None:
+    """Rotation only, then reseat -- the semantics Phase 3 inserts depend on."""
+    box = trimesh.creation.box(extents=(120.0, 60.0, 24.0))
+    flat = pose_voxels(box, np.eye(3), cell_mm=12.0)
+    # Surface voxels round outward (nesting.occupancy), so the 120mm and 24mm
+    # edges take one cell more than the exact division -- the pitch it measures
+    # errs generous, which is safe.
+    assert flat.shape == (11, 5, 3), flat.shape
+    # +90 deg about x: the 24mm axis goes to y, the 60mm axis goes up.
+    rx = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], float)
+    turned = pose_voxels(box, rx, cell_mm=12.0)
+    assert turned.shape == (flat.shape[0], flat.shape[2], flat.shape[1]), \
+        turned.shape
+    # Reseated, not re-centred: occupancy touches index 0 on every axis.
+    for ax in range(3):
+        assert turned.any(axis=tuple(a for a in range(3) if a != ax))[0], \
+            "axis %d is not seated at the origin" % ax
+    print("PASS  pose_voxels rotates and reseats: %s -> %s"
+          % (flat.shape, turned.shape))
+
+
+def _check_translucent() -> None:
+    """The parts must survive the dunnage drawn through them, and the far->near
+    ordering must stay GLOBAL across both volumes.
+
+    This is the trap the ticket calls the expensive one: one labelled volume
+    means a later `_fill` overwrites the part it is meant to hold, and painting
+    the volumes one after the other puts every dunnage face in front of every
+    part face regardless of depth, which is the bug at the top of this file.
+    """
+    prt, dun = (np.zeros((4, 4, 4), dtype=np.int16) for _ in range(2))
+    prt[1:3, 1:3, 1:3] = LABEL0          # a part
+    dun[:, :, :] = LABEL0 + 1            # dunnage drawn straight through it
+
+    ga, gb = _exposed(prt, 12.0), _exposed(dun, 12.0)
+    assert len(ga[0]) == 12 and len(gb[0]) == 48, (len(ga[0]), len(gb[0]))
+    d = np.concatenate([ga[1], gb[1]])
+    src = np.concatenate([np.zeros(len(ga[1]), int), np.ones(len(gb[1]), int)])
+    order = np.argsort(d, kind="stable")
+    assert (np.diff(d[order]) >= 0).all(), "not sorted far->near"
+    assert (np.diff(src[order]) != 0).sum() > 2, \
+        "the volumes paint as two blocks, not as one ordering"
+
+    fig, ax = plt.subplots()
+    pal = np.zeros((LABEL0 + 2, 4))
+    pal[LABEL0] = matplotlib.colors.to_rgba(C_PART, 1.0)
+    pal[LABEL0 + 1] = matplotlib.colors.to_rgba("#38BDF8", A_TRAY)
+    n = _paint(ax, [prt, dun], lambda lab: pal[lab], 12.0)
+    fc = ax.collections[0].get_facecolor()
+    plt.close(fig)
+    assert n == 12 + 48, n
+    assert (fc[:, 3] == 1.0).sum() == 12, "the part lost its opacity"
+    assert (fc[:, 3] == A_TRAY).sum() == 48, "the dunnage lost its alpha"
+    print("PASS  parts survive dunnage painted through them: %d quads, "
+          "one ordering, alphas %s"
+          % (n, sorted(set(np.round(fc[:, 3], 2)))))
+
+
+def _check_count_bites(case) -> None:
+    """Non-vacuity: the drawn-vs-BOM count check must be able to FAIL.
+
+    It only can because the drawn counts come off the lattice and the expected
+    counts off the BOM. Bump one qty and the render must refuse.
+    """
+    import dataclasses
+
+    ref, asset, extent, pitch, grid, inner, count, kind = case
+    bom = dunnage.bom(extent, pitch, grid, inner)
+    name = bom.elements[1].name
+    tampered = dataclasses.replace(bom, elements=[
+        dataclasses.replace(e, qty=e.qty + 2) if e.name == name else e
+        for e in bom.elements])
+    try:
+        explode_png(voxels=_demo_voxels(extent, CELL_MM, kind),
+                    extent_lbh=extent, pitch_lbh=pitch, grid=grid,
+                    inner_lbh=inner, bom=tampered, asset_name=asset,
+                    count=count)
+    except AssertionError as exc:
+        print("PASS  count check bites: %s" % exc)
+        return
+    raise AssertionError("qty %r + 2 still rendered: the count check is "
+                        "decoration" % name)
+
+
+def _check_parts_bite(case) -> None:
+    """Non-vacuity: the drawn-PARTS check must be able to FAIL.
+
+    It could not while it counted loop trips -- `counts[None] = n` made the
+    assertion `product(grid) == product(grid)`. Both cases below rendered a
+    clean 0.6MB picture of an empty box and asserted 40 parts drawn.
+    """
+    ref, asset, extent, pitch, grid, inner, count, _kind = case
+    bom = dunnage.bom(extent, pitch, grid, inner)
+    n = [max(1, int(np.ceil(e / CELL_MM))) for e in extent]
+    empty = np.zeros(tuple(n), dtype=bool)
+    # Occupied only where the volume cannot reach: `np.putmask` on a slice
+    # that fell outside the volume writes nothing and raises nothing.
+    beyond = np.zeros((n[0] * 3, n[1], n[2]), dtype=bool)
+    beyond[n[0] * 2:] = True
+    for what, vox in (("no occupied voxel", empty),
+                      ("occupancy outside the volume", beyond)):
+        try:
+            explode_png(voxels=vox, extent_lbh=extent, pitch_lbh=pitch,
+                        grid=grid, inner_lbh=inner, bom=bom,
+                        asset_name=asset, count=count)
+        except AssertionError as exc:
+            print("PASS  parts check bites (%s): %s" % (what, exc))
+            continue
+        raise AssertionError("%s still rendered %d parts: the parts check is "
+                             "decoration" % (what, count))
+
+
+def _check_bar_width_follows_bom(case) -> None:
+    """The drawn bar width must come off the BOM element, not a constant.
+
+    `dunnage.bom(..., centre_bar_w_mm=120)` labelled the bar "750x120x66" and
+    drew 60: two expressions for one number, hard rule 9.
+    """
+    import dataclasses
+
+    _ref, _asset, extent, pitch, grid, inner, _count, _kind = case
+    got = []
+    for w in (dunnage.CENTRE_BAR_W_MM, 120.0):
+        bom = dunnage.bom(extent, pitch, grid, inner, centre_bar_w_mm=w)
+        el = {e.name: e for e in bom.elements}
+        rows = _bar_and_rod_rows(el, extent, pitch, grid, inner, CELL_MM)
+        row = next(r for r in rows if r.name == "Top Center Bar")
+        solids, _voids = row.geo()
+        drawn = {sz[0] for _o, sz in solids}
+        assert drawn == {w}, "BOM says width %g, drawing draws %s" % (w, drawn)
+        got.append((el["Top Center Bar"].size, drawn.pop()))
+    assert got[0][1] != got[1][1], got
+    # And with no width in the BOM at all, the DRAW-ONLY fallback stands in.
+    bom = dunnage.bom(extent, pitch, grid, inner)
+    el = {e.name: e for e in bom.elements}
+    e = el["Top Center Bar"]
+    el["Top Center Bar"] = dataclasses.replace(
+        e, dims_mm=(e.dims_mm[0], None, e.dims_mm[2]))
+    rows = _bar_and_rod_rows(el, extent, pitch, grid, inner, CELL_MM)
+    solids, _v = next(r for r in rows if r.name == "Top Center Bar").geo()
+    assert {sz[0] for _o, sz in solids} == {W_CENTRE_BAR}, solids[0]
+    print("PASS  bar width follows the BOM: %s -> %g mm, %s -> %g mm, "
+          "no width -> fallback %g mm"
+          % (got[0][0], got[0][1], got[1][0], got[1][1], W_CENTRE_BAR))
+
+
+def _check_undrawn_warns(case, catch) -> None:
+    """The label-only exemption must stay NARROW: a NEW element the drawing
+    has no geometry for still has to warn.
+
+    `LABEL_ONLY` is a declaration, not an off switch -- the whole reason the
+    suite's warning-as-error probe is worth keeping.
+    """
+    import dataclasses
+
+    _ref, asset, extent, pitch, grid, inner, count, kind = case
+    bom = dunnage.bom(extent, pitch, grid, inner)
+    added = dunnage.Element(name="Corner Angle", labels=("L", "B", "H"),
+                            dims_mm=(750.0, 40.0, 40.0), qty=4,
+                            spec="EVA 150 kg/cu m", basis="pattern")
+    before = len(catch.msgs)
+    explode_png(voxels=_demo_voxels(extent, CELL_MM, kind), extent_lbh=extent,
+                pitch_lbh=pitch, grid=grid, inner_lbh=inner,
+                bom=dataclasses.replace(bom, elements=bom.elements + [added]),
+                asset_name=asset, count=count)
+    new = catch.msgs[before:]
+    del catch.msgs[before:]                 # expected here, an error anywhere else
+    assert any("Corner Angle" in m for m in new), \
+        "an undrawn element with a size and a qty went unreported: %s" % new
+    assert not any("MS Rod" in m for m in new), new
+    print("PASS  undrawn element still warns: %s" % new[0])
+
+
+def _selfcheck(outdir) -> int:
+    import sys
+    import time
+    from pathlib import Path
+    from PIL import Image
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from app.nesting import lattice_count
+    from tests.ground_truth import CASES
+
+    _check_pose_voxels()
+    _check_translucent()
+
+    # The two shipped ground-truth lattices, plus the real-CAD bar lattice the
+    # ticket quotes (it lives in tests/test_dunnage.py, not ground_truth.py).
+    cases = []
+    for c in CASES:
+        count, grid, _lim = lattice_count(c.pose_lbh, c.pitch_lbh,
+                                          c.asset.inner, c.part_kg,
+                                          c.asset.max_weight_kg)
+        cases.append((c.ref, c.asset.name, c.pose_lbh, c.pitch_lbh, grid,
+                      c.asset.inner, count,
+                      "bar" if c is CASES[0] else "wheel"))
+    # The real-CAD bar lattice, straight off `tests/test_clearance.py` (which
+    # asserts it against the customer IGES with shipped defaults): the YXA bar
+    # measures 1092x300x148 and nests at pitch (1097, 145, 68) to grid
+    # (1, 4, 10) = 40 in PLS12801. The old 73 / (1,4,9) / 36 here were the
+    # single-clearance numbers this module's docstring calls wrong -- 5mm of
+    # air charged BETWEEN layers as well as beside neighbours.
+    real_bar = ("real-CAD bar", "PLS12801", (1092.0, 300.0, 148.0),
+                (1097.0, 145.0, 68.0), (1, 4, 10), (1150, 750, 790), 40, "bar")
+    # Retyped numbers go stale silently: this fixture sat at pitch 73 / grid
+    # (1,4,9) / 36 for a whole phase. `test_clearance` owns the count and the
+    # grid, so take them from it (import only, no CAD read).
+    from tests.test_clearance import CASES as CAD_CASES
+    _t, _g = next((c[3], c[4]) for c in CAD_CASES if c[2].name == "PLS12801")
+    assert (real_bar[4], real_bar[6]) == (_g, _t), \
+        "real-CAD fixture %s/%s vs test_clearance %s/%s" % (
+            real_bar[4], real_bar[6], _g, _t)
+    cases.append(real_bar)
+    # No vertical interleave -> `dunnage` emits no bottom separator assembly
+    # (correctly: there is no nest depth to provide), and the drawing used to
+    # index it unconditionally. The worker swallowed the KeyError into
+    # `drawing_url: None` with nothing in `warnings`.
+    cases.append(("no vertical nest", "PLS1280", (200.0, 100.0, 60.0),
+                  (100.0, 100.0, 60.0), (1, 7, 16), (1150, 750, 1000), 112,
+                  "bar"))
+
+    # A component the BOM lists and the picture does not contain is the
+    # failure the count assertions cannot see: they count cuboids, not cells.
+    # `explode_png` warns; here that warning is an error.
+    class _Catch(logging.Handler):
+        msgs: list = []
+
+        def emit(self, record):
+            self.msgs.append(record.getMessage())
+
+    catch = _Catch(level=logging.WARNING)
+    logger.addHandler(catch)
+
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    for ref, asset, extent, pitch, grid, inner, count, kind in cases:
+        bom = dunnage.bom(extent, pitch, grid, inner)
+        t0 = time.perf_counter()
+        png = explode_png(voxels=_demo_voxels(extent, CELL_MM, kind),
+                          extent_lbh=extent, pitch_lbh=pitch, grid=grid,
+                          inner_lbh=inner, bom=bom, asset_name=asset,
+                          count=count)
+        dt = time.perf_counter() - t0
+        img = Image.open(BytesIO(png))
+        assert img.format == "PNG", img.format
+        assert img.width > 400 and img.height > 400, img.size
+        # It runs in the Celery worker on every solve, once per ranked layout.
+        assert dt < 6.0, "render took %.1fs" % dt
+        path = outdir / ("explode_%s_%s.png"
+                         % (bom.archetype, ref.replace("/", "_").replace(" ", "_")))
+        path.write_bytes(png)
+        print("PASS  %-14s %-9s %s  %d parts, grid %s  ->  %s (%dx%d, "
+              "%.2f MB, %.2fs)"
+              % (bom.archetype, asset, ref, count, grid, path,
+                 img.width, img.height, len(png) / 1e6, dt))
+        for e in bom.elements:
+            print("        %-46s qty %-5s %s"
+                  % (e.name, e.qty,
+                     LABEL_ONLY.get(e.name, "drawn").replace("not drawn: ",
+                                                             "label only: ")))
+    assert not catch.msgs, catch.msgs
+    print("PASS  every drawn component survives into the picture at %gmm cells"
+          " (label-only by declaration: %s)"
+          % (CELL_MM, ", ".join(sorted(LABEL_ONLY))))
+    _check_count_bites(cases[0])
+    _check_parts_bite(cases[0])
+    _check_bar_width_follows_bom(cases[0])
+    _check_undrawn_warns(cases[0], catch)
+    assert not catch.msgs, catch.msgs
+    logger.removeHandler(catch)
+    print("all insert-drawing checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    default = ("/private/tmp/claude-501/-Users-rahulsharma-PycharmProjects-"
+               "part-intake/5b80b885-b5f3-4ba1-931f-aca6e335e404/scratchpad")
+    raise SystemExit(_selfcheck(sys.argv[1] if len(sys.argv) > 1 else default))

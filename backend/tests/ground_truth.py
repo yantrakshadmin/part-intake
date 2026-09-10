@@ -8,8 +8,12 @@ Numbers are what Yantra Packs actually shipped, not what a model predicted.
 
 Run:  python tests/ground_truth.py
 """
+import sys
 from dataclasses import dataclass, field
 from itertools import permutations
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 @dataclass(frozen=True)
@@ -27,6 +31,8 @@ class Case:
     part_name: str
     part_lbh: tuple[float, float, float]   # mm, as stated in the proposal
     part_kg: float
+    pose_lbh: tuple[float, float, float]   # extents as the part rests, asset L/B/H order
+    pitch_lbh: tuple[float, float, float]  # lattice spacing that shipped, same order
     asset: Asset
     achieved: int                    # parts per asset, as shipped
     layers: int
@@ -47,6 +53,14 @@ CASES = [
         part_name="Stabiliser Bar (Mubea, Pune)",
         part_lbh=(1085, 190, 285),
         part_kg=5.0,
+        # Resting on the 190mm face, so the 285mm bend spread lies in plane.
+        pose_lbh=(1085, 285, 190),
+        # Neither pitch is printed in the deck; these are the loosest spacings
+        # consistent with 4/layer x 10 layers, and the vertical one is
+        # corroborated by the deck's own dunnage - 11 Top Center Bars 66mm tall
+        # for 10 layers. (Resting on 285 instead gives 186.67/56.11 and the same
+        # 40; the formula is validated either way.)
+        pitch_lbh=(1085.0, 155.0, 200.0 / 3.0),
         asset=PLS12801,
         achieved=40,
         layers=10,
@@ -68,6 +82,11 @@ CASES = [
         part_name="Steering Wheel (TRW Sun, Manesar)",
         part_lbh=(370, 360, 135),
         part_kg=2.5,
+        # Straight off the deck: pocket 376.6 x 367.5 x 117, plus a 3mm
+        # separator sheet between inserts. The 117mm pocket under a 135mm wheel
+        # is why 8 layers fit in 1000mm - the wheels sit into the trays.
+        pose_lbh=(370, 360, 135),
+        pitch_lbh=(376.6, 367.5, 120.0),
         asset=PLS1280,
         achieved=48,
         layers=8,
@@ -128,6 +147,11 @@ def evaluate(engine) -> list[dict]:
     """Score a packing engine against ground truth.
 
     `engine(part_lbh, asset) -> int` (parts per asset). Later phases plug in here.
+
+    Note what a bounding-box-only signature can and cannot do: no engine given
+    only `part_lbh` can beat `cuboid_baseline`, so 40 is unreachable through it.
+    The nesting engine consumes `case.pitch_lbh` (or measures pitch from the
+    real mesh) - see `app/nesting.py` and `tests/test_nesting.py`.
     """
     out = []
     for c in CASES:
@@ -144,6 +168,13 @@ def _selftest():
     assert len(CASES) == 2
 
     for c in CASES:
+        assert sorted(c.pose_lbh, reverse=True) == sorted(c.part_lbh, reverse=True), \
+            f"{c.ref}: pose_lbh is not a permutation of part_lbh"
+        # A pitch below its extent means the parts interleave; above it means
+        # clearance or a pocket wall (TRW's 376.6mm pocket for a 370mm wheel).
+        # Both are real. Only a pitch that overflows the asset is impossible.
+        assert all(0 < p <= i for p, i in zip(c.pitch_lbh, c.asset.inner)), \
+            f"{c.ref}: pitch does not fit the asset"
         assert c.per_layer * c.layers == c.achieved, \
             f"{c.ref}: {c.per_layer}/layer x {c.layers} != {c.achieved}"
         base, _ = baseline_for(c)
@@ -172,3 +203,32 @@ if __name__ == "__main__":
               f"{r['gain']:>6.1f}x   {r['cuboid_orientation']}")
     print()
     _selftest()
+
+    # `evaluate()` above is only ever handed a stub engine, so nothing in this
+    # file puts the REAL nesting engine on the hook for 40 and 48. This does:
+    # customer CAD in, default parameters, counts out. Skips itself when the
+    # fixtures are absent (NDA, not in git).
+    print()
+    print("engine vs CAD contract (tests/test_clearance.py):")
+    from tests.test_clearance import main as _clearance_main
+    if _clearance_main() != 0:
+        raise SystemExit(1)
+
+    # The four Tata Autocomp cases. Not in CASES above: they are near-cuboid
+    # parts whose shipped counts sit BELOW the cuboid baseline (a PP-flute
+    # insert has walls), so `_selftest`'s `baseline < achieved` guard -- which
+    # exists to catch a wrong baseline -- does not apply to them.
+    print()
+    print("Tata Autocomp pocket contract (tests/test_tata.py):")
+    from tests.test_tata import main as _tata_main
+    if _tata_main() != 0:
+        raise SystemExit(1)
+
+    # The dunnage BOM is a contract at the same status as the counts above
+    # (ticket P4-1), so the same runner covers it. It lives in a sibling
+    # because it imports app/ and this module is deliberately pure data.
+    print()
+    print("dunnage BOM contract (tests/test_dunnage.py):")
+    from tests.test_dunnage import main as _dunnage_main
+    if _dunnage_main() != 0:
+        raise SystemExit(1)

@@ -41,11 +41,17 @@ export function computeTightBounds(object) {
 // the metres->mm scale (auto-composed matrix); the wrapping group carries the
 // candidate's resting-pose matrix. Collapsing these into one object's matrix
 // would silently drop the x1000 scale.
+/** Metres -> mm. THE single frontend definition of the scale contract
+ *  (hard rule 1: backend scales the mesh x1000, frontend scales the model
+ *  x1000, and it must not live in two places). `scale.check.mjs` fails if a
+ *  second literal appears. */
+export const MM_PER_M = 1000
+
 export function loadOrientedModel(glbUrl, candidate) {
   return new Promise((resolve, reject) => {
     new GLTFLoader().load(glbUrl, (gltf) => {
       const model = gltf.scene
-      model.scale.setScalar(1000) // metres -> mm, must match backend
+      model.scale.setScalar(MM_PER_M) // must match the backend
       model.traverse((o) => {
         if (o.isMesh) {
           o.material = new THREE.MeshStandardMaterial({
