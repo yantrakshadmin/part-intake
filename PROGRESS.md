@@ -1500,6 +1500,106 @@ Left alone deliberately: `declared_unit` is not a field on `ExtractionResult`.
 Adding it would pull `schemas.py` and the frontend in under hard rule 9 to
 carry information the warning already delivers.
 
+### G-POSE: a UI constant gating the engine, and a ranking key nobody checked
+
+`max_candidates=4` costs **zero parts on all six cases we can compute.** That
+is the answer, and it is the negative result the ticket explicitly welcomed.
+
+`generate_orientation_candidates` builds six resting poses, dedups them, sorts
+by **footprint area**, and truncates to 4. The near-duplicate flip of each pose
+survives dedup (its CG sits at a different height), so on five of six cases the
+four slots hold only **two** distinct footprints and the third — always the
+tallest, smallest-area one — never reaches the nester.
+
+| case | gen | searched | footprint cut | cap 4 | no cap |
+|---|---|---|---|---|---|
+| Mubea bar / PLS12801 | 6 | 4 | (298, 143) — worth **0**, h 1092 > 790 inner | **40** | **40** |
+| TRW wheel / PLS1280 | 6 | 4 | (354, 138) — worth 36 | **48** | **48** |
+| Tata X104 / PLS12801 | 6 | 4 | (128, 90) — worth 56 | **64** | **64** |
+| Tata Nexon EV / PLS12804 | 6 | 4 | (245, 122) — worth **0**, h 711 > 580 | **18** | **18** |
+| Tata P118 / PLS12804 | 6 | 4 | (457, 99) — worth **0**, h 681 > 580 | **12** | **12** |
+| Tata P125/P126 / PLS12801 | **4** | 4 | none — dedup merged a flip pair | **64** | **64** |
+
+Replayed across the whole 17-asset seeded catalogue plus the synthesised custom
+box, because the poses feed `rank_catalogue` and `synthesis.synthesise` for
+every asset and the per-asset table above is not sufficient on its own:
+**65/65, 48/48, 80/80, 36/36, 22/22, 80/80.** No difference anywhere.
+
+**The premise was right, the feared consequence does not occur.** Three of the
+five cut poses cannot fit any asset at all (height exceeds inner height), so
+their loss is provably nil. The other two are real but inferior. The narrowest
+margin is X104, where the cut pose reaches **56 — better than the 55 from a
+pose the cap keeps.** The cap is already discarding a strictly better pose than
+one it searches; it just is not discarding the best one. On P118 catalogue-wide
+the cut pose **ties** the winner at 22.
+
+**Footprint area is the wrong key, and it mis-ranks two real files.** Not a
+theoretical objection:
+
+- **Nexon EV radiator** — pose 0, the largest footprint (711x245, area 174,459)
+  reaches 16. Pose 2 (711x122, *half* the area) reaches **18**. The shipped
+  answer of 18 comes from rank 2, not rank 0.
+- **P118 radiator** catalogue-wide — pose 0 (area 311,391) reaches 20; poses 2
+  and 4 (areas 67,565 and 45,382) reach **22**.
+
+The mechanism: count is `prod floor((inner - extent)/pitch) + 1`, and area sees
+no pitch at all — so the key is blind to the vertical interleave that produces
+the entire Mubea gap. On the headline case the bar's pose 0 has **2.09x** the
+footprint area of pose 2 but only **1.11x** the count (40 vs 36), because pose
+2's interleave of 0.474 buys back nearly the whole area deficit. Area happens
+to be right on 4 of 6, and that coincidence is what kept the cap invisible.
+
+Worse than the key: **whether the cap bites at all depends on a 0.5mm CG
+tolerance in dedup.** A near-symmetric part (P125) collapses its flip twins and
+gets all three footprints searched; an asymmetric one keeps both twins and gets
+two. That is an accidental, part-dependent search space.
+
+**Recommended fix, not made:** not "lift the cap" — lifting it adds a full
+voxelisation per extra pose, measured at +6s on the bar but **+56s on the Nexon
+and +183s on the P118**, which already runs 564s. Instead **drop the flip twins
+before measuring and give the engine every remaining pose.** Twins are
+identifiable for free from `(axis, flip)` without touching the mesh, and across
+all six cases no twin pair ever produced a different count (they differ only by
+a voxel of quantisation noise — bar pitch 69 vs 73). Three real poses instead
+of four slots: a *fuller* search that is also ~25% *cheaper*. Keep
+`max_candidates=4` on the UI list where it belongs; stop letting one constant
+serve both.
+
+That needs a failing test first, and the honest one is not in the repo — both
+in-repo fixtures win on pose 0, which is exactly why `--cap 1` does **not**
+fail. It needs the Nexon, or a synthetic part whose best pose ranks third by
+area.
+
+**One correction to the audit's own advice.** It notes that poses which cannot
+fit any asset still cost a full voxelisation (the bar's poses 4 and 5 are 6s of
+its 18s; the equivalent on P118 is ~183s) and calls a height-vs-tallest-inner
+reject "free". It is not free as described. `synthesis.synthesise` is called
+**per pose** and carries its own bound (`extent[2] > max_inner_height_mm`,
+`synthesis.py:127`), which can exceed any catalogue asset — so a reject gated on
+the catalogue alone would silently delete the tall poses synthesis is entitled
+to build a box around. The bound has to be
+`max(tallest catalogue inner, max_inner_height_mm)`. Cheap, still worth doing,
+but not the one-liner it looks like.
+
+**The check:** `backend/tests/test_pose_search.py` — measures every generated
+pose on both in-repo fixtures and asserts the cap-4 answer equals the no-cap
+answer, for the ground-truth asset and across the full catalogue. It also
+asserts the shipped candidate list really is the area-sorted prefix (otherwise
+the comparison measures the wrong thing) and that some case actually truncated,
+so the equalities cannot pass vacuously. It reads the cap out of the function
+signature with `inspect`, so it follows the shipped value instead of testing a
+stale copy. Tata numbers are recorded in the docstring, not run — those files
+are not fixtures and cost ~14 minutes.
+
+Verified by me, not taken on report: `ground_truth.py` still EXIT=0 at **40 in
+PLS12801 (1,4,10)** and **48 in PLS1280 (3,2,8)**; the test passes at exit 0;
+and `--reverse` (worst-area-first, fault injection) fails at exit 1 with
+`max_candidates=4 gives 36 in PLS12801 but searching all 6 poses gives 40 --
+the cap is now costing 4 parts`. Not wired into the `ground_truth.py` sweep —
+that is the mandatory regression path and this was an audit. One import line
+and ~30s if we want it enforced.
+
+
 ## Open
 
 | Item | Owner | Blocks |
@@ -1521,7 +1621,7 @@ carry information the warning already delivers.
 | **The lattice is only collision-checked along single axes** | geometry / packaging engineers | **Measured (R3), deliberately not enforced.** Real defect, proved by pigeonhole on a synthetic 2-cell diagonal part (engine says 9 in a 16-cell region; honest answer 6). But **not reachable on any customer part we hold**: the wheel is structurally immune (interleaves on 1 axis), and the bar's single offending vector is voxel slop — cell count flat, volume collapsing ~8x per halving to 10 mm3. Enforcing it would cost the bar 8 of its 40. Blocked on `DOMAIN.md` and a calibrated occupancy model, then a **tolerance** (~1%), never a predicate. Diagnostic: `tests/test_lattice_vectors.py`. |
 | ~~**Dunnage charges bars height they do not occupy**~~ | — | **Done** — R2. My first diagnosis had two details wrong: it is not "three element groups each claiming their full width", it is the centre bar and side bars being **coplanar** at one layer boundary while `bom()` sums their heights; and the real-CAD bar's nest depth is 80mm, not 218. The two candidate formulas reduce to the same expression, so the fix charges the bar once rather than changing the arithmetic. Mubea unchanged at 790.0/790. |
 | **No in-plane budget check at all.** `lattice_count` charges zero wall clearance, then the BOM emits two 35mm side panels: 1085 + 70 = 1155 in an inner L of 1150, and `Bom.fits` reports True because it only budgets H. | packaging engineers | Nothing yet — the shipped deck has the same tension, so this is probably the DOMAIN.md wall-clearance datum rather than a bug. But nothing detects or reports it, and the drawing paints only into empty cells so the picture hides it too. |
-| **`max_candidates=4` now gates the engine's search.** Six resting poses are generated, sorted by footprint area, truncated to 4 — and near-duplicate poses eat the slots (the bar's flips survive dedup as separate entries), so only 2 distinct footprints reach the nester. A Phase-1 UI constant, with a ranking key that predates the nester. | geometry | Unproven — no case found where it loses parts. Worth auditing before trusting a close ranking. |
+| ~~**`max_candidates=4` now gates the engine's search.**~~ | — | **Done** — G-POSE. Audited on all six computable cases: the cap costs **zero parts** (40/40, 48/48, 64/64, 18/18, 12/12, 64/64, and identical catalogue-wide). The premise held — 4 slots, 2 distinct footprints — but every cut pose is either unfittable or inferior. The real finding is that **footprint area mis-ranks poses on two live files** (Nexon 16 vs 18, P118 20 vs 22): area cannot see the interleave. `tests/test_pose_search.py` pins it. |
 | ~~**IGES units rest on an untested docstring**~~ | — | **Done** — G-UNIT. The claim was true: OCC converts on read, measured 1.0mm vs 25.4mm on cubes that are 1x1x1 in their own file units. So no geometry was ever wrong; the reporting was. Unit now read from the reader's global section, non-mm warns in both formats, and the cascade-unit static is pinned at both readers rather than assumed. No real fixture dimension moved. |
 | **Clearance baked into the pitch can flip the dunnage archetype.** `archetype_of` tests `pitch < extent`, but the pitch already carries the 5mm in-plane clearance, so a part with a genuine 3mm interleave reports `pitch = extent + 2` and gets `pocket_tray` — the wrong dunnage system from the wrong generator. | geometry | Unproven; no real fixture exhibits it. |
 | **Exploded-drawing leader angles** — the dotted leaders run from an evenly-spread label column back to component mid-heights, so several cross the drawing at a shallow angle and read as pointing at the wrong component. User: "pointing in the exploded view is not at the right angle, we'll work on that but for now this will do." | PM | Nothing — cosmetic. Fix is the leader routing in `insert_drawing._labels`, not the geometry. |
@@ -1562,9 +1662,14 @@ carry information the warning already delivers.
    and it is one conversation with the packaging engineers.
 10. **Get a STEP export for the Bharat Forge suspension arm** — the only
     shared case we cannot compute at all.
-11. **Audit `max_candidates=4`** — six poses generated, truncated to 4, and
-    near-duplicates eat the slots so only 2 distinct footprints reach the
-    nester. No case found where it loses parts; measurement, not a fix.
+11. ~~**Audit `max_candidates=4`**~~ — **done**, G-POSE: costs zero parts
+    on all six computable cases. What it turned up instead: **footprint
+    area is the wrong ranking key** — it mis-ranks the Nexon (16 vs 18) and
+    the P118 (20 vs 22), because area cannot see the vertical interleave.
+    Fix is to drop the flip twins rather than lift the cap (a *fuller*
+    search, ~25% *cheaper*), but it needs a failing test first and neither
+    in-repo fixture can provide one — both win on pose 0. Needs the Nexon
+    as a fixture, or a synthetic part whose best pose ranks third by area.
 12. **Phase 3** — catalogue cleanup (7 defects, remaining 32 of 49 assets),
     then the pallet tier. Still blocked on pallet dims: `Can Be Palletized` is
     1 for 7 of 49 rows and pallet L/B/H read 0 for all 49.
