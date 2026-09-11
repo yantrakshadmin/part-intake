@@ -12,8 +12,10 @@ fitting analysis.
 ## The one fact that drives everything
 
 Real proposals: a Mubea stabiliser bar fits **40** per PLS12801. The best cuboid
-answer over all six orientations is **8**. A tool that treats parts as boxes is
-wrong by 32 parts per shipment.
+answer over all six orientations is **8** on the deck's nominal 1085×190×285
+(what `ground_truth.py` tests) and **10** on the CAD-measured resting extent
+1092×298×143 (what the app's `cuboid_count` field shows). A tool that treats
+parts as boxes is wrong by 30–32 parts per shipment.
 
 Baselines use the *best* orientation, never a fixed one — fixing the orientation
 flatters the nesting engine. `backend/tests/ground_truth.py` is the contract.

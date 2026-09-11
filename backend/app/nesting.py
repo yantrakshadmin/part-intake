@@ -28,7 +28,7 @@ Measured on the real YXA stabiliser bar (1092 x 298 x 143): width pitch 140mm
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import trimesh
@@ -94,6 +94,22 @@ class Layout:
     # `dunnage.bom(...).as_dict()`. Stamped by `engine.solve`, which is where
     # the asset's inner dims are known. None until then.
     dunnage: dict | None = None
+    # The raster's quantisation band. Surface voxels round the part OUTWARD
+    # (up to a voxel per end on the extent, up to one on the touching pitch),
+    # so `count` is the floor of what the geometry allows and this is an
+    # estimate of its ceiling: `lattice_count` at one voxel less on every
+    # extent and pitch. Not a proven bound -- the extent can be over by two
+    # -- but measured on the YXA bar it lands: 40 at 4mm with a ceiling of
+    # 44, and 3mm and 2mm rasters both return 44 outright. Equal to `count`
+    # when the pose carries no voxel size (bare-number poses).
+    count_upper: int = 0
+    # `engine.cuboid_count` for this SAME asset -- the ground-truth baseline
+    # (CLAUDE.md), stamped by `engine.solve` where the asset's inner and the
+    # part's weight are both known. 0 until then.
+    cuboid_count: int = 0
+    # `app.reasons.reasons_for(...)`, composed in the worker once clearance,
+    # poses_searched and warnings are all in scope. Empty until then.
+    reasons: list[str] = field(default_factory=list)
 
     @property
     def interleave(self) -> tuple:
@@ -275,6 +291,13 @@ class Pose:
     # (None, None) when the pose came from bare numbers -- synthesis does that
     # -- so a missing silhouette is null, never a fabricated rectangle.
     silhouettes: tuple = (None, None)
+    # Voxel edge the extent and pitch were measured at; 0.0 for bare-number
+    # poses. `layouts_for` turns it into `Layout.count_upper`.
+    voxel_mm: float = 0.0
+    # Clearance `measure_poses` baked into `pitch`, (x, y, z). Zeros for
+    # bare-number poses (a deck's pitch is taken as given). The dunnage
+    # archetype needs it back out -- see `dunnage.archetype_of`.
+    clearance: tuple = (0.0, 0.0, 0.0)
 
     def footprint_orders(self):
         """The two 90-degree in-plane assignments, per the §4 angle ladder.
@@ -287,13 +310,14 @@ class Pose:
         size against the extent it is yielded with, which is what catches it.
 
         Height (index 2) is fixed by the resting pose.
-        Yields (extent, pitch, silhouette | None).
+        Yields (extent, pitch, silhouette | None, clearance).
         """
         for which, order in enumerate(((0, 1, 2), (1, 0, 2))):
             yield (tuple(self.extent[i] for i in order),
                    tuple(self.pitch[i] for i in order),
                    self.silhouettes[which] if which < len(self.silhouettes)
-                   else None)
+                   else None,
+                   tuple(self.clearance[i] for i in order))
 
 
 def measure_poses(mesh: trimesh.Trimesh, candidates,
@@ -330,6 +354,8 @@ def measure_poses(mesh: trimesh.Trimesh, candidates,
             # Upgrade path when it matters: ship a pose table keyed by label and
             # have layouts reference it.
             silhouettes=plan_silhouettes(grid.any(axis=2), voxel_mm),
+            voxel_mm=voxel_mm,
+            clearance=(clearance_mm, clearance_mm, stack_clearance_mm),
         ))
         logger.debug("pose %r extent=%s pitch=%s", cand.label,
                      poses[-1].extent, poses[-1].pitch)
@@ -337,19 +363,38 @@ def measure_poses(mesh: trimesh.Trimesh, candidates,
 
 
 def layouts_for(poses, asset, part_kg: float = 0.0) -> list:
-    """Score already-measured poses against one asset. Best first."""
+    """Score already-measured poses against one asset. Best first.
+
+    The inner height the lattice gets is the asset's minus the height its
+    own insert adds above the stack (`dunnage.dead_height_mm`): a pocket
+    tray's bottom sheet, a bar or top separator taller than the nest depth.
+    That is the feedback the audit found missing -- the count used to fill
+    the inner and the BOM then reported it did not fit. Mubea and TRW are
+    unmoved: the bar's 68mm bars sit inside an 80mm nest depth (dead 0), the
+    wheel's 3mm sheet leaves 975 + 3 <= 1000.
+    """
+    from . import dunnage   # dunnage imports nothing from here; local to be safe
     out = []
     for pose in poses:
-        for extent, pitch, silhouette in pose.footprint_orders():
+        for extent, pitch, silhouette, clearance in pose.footprint_orders():
+            dead = dunnage.dead_height_mm(extent, pitch, clearance)
+            inner = (asset.inner[0], asset.inner[1], asset.inner[2] - dead)
             count, grid_counts, limited_by = lattice_count(
-                extent, pitch, asset.inner, part_kg,
+                extent, pitch, inner, part_kg,
                 getattr(asset, "max_weight_kg", 0.0),
             )
             if count:
+                upper = count
+                if pose.voxel_mm > 0:
+                    v = pose.voxel_mm
+                    upper = max(count, lattice_count(
+                        tuple(e - v for e in extent), tuple(p - v for p in pitch),
+                        inner, part_kg, getattr(asset, "max_weight_kg", 0.0),
+                    )[0])
                 out.append(Layout(asset.name, pose.label, count, grid_counts,
                                   tuple(round(v, 2) for v in extent),
                                   tuple(round(v, 2) for v in pitch), limited_by,
-                                  silhouette=silhouette))
+                                  silhouette=silhouette, count_upper=upper))
     out.sort(key=lambda l: -l.count)
     return out
 

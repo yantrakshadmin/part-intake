@@ -50,13 +50,68 @@ def test_design_space():
         print(f"  {c.ref:<18} footprint {d.footprint}, inner height {d.inner[2]:.1f}mm ok")
 
 
+def usable(d, clearance_lbh=(0.0, 0.0, 0.0)):
+    """The design's inner less the height its own insert occupies above the
+    stack -- the inner the lattice gets. One expression, shared with
+    `nesting.layouts_for` and `synthesise` via `dunnage.dead_height_mm`."""
+    from app import dunnage
+    dead = dunnage.dead_height_mm(d.extent_lbh, d.pitch_lbh, clearance_lbh)
+    return (d.inner[0], d.inner[1], d.inner[2] - dead)
+
+
 def test_self_consistent():
-    """The design's own count, recomputed from its own dims. Must agree."""
+    """The design's own count, recomputed from its own dims. Must agree.
+
+    Recomputed on the inner LESS the insert's dead height. A recompute on the
+    full inner is not a check: when the dead height is at least a pitch it
+    puts back the layer the box has no room for, and a review caught exactly
+    that -- 42 reported in a box solved for 21 (wheel, Alternative 1 pose).
+    """
     for c, d in _designs():
-        count, grid, _ = lattice_count(d.extent_lbh, d.pitch_lbh, d.inner)
+        count, grid, _ = lattice_count(d.extent_lbh, d.pitch_lbh, usable(d))
         assert (count, grid) == (d.count, d.grid), \
             f"{c.ref}: design says {d.count} {d.grid}, lattice_count says {count} {grid}"
         print(f"  {c.ref:<18} {count} = {grid} recomputed ok")
+
+
+def test_own_bom_fits():
+    """The box must be tall enough for the insert BOM it will be shipped with.
+
+    A pocket tray's bottom sheet is 3mm of dead height above the parts stack;
+    the wheel-shaped case used to synthesise an inner exactly stack-high and
+    report `fits: False` on its own dunnage. Layers still 8, count still 48.
+    """
+    from app import dunnage
+    clr = (5.0, 5.0, 0.0)
+    wheel = synthesise((372.0, 356.0, 140.0), (377.0, 361.0, 116.0), 2.5,
+                       clearance_lbh=clr)
+    b = dunnage.bom(wheel.extent_lbh, wheel.pitch_lbh, wheel.grid, wheel.inner, clr)
+    assert b.fits and abs(b.slack_lbh[2]) < 1e-6, (wheel.inner, b.slack_lbh)
+    assert (wheel.count, wheel.grid) == (48, (3, 2, 8)), (wheel.count, wheel.grid)
+    for c, d in _designs():
+        bd = dunnage.bom(d.extent_lbh, d.pitch_lbh, d.grid, d.inner)
+        assert bd.fits, f"{c.ref}: custom box does not fit its own BOM {bd.slack_lbh}"
+    # The review's repro: the wheel's "Alternative 1" pose interleaves in plane
+    # (121 < 140 on B) but stacks flat. It is a slotted tray now (both
+    # interleaves are needed for bars), so the dead height is one sheet; the
+    # point of the check is the invariant -- the count is the count of the box
+    # reported, recomputed on inner-minus-dead, and the BOM fits it. The first
+    # version of the loop accepted 1 layer and then recomputed 2 on the taller
+    # inner it had just made room for the dunnage in.
+    alt = synthesise((372.0, 140.0, 356.0), (377.0, 121.0, 356.0), 2.5, clearance_lbh=clr)
+    ba = dunnage.bom(alt.extent_lbh, alt.pitch_lbh, alt.grid, alt.inner, clr)
+    n, g, _ = lattice_count(alt.extent_lbh, alt.pitch_lbh, usable(alt, clr))
+    assert ba.fits and (n, g) == (alt.count, alt.grid) and alt.layers == 2 \
+        and ba.archetype == "pocket_tray", \
+        (alt.count, alt.grid, alt.inner, ba.slack_lbh, ba.archetype, n, g)
+    # And when the sheet would push past the cap, a layer goes, not the fit:
+    # 8 layers of a 125-tall, 125-pitch part stack to exactly 1000.
+    tight = synthesise((300.0, 300.0, 125.0), (305.0, 305.0, 125.0), 1.0, clearance_lbh=clr)
+    bt = dunnage.bom(tight.extent_lbh, tight.pitch_lbh, tight.grid, tight.inner, clr)
+    assert tight.layers == 7 and bt.fits and tight.inner[2] <= MAX_INNER_HEIGHT_MM, \
+        (tight.layers, tight.inner, bt.slack_lbh)
+    print(f"  wheel custom {wheel.count} in inner H {wheel.inner[2]} (fits); "
+          f"sheet at the cap drops to {tight.layers} layers, inner H {tight.inner[2]}")
 
 
 def test_oversize_part():
@@ -89,7 +144,7 @@ def test_weight_cap_does_not_split_the_answer():
 
 if __name__ == "__main__":
     for fn in (test_beats_shipped, test_design_space, test_self_consistent,
-               test_oversize_part, test_weight_cap_does_not_split_the_answer):
+               test_own_bom_fits, test_oversize_part, test_weight_cap_does_not_split_the_answer):
         print(f"{fn.__name__}:")
         fn()
     print("\nall checks passed")

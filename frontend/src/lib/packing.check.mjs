@@ -105,7 +105,7 @@ await assert.rejects(runSolve(1, { tareKg: 0 }),
   (e) => { assert.match(e.message, /tare_kg: Input should be greater than 0/); return true })
 
 // F4: abort mid-poll must reject with AbortError and stop polling. The job
-// never leaves "pending", so without the signal this would run to MAX_POLLS.
+// never leaves "pending", so without the signal this would run to MAX_POLLS_PENDING.
 let polls = 0
 globalThis.fetch = async (url) => {
   // Discriminate on '/solve-jobs/', NOT '/solve' — the status URL
@@ -168,3 +168,62 @@ assert.equal(rot.floor.count, 6)
 
 console.log('packing.check.mjs: truck floor plan passed —',
   `${truck.floor_grid.join(' x ')}/floor x ${plan.layers} = ${truck.boxes} boxes`)
+
+// --- F-AUDIT-4: interleaved must prefer the backend-shipped `interleave` ----
+// ratios (pitch/extent per in-plane axis) over `dunnage.archetype`. Since
+// F-AUDIT-4, archetype is 'bar_and_rod' only when a layout interleaves BOTH
+// in-plane AND vertically — a layout that overlaps in plan but stacks flat
+// comes back 'pocket_tray' (a slotted tray), so archetype alone can no
+// longer tell the pocket-per-part-tray-is-invalid case apart. `interleave`
+// is required on LayoutOut and is always the more specific signal.
+const planOverlapOnly = {
+  ...barLayout, interleave: [1.01, 0.9, 1], dunnage: { archetype: 'pocket_tray' },
+}
+assert.equal(layoutToFit(planOverlapOnly).interleaved, true)
+
+// Converse: only the stacking axis overlaps (normal layer nesting depth,
+// not a plan overlap) — must read non-interleaved even if some dunnage
+// classification said otherwise; axis 2 is deliberately excluded.
+const stackOnlyOverlap = {
+  ...barLayout, interleave: [1, 1, 0.9], dunnage: { archetype: 'bar_and_rod' },
+}
+assert.equal(layoutToFit(stackOnlyOverlap).interleaved, false)
+
+// Fallback to dunnage.archetype only when `interleave` itself is absent
+// (the custom design's BoxDesignOut carries no `interleave` field).
+const { interleave: _drop, ...barLayoutNoInterleave } = barLayout
+assert.equal(
+  layoutToFit({ ...barLayoutNoInterleave, pitch_lbh: [1092.0, 400.0, 68.0],
+    dunnage: { archetype: 'bar_and_rod' } }).interleaved, true)
+assert.equal(
+  layoutToFit({ ...barLayoutNoInterleave, dunnage: { archetype: 'pocket_tray' } }).interleaved,
+  false)
+
+// Fallback to the raw pitch/extent compare when neither `interleave` nor
+// `dunnage` is present at all.
+assert.equal(layoutToFit(barLayoutNoInterleave).interleaved, true) // pitch[1] 140 < extent[1] 300
+
+console.log('packing.check.mjs: interleaved-from-interleave-ratios passed')
+
+// --- F-AUDIT-1 F: trayGeometry takes pocket depth / floor sheet from the ---
+// dunnage BOM (pocket_tray), not the clearance/foam drawing knobs, when a
+// BOM is present — dunnage.py::_pocket_tray is the source of both numbers.
+const wheelFit = layoutToFit(layout)
+const wheelGroup = groupInserts(wheelFit)[0]
+const pocketBom = {
+  archetype: 'pocket_tray',
+  elements: [
+    { cell_mm: [377.0, 361.0, 99.0] },          // tray: pocket depth 99mm
+    { dims_mm: [1150, 750, 22.0] },             // separator sheet 22mm
+  ],
+}
+const bomGeom = trayGeometry({ box, group: wheelGroup, clearance: 7.5, wall: 10, foam: 10, bom: pocketBom })
+assert.equal(bomGeom.wallH, 99.0)
+assert.equal(bomGeom.floorH, 22.0)
+assert.equal(bomGeom.H, 121.0)
+// No bom -> unchanged fallback to clearance/foam (existing behaviour).
+const noBomGeom = trayGeometry({ box, group: wheelGroup, clearance: 7.5, wall: 10, foam: 10 })
+assert.equal(noBomGeom.wallH, wheelGroup.partH + 7.5)
+assert.equal(noBomGeom.floorH, 10)
+
+console.log('packing.check.mjs: trayGeometry bom (pocket depth/floor sheet) passed')

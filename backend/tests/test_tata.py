@@ -43,7 +43,8 @@ an independent check of the extraction pipeline on four files it had never seen:
     deck 681x98x457     cad 680.9x457.3x99.2
     deck 625x130x89.7   cad 624.6x129.5x89.7
 
-Run:  python tests/test_tata.py
+Run:  python tests/test_tata.py          # deck-pitch arithmetic
+      python tests/test_tata.py --cad    # the engine on the four STEP files (slow)
 """
 import sys
 from pathlib import Path
@@ -137,5 +138,96 @@ def main() -> int:
     return 0
 
 
+
+
+# ---------------------------------------------------------------------------
+# The engine against the four STEP files (`--cad`). Opt-in: 1-9 minutes per
+# file, almost all of it OpenCascade reading a 5-46MB assembly. The fixtures
+# are gitignored NDA copies (tests/fixtures/customer/README.md).
+#
+# Two numbers per case. "all poses" is what the engine recommends left to
+# itself; "deck pose" is the engine restricted to the resting pose the deck
+# packed (the customer wants the logo up, `SolveIn.confirmed_pose_only`). The
+# gap between them is the +4/+2 the audit could not decide, made visible
+# rather than tuned away. Both are PINNED so drift shows up as a failure.
+#
+# Measured 2026-09-10 (4mm voxels, 5mm in-plane clearance, 3 poses each):
+#
+#     X104    all 64 (8,1,8)   deck pose 55 (11,1,5)   deck ships 60   42s
+#     Nexon   all 18 (9,1,2)   deck pose 18 (9,1,2)    deck ships 18  132s
+#     P118    all 12 (2,1,6)   deck pose 11 (11,1,1)   deck ships 10  484s
+#     P125/6  all 64 (8,1,8)   deck pose 55 (11,1,5)   deck ships 65   43s
+#
+# In the deck's pose the remaining gap is the in-plane CLEARANCE, not the
+# geometry: X104 ships 12 across at a 90.4 pocket for a 90.1 part (0.3mm),
+# the engine's 5mm makes it 11; P118 ships 10 at 109.5 for 99.2 (10.3mm),
+# the engine's 5mm makes it 11. One constant cannot be right for both, which
+# is why `SolveIn.clearance_mm` is a parameter the engineer sets per job.
+# ---------------------------------------------------------------------------
+FIXTURES = Path(__file__).parent / "fixtures" / "customer"
+# (case name, file, asset, kg, deck pose height mm, pinned all-poses count,
+#  pinned deck-pose count). Heights identify the deck's pose among the
+#  engine's candidates: X104 stands on its 668x90 face (128 up), etc.
+CAD_CASES = [
+    ("X104 DSL Intercooler", "a0tnc5001m00_asm 1-X104 Intercooler- Sanand.stp",
+     PLS12801, 1.75, 128, 64, 55),
+    ("Nexon EV Radiator", "A0TZB5021M00_ASM 1-Nexon EV Radiator-Sanand.stp",
+     PLS12804, 1.15, 245, 18, 18),
+    ("P118 Radiator", "a7hqb5061m00_asm (1)-P118 Radiator- Haridwar.stp",
+     PLS12804, 2.30, 457, 12, 11),
+    ("P125/P126 Intercooler", "a7hqc5001m00_asm 1- P125-P126 Intercooler Haridwar.stp",
+     PLS12801, 1.75, 130, 64, 55),
+]
+
+
+def cad_main() -> int:
+    import time
+    from app.geometry import extract_part, load_unified_mesh
+    from app.nesting import layouts_for, measure_poses
+
+    shipped = {c[0]: c[6] for c in CASES}
+    for name, fname, asset, kg, deck_h, pin_all, pin_deck in CAD_CASES:
+        path = FIXTURES / fname
+        if not path.exists():
+            check(False, f"{name:<24} fixture present", f": missing {fname}")
+            continue
+        t0 = time.time()
+        r = extract_part(str(path))
+        mesh, _ = load_unified_mesh(r.glb_path)
+        poses = measure_poses(mesh, r.candidates)
+        t1 = time.time()
+
+        best_all = layouts_for(poses, asset, kg)[0]
+        deck = [p for p in poses if abs(p.extent[2] - deck_h) <= 8.0]
+        best_deck = layouts_for(deck, asset, kg)[0] if deck else None
+        got_deck = best_deck.count if best_deck else 0
+
+        print(f"{name:<24} {asset.name}  all poses {best_all.count:>3} {best_all.grid} "
+              f"pitch {best_all.pitch_lbh}   deck pose {got_deck:>3} "
+              f"{best_deck.grid if best_deck else '-'}   deck ships "
+              f"{shipped[name]}   [{t1 - t0:.0f}s, {len(poses)} poses]")
+        check(best_deck is not None,
+              f"{name:<24} deck pose (H~{deck_h}) is among the candidates",
+              f": {[p.extent for p in poses]}")
+        check(best_all.count >= got_deck,
+              f"{name:<24} all-poses >= deck-pose", f" ({best_all.count} vs {got_deck})")
+        if pin_all is not None:
+            check(best_all.count == pin_all, f"{name:<24} all-poses pinned",
+                  f" ({best_all.count}, pinned {pin_all})")
+        if pin_deck is not None:
+            check(got_deck == pin_deck, f"{name:<24} deck-pose pinned",
+                  f" ({got_deck}, pinned {pin_deck})")
+
+    print()
+    if failures:
+        print(f"{len(failures)} FAILURE(S):")
+        for f in failures:
+            print(f"  - {f}")
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
+    if "--cad" in sys.argv:
+        raise SystemExit(cad_main())
     raise SystemExit(main())

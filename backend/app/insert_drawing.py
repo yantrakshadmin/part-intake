@@ -64,6 +64,8 @@ import matplotlib
 matplotlib.use("Agg")               # Celery worker, no display. Before pyplot.
 import matplotlib.pyplot as plt     # noqa: E402
 from matplotlib.collections import LineCollection, PolyCollection   # noqa: E402
+from matplotlib.patches import Rectangle                            # noqa: E402
+from PIL import Image                                               # noqa: E402
 
 from . import dunnage                               # noqa: E402
 from .nesting import occupancy                      # noqa: E402
@@ -103,6 +105,7 @@ A_TRAY, A_BAR, A_SLAB, A_PANEL = 0.30, 0.42, 0.13, 0.16
 
 COS30, SIN30 = np.cos(np.pi / 6), 0.5
 C_INK, C_MUTE, C_BASE, C_ACCENT = "#0F172A", "#64748B", "#1E293B", "#D97706"
+C_NAME, C_LEADER = "#1E40AF", "#94A3B8"    # component name text; leader lines
 C_PART, PART_ALT = "#E8DFA0", "#CBBF77"   # warm part vs cool dunnage:
 # the deck's own contrast. Blue parts inside a blue tray read as one mass
 # however good the alpha is, which defeats drawing them translucent at all.
@@ -146,7 +149,8 @@ def pose_voxels(mesh: trimesh.Trimesh, rotation_matrix,
 
 
 def _fill(vol: np.ndarray, origin, size, label: int, cell_mm: float,
-          over: bool = False) -> None:
+          over: bool = False, step_vol: np.ndarray | None = None,
+          step: int = 0) -> None:
     """Rasterise a mm-space cuboid into the voxel volume.
 
     `over=False` paints only into empty cells, so a component listed EARLIER
@@ -154,15 +158,20 @@ def _fill(vol: np.ndarray, origin, size, label: int, cell_mm: float,
     separator assembly is the real case -- the assembly is the nest depth the
     bottom row sits down into). `over=True` with `label=0` erases, which is how
     the tray's pockets are cut.
+
+    `step_vol`/`step`, when given, get the SAME mask this call wrote into
+    `vol` (not a fresh `== 0` test on `step_vol` itself, which would read a
+    legitimate step index of 0 as "still empty" and let a later component
+    overwrite it) -- build_gif's per-cell packing-sequence index.
     """
     lo = [max(0, int(round(a / cell_mm))) for a in origin]
     hi = [max(lo[i] + 1, int(round((origin[i] + size[i]) / cell_mm)))
           for i in range(3)]
     sub = vol[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
-    if over:
-        sub[:] = label
-    else:
-        np.putmask(sub, sub == 0, label)
+    mask = np.ones_like(sub, dtype=bool) if over else sub == 0
+    sub[mask] = label
+    if step_vol is not None:
+        step_vol[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]][mask] = step
 
 
 # ---------------------------------------------------------------------------
@@ -260,8 +269,10 @@ def _draw_asset(ax, inner, mark_z: float | None) -> None:
     """The asset itself: a base slab plus the inner box as a wireframe.
 
     "Does the stack fit inside the box" is a question the drawing cannot
-    answer with the box off-screen. `mark_z` rings the top of the build, so
-    the headroom under the box lid is the gap between two lines.
+    answer with the box off-screen. `mark_z` draws a build-height dimension
+    line just outside the box's left edge -- solid, ticked at the floor, the
+    build height and the inner height -- so the headroom under the lid is the
+    gap between the last two ticks.
     """
     l, b, h = inner
     slab = [[(0, 0, 0), (l, 0, 0), (l, b, 0), (0, b, 0)],               # +z
@@ -282,11 +293,14 @@ def _draw_asset(ax, inner, mark_z: float | None) -> None:
     ax.add_collection(LineCollection([p[list(e)] for e in wire], colors=C_INK,
                                      linewidths=0.9, alpha=0.5, zorder=3))
     if mark_z is not None:
-        r = _proj(np.array([(x, y, mark_z) for x, y in
-                            ((0, 0), (l, 0), (l, b), (0, b))], float))
-        ax.add_collection(LineCollection(
-            [r[[0, 1]], r[[1, 2]], r[[2, 3]], r[[3, 0]]], colors=C_ACCENT,
-            linewidths=1.1, linestyles="--", zorder=3))
+        off = np.array([-40.0, 0.0])   # just outside the (0,0) corner edge
+        p0, p1 = (_proj(np.array([0.0, 0.0, z])) + off for z in (0.0, h))
+        ax.plot([p0[0], p1[0]], [p0[1], p1[1]], color=C_ACCENT, lw=1.0,
+                zorder=4)
+        for z in (0.0, mark_z, h):
+            t = _proj(np.array([0.0, 0.0, z])) + off
+            ax.plot([t[0], t[0] + 18], [t[1], t[1]], color=C_ACCENT, lw=1.0,
+                    zorder=4)
 
 
 # ---------------------------------------------------------------------------
@@ -477,18 +491,47 @@ def _labels(rows: list, el: dict, extent, pitch, grid, count: int) -> list:
 
 
 # ---------------------------------------------------------------------------
-# The drawing
+# Placement: the ONE part/dunnage placement expression (hard rule 9 applies to
+# the picture too -- explode_png and build_gif both call this, neither one
+# re-derives a position).
 # ---------------------------------------------------------------------------
-def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
-                bom: dunnage.Bom, asset_name: str, count: int,
-                cell_mm: float = CELL_MM) -> bytes:
-    """The insert component breakdown as PNG bytes.
+def _dun_step(z0: float, parts_z0: float, pitch_h: float, layers: int) -> int:
+    """build_gif's step rule for a dunnage cuboid sitting at `z0`.
 
-    `bom` is a `dunnage.Bom`; every dimension, qty, spec and basis in the
-    drawing comes off it. Never retype a dimension the BOM already carries.
+    `j` = how many parts layers sit fully below `z0`; the cuboid's step is
+    `2*j`, one below the parts step (`2*j+1`) of the layer it precedes so it
+    always animates in before the parts that land on or in it. `j == layers`
+    (nothing below) is the "top" step, after the last layer of parts.
+    """
+    return 2 * sum(1 for k in range(layers)
+                   if parts_z0 + k * pitch_h < z0 - 1e-6)
 
-    Takes voxels, not a mesh, deliberately: several ranked layouts share one
-    pose, so the caller voxelises once per distinct pose (`pose_voxels`).
+
+@dataclass
+class _Placement:
+    rows: list
+    el: dict
+    extent: tuple
+    pitch: tuple
+    inner: tuple
+    grid: tuple
+    dun: np.ndarray
+    prt: np.ndarray
+    dun_step: np.ndarray        # same shape as `dun`; per-cell build_gif step
+    prt_step: np.ndarray        # same shape as `prt`
+    alt: int                    # the parts' alternate label
+    top: float
+    layers: int
+    counts: dict
+    # {step index: {row index: instance count}}, dunnage only -- build_gif's
+    # caption source. Parts steps are `2k+1`, computed from `layers` directly.
+    dun_at_step: dict
+
+
+def _place(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
+          bom: dunnage.Bom, count: int, cell_mm: float) -> _Placement:
+    """Build the labelled part/dunnage volumes AND their per-cell packing-step
+    volumes off ONE placement expression.
 
     Raises AssertionError if the number of cuboids drawn for any element does
     not equal that element's `qty`, or if the parts that actually RASTERISED
@@ -522,11 +565,13 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
 
     # One volume for the parts, one for the dunnage: an int16 cell holds one
     # label, and a part in a pocket has to survive the tray drawn through it.
+    # Two more, same shape, carry the build_gif step each cell was written at.
     top = max(inner[2], bom.build_height_mm)
     shape = (int(np.ceil(inner[0] / cell_mm)),
              int(np.ceil(inner[1] / cell_mm)),
              int(np.ceil(top / cell_mm)) + 2)
-    dun, prt = (np.zeros(shape, dtype=np.int16) for _ in range(2))
+    dun, prt, dun_step, prt_step = (np.zeros(shape, dtype=np.int16)
+                                     for _ in range(4))
     # Two labels for the parts, alternating on (column + row + layer): a
     # 48-part stack of one colour is a solid blue block. Touching parts (the
     # Mubea pose interleaves in plane, and the TRW parts nest 15mm into the
@@ -535,17 +580,19 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     # between layers, so each part keeps its own silhouette and the layers
     # stay countable.
     alt = LABEL0 + len(rows)
+    layers = grid[2]
     per_part = int(np.count_nonzero(voxels))    # cells one part should occupy
     cells = 0                                   # cells the parts actually got
     counts: dict = {}
-    inst_z: dict = {}           # per row: mid-height of every instance drawn
     cuboids: list = []          # (volume, row, solids, voids), filled smallest-first
+    parts_z0 = next(r.z0 for r in rows if r.is_parts)
     for i, row in enumerate(rows):
         if row.is_parts:
             ox, oy = _origins(extent, pitch, grid, inner)
             n = 0
             for k in range(grid[2]):
                 z0 = max(0, int(round((row.z0 + k * pitch[2]) / cell_mm)))
+                pstep = 2 * k + 1
                 for a in range(grid[0]):
                     for b in range(grid[1]):
                         xa = max(0, int(round((ox + a * pitch[0]) / cell_mm)))
@@ -553,10 +600,14 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
                         sub = prt[xa:xa + voxels.shape[0],
                                   y0:y0 + voxels.shape[1],
                                   z0:z0 + voxels.shape[2]]
+                        ssub = prt_step[xa:xa + voxels.shape[0],
+                                       y0:y0 + voxels.shape[1],
+                                       z0:z0 + voxels.shape[2]]
                         src = voxels[:sub.shape[0], :sub.shape[1],
                                      :sub.shape[2]]
                         np.putmask(sub, src,
                                    LABEL0 + i if (a + b + k) % 2 == 0 else alt)
+                        np.putmask(ssub, src, pstep)
                         # Read back OUT OF THE VOLUME. Counting loop trips
                         # counted the instances we tried to draw, and
                         # `np.putmask` on a slice that fell outside the volume
@@ -567,14 +618,11 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
                         cells += got
                         n += got > 0
             counts[None] = n
-            inst_z[i] = [row.z0 + k * pitch[2] + extent[2] / 2
-                         for k in range(grid[2])]
             continue
         if row.geo is None:
             continue
         solids, voids = row.geo()
         counts[row.name] = len(solids)
-        inst_z[i] = [o[2] + s[2] / 2 for o, s in solids]
         cuboids.append((sum(np.prod(sz) for _o, sz in solids), i, solids, voids))
 
     # Smallest component first. `_fill` paints only into empty cells, so the
@@ -586,9 +634,14 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     # every count still asserted, because the counts come off the lattice and
     # not off the pixels. Same for a layer bar lying inside the bottom
     # separator assembly.
+    dun_at_step: dict = {}
     for _v, i, solids, voids in sorted(cuboids, key=lambda c: c[0]):
         for o, sz in solids:
-            _fill(dun, o, sz, LABEL0 + i, cell_mm)
+            dstep = _dun_step(o[2], parts_z0, pitch[2], layers)
+            _fill(dun, o, sz, LABEL0 + i, cell_mm, step_vol=dun_step,
+                  step=dstep)
+            dun_at_step.setdefault(dstep, {})
+            dun_at_step[dstep][i] = dun_at_step[dstep].get(i, 0) + 1
         for o, sz in voids:                 # the tray's pockets, cut out
             _fill(dun, o, sz, 0, cell_mm, over=True)
         if not (dun == LABEL0 + i).any():
@@ -617,30 +670,81 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
         assert n == el[name].qty, \
             "drew %d %r, BOM says qty %s" % (n, name, el[name].qty)
 
+    return _Placement(rows=rows, el=el, extent=extent, pitch=pitch,
+                      inner=inner, grid=grid, dun=dun, prt=prt,
+                      dun_step=dun_step, prt_step=prt_step, alt=alt, top=top,
+                      layers=layers, counts=counts, dun_at_step=dun_at_step)
+
+
+# ---------------------------------------------------------------------------
+# The drawing
+# ---------------------------------------------------------------------------
+def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
+                bom: dunnage.Bom, asset_name: str, count: int,
+                cell_mm: float = CELL_MM) -> bytes:
+    """The insert component breakdown as PNG bytes.
+
+    `bom` is a `dunnage.Bom`; every dimension, qty, spec and basis in the
+    drawing comes off it. Never retype a dimension the BOM already carries.
+
+    Takes voxels, not a mesh, deliberately: several ranked layouts share one
+    pose, so the caller voxelises once per distinct pose (`pose_voxels`).
+    """
+    p = _place(voxels=voxels, extent_lbh=extent_lbh, pitch_lbh=pitch_lbh,
+              grid=grid, inner_lbh=inner_lbh, bom=bom, count=count,
+              cell_mm=cell_mm)
+    rows, el, extent, pitch, inner, grid = (p.rows, p.el, p.extent, p.pitch,
+                                            p.inner, p.grid)
+    dun, prt, top, alt = p.dun, p.prt, p.top, p.alt
+
     # Leaders out to a label column, poster-style. Every component now lives in
     # the SAME stack, so anchoring each label at its own component's mid-height
-    # would pile them all at mid-box: each label points instead at one real
-    # INSTANCE of its component, picked high for the labels at the top of the
-    # column and low for the ones at the bottom.
+    # would pile them all at mid-box: each label points instead at ONE REAL
+    # drawn instance -- the one nearest the camera (largest x+y+z, `_proj`'s
+    # own depth convention), projected with `_proj` so the dot lands where the
+    # component actually is, not at a fixed column edge with nothing under it.
+    # A row with no drawn geometry (MS Rod, an undrawn BOM element) gets no
+    # leader at all -- pointing at empty space is worse than not pointing.
+    def _row_anchor(i: int, row: _Row):
+        if row.is_parts:
+            ox, oy = _origins(extent, pitch, grid, inner)
+            k = grid[2] - 1                          # the topmost layer
+            centres = [(ox + a * pitch[0] + extent[0] / 2,
+                       oy + b * pitch[1] + extent[1] / 2,
+                       row.z0 + k * pitch[2] + extent[2] / 2)
+                      for a in range(grid[0]) for b in range(grid[1])]
+        elif row.geo is not None:
+            solids, _voids = row.geo()
+            centres = [(o[0] + s[0] / 2, o[1] + s[1] / 2, o[2] + s[2] / 2)
+                      for o, s in solids]
+        else:
+            return None
+        return _proj(np.array(max(centres, key=sum), float)) if centres else None
+
     labels = _labels(rows, el, extent, pitch, grid, count)
-    drawn = [i for i, r in enumerate(rows) if r.drawn]
-    anchors: list = [None] * len(rows)
-    for rank, i in enumerate(drawn):
-        zi = inst_z.get(i) or [top / 2]
-        f = 1.0 - rank / max(len(drawn) - 1, 1)
-        anchors[i] = zi[int(round(f * (len(zi) - 1)))] - inner[0] * SIN30
+    anchors = [_row_anchor(i, r) for i, r in enumerate(rows)]
     y_top = top + 140
     y_bot = -(inner[0] + inner[1]) * SIN30 - BASE_MM - 140
-    # 0.5 of a row of headroom, so the header block cannot land on row 0.
-    step = (y_top - y_bot) / (len(labels) + 0.5)
     lx, tx = inner[0] + 10.0, inner[0] + 150.0
     x_lo, x_hi = -inner[1] * COS30 - 300, tx + 820
     y_lo, y_hi = y_bot - 380, y_top
 
     # Equal aspect, so let the figure follow the drawing.
-    fig, ax = plt.subplots(
-        figsize=(14.0, float(np.clip(14.0 * (y_hi - y_lo) / (x_hi - x_lo),
-                                     10.0, 22.0))), dpi=110)
+    fig_h_in = float(np.clip(14.0 * (y_hi - y_lo) / (x_hi - x_lo), 10.0, 22.0))
+    fig, ax = plt.subplots(figsize=(14.0, fig_h_in), dpi=110)
+    # Axis off, no title/colourbar, nothing outside the axes data area for
+    # `fig.tight_layout()` (below) to pad against -- it shrinks this figure's
+    # margins to ~0, confirmed against real renders (a 2470-unit y-range at
+    # 11.27in/110dpi renders at 1239px against this formula's 1240px). That
+    # makes the points<->data-unit ratio known WITHOUT a renderer round trip,
+    # which is what lets every label block get its own line instead of
+    # guessing at a fraction of the row's `step` budget (the qty/dims-line and
+    # tag/name overlaps a design review caught).
+    data_per_pt = (y_hi - y_lo) / (fig_h_in * 72.0)
+
+    def _lineh(fontsize: float, n: int = 1, spacing: float = 1.2) -> float:
+        return fontsize * spacing * n * data_per_pt
+
     palette = np.zeros((alt + 1, 4))
     for i, row in enumerate(rows):
         palette[LABEL0 + i] = matplotlib.colors.to_rgba(row.colour, row.alpha)
@@ -651,18 +755,39 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     # over the part, not the part over the tray it sits in.
     _paint(ax, [prt, dun], lambda lab: palette[lab], cell_mm, lw=0.35)
 
-    for n, ((title, lines, basis), a) in enumerate(zip(labels, anchors)):
-        y = y_top - 0.6 * step - n * step
+    # Every block (tag, name, qty, dims/spec) gets its OWN line -- stacked by
+    # its own measured height (`_lineh`), not a fraction of a shared row
+    # budget guessed to be big enough. That guess is what put "qty N" and the
+    # dims line on one baseline, and the basis tag on top of the name.
+    gap, row_gap = 5.0 * data_per_pt, 16.0 * data_per_pt
+    row_y = y_top - 20.0
+    for (title, lines, basis), a in zip(labels, anchors):
+        y = row_y
         if a is not None:
-            ax.plot([lx, tx - 20], [a, y], ls=":", lw=0.9, color=C_MUTE, zorder=4)
-            ax.plot([lx], [a], marker="o", ms=2.6, color=C_MUTE, zorder=4)
+            # Solid dog-leg, not a straight diagonal: a horizontal run off the
+            # text block to a column just right of the box, then one straight
+            # segment to the real instance the label is naming.
+            ax_x, ax_y = a
+            elbow = lx + 0.12 * (tx - lx)
+            ax.plot([tx - 20, elbow], [y, y], lw=0.5, color=C_LEADER, zorder=4)
+            ax.plot([elbow, ax_x], [y, ax_y], lw=0.5, color=C_LEADER, zorder=4)
+            ax.plot([ax_x], [ax_y], marker="o", ms=2.6, color=C_LEADER, zorder=4)
         col, txt = TAG[basis]
-        ax.text(tx, y + 0.13 * step, txt, fontsize=7.5, weight="bold",
-                color=col, va="bottom")
-        ax.text(tx, y, title.upper(), fontsize=10.5, weight="bold", va="bottom",
-                color=C_INK)
-        ax.text(tx, y - 0.07 * step, "\n".join(lines), fontsize=9, va="top",
+        ax.text(tx, y, txt, fontsize=7.5, weight="bold", color=col, va="top")
+        y -= _lineh(7.5) + gap
+        ax.text(tx, y, title.upper(), fontsize=10.5, weight="bold", va="top",
+                color=C_NAME)
+        y -= _lineh(10.5) + gap
+        qty = next((l for l in lines if l.startswith("qty ")), None)
+        body = [l for l in lines if l is not qty]
+        if qty is not None:
+            ax.text(tx, y, qty, fontsize=9, va="top", weight="bold",
+                    color=C_ACCENT, family="DejaVu Sans Mono")
+            y -= _lineh(9) + gap
+        ax.text(tx, y, "\n".join(body), fontsize=9, va="top",
                 color=C_MUTE, linespacing=1.55, family="DejaVu Sans Mono")
+        y -= _lineh(9, n=len(body), spacing=1.55)
+        row_y = y - row_gap
 
     # The build height against the inner height, called out on the box itself:
     # the drawing exists to answer "does the stack fit". The two ticks are
@@ -707,6 +832,158 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     logger.info("drew %s %s: %d components, build %g of %g mm inner",
                 asset_name, bom.archetype, len(rows),
                 round(bom.build_height_mm, 1), bom.inner_h_mm)
+    return buf.getvalue()
+
+
+def _dun_caption(dun_at_step: dict, step: int, rows: list, el: dict) -> str:
+    """"Place 2 x Top Side Bar (750x70x66mm), 1 x Top Center Bar (750x60x66mm)"
+    -- straight off the BOM element each row names, never retyped."""
+    items = sorted(dun_at_step.get(step, {}).items())
+    parts = ["%d x %s (%smm)" % (n, rows[i].name, el[rows[i].name].size)
+             for i, n in items]
+    return "Place " + ", ".join(parts) if parts else ""
+
+
+def _step_masks(dun: np.ndarray, dun_step: np.ndarray, prt: np.ndarray,
+                prt_step: np.ndarray, step: int) -> tuple:
+    """Cells whose per-cell step index == `step` -- gated on the LABEL volume
+    too, or a step of 0 also matches every cell nothing was ever written
+    into (both default to 0), which is how the first GIF frame came out a
+    solid highlighted cube instead of just the real step-0 dunnage. Shared
+    by `build_gif` and its self-check so there is one expression for what
+    "highlighted at this step" means, not a second one the test re-derives.
+    """
+    return (dun_step == step) & (dun != 0), (prt_step == step) & (prt != 0)
+
+
+def build_gif(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
+             bom: dunnage.Bom, asset_name: str, count: int,
+             cell_mm: float = CELL_MM, dunnage_ms: int = 600,
+             parts_ms: int = 1500, hold_ms: int = 3000) -> bytes:
+    """The packing sequence as an animated GIF: the empty asset, then per
+    layer the dunnage that goes in before it and that layer's parts, then the
+    top dunnage, then a hold on the finished box before it loops.
+
+    Off the SAME placement `explode_png` draws (`_place`): the geometry is
+    never re-derived, only replayed cumulatively by the per-cell step index
+    `_place` stamped alongside every label (hard rule 9 applies to the
+    picture too). A step with no cell at all is dropped, not rendered empty.
+    """
+    p = _place(voxels=voxels, extent_lbh=extent_lbh, pitch_lbh=pitch_lbh,
+              grid=grid, inner_lbh=inner_lbh, bom=bom, count=count,
+              cell_mm=cell_mm)
+    rows, el, inner, layers = p.rows, p.el, p.inner, p.layers
+    dun, prt, dun_step, prt_step, alt = (p.dun, p.prt, p.dun_step,
+                                         p.prt_step, p.alt)
+    per_layer = p.grid[0] * p.grid[1]
+    archetype = bom.archetype.replace("_", "-")
+
+    # Highlight labels, one per dunnage row (its own alpha, recoloured to
+    # accent) plus one shared opaque one for parts -- appended after every
+    # label explode_png uses, so that palette is untouched.
+    hl0 = alt + 1
+    parts_hl = hl0 + len(rows)
+    palette = np.zeros((parts_hl + 1, 4))
+    for i, row in enumerate(rows):
+        palette[LABEL0 + i] = matplotlib.colors.to_rgba(row.colour, row.alpha)
+        if row.is_parts:
+            palette[alt] = matplotlib.colors.to_rgba(PART_ALT, row.alpha)
+        else:
+            palette[hl0 + i] = matplotlib.colors.to_rgba(C_ACCENT, row.alpha)
+    palette[parts_hl] = matplotlib.colors.to_rgba(C_ACCENT, 1.0)
+
+    # The step rule (see `_dun_step`): parts of layer k -> 2k+1; dunnage
+    # before layer j -> 2j, j==layers being "top dunnage" after the last
+    # layer. Parts steps are always non-empty (the count assert in `_place`
+    # already guarantees it); dunnage steps only exist where the BOM put one.
+    non_empty = sorted(set(p.dun_at_step) | {2 * k + 1 for k in range(layers)})
+
+    corners = np.array([[x, y, z] for x in (0, inner[0]) for y in (0, inner[1])
+                        for z in (0, p.top)], float)
+    cp = np.array([_proj(c) for c in corners])
+    x_lo, x_hi = cp[:, 0].min() - 60, cp[:, 0].max() + 60
+    y_lo, y_hi = cp[:, 1].min() - BASE_MM - 60, cp[:, 1].max() + 60
+
+    def frame(step: int | None, idx: int) -> Image.Image:
+        final = step is None
+        dv = dun.copy() if final else np.where(dun_step <= step, dun, 0)
+        pv = prt.copy() if final else np.where(prt_step <= step, prt, 0)
+        if not final:
+            dm, pm = _step_masks(dun, dun_step, prt, prt_step, step)
+            if dm.any():
+                dv[dm] = hl0 + (dun[dm] - LABEL0)
+            if pm.any():
+                pv[pm] = parts_hl
+
+        if final:
+            line1, line2 = "Packed: %d parts" % count, (
+                "build %g of %g mm inner - %s"
+                % (round(bom.build_height_mm, 1), bom.inner_h_mm,
+                   "FITS" if bom.fits else "DOES NOT FIT"))
+            cum = count
+        elif step % 2:                                  # parts step
+            k = (step - 1) // 2
+            line1 = "Layer %d of %d" % (k + 1, layers)
+            line2 = "Place %d x Part" % per_layer
+            cum = per_layer * (k + 1)
+        else:
+            j = step // 2
+            line1 = ("Top dunnage" if step == 2 * layers else
+                     "Layer %d of %d" % (j + 1, layers) if step else
+                     # Step 0 is "empty" only when nothing actually lands
+                     # there -- some archetypes/poses have no bottom
+                     # dunnage at all (no vertical nest), so it can be.
+                     "Base dunnage" if p.dun_at_step.get(0) else "Empty box")
+            line2 = _dun_caption(p.dun_at_step, step, rows, el)
+            cum = per_layer * j
+        line3 = ("%d of %d parts placed  ·  %s  ·  %s insert"
+                % (cum, count, asset_name, archetype))
+
+        fig, ax = plt.subplots(figsize=(9.2, 6.6), dpi=80)
+        _draw_asset(ax, inner, bom.build_height_mm if final else None)
+        _paint(ax, [pv, dv], lambda lab: palette[lab], cell_mm, lw=0.35)
+
+        ax.add_patch(Rectangle((0.015, 0.775), 0.955, 0.21,
+                               transform=ax.transAxes, facecolor="#F8FAFC",
+                               alpha=0.95, edgecolor="#E2E8F0", lw=1.0,
+                               zorder=5))
+        ax.text(0.03, 0.955, line1, transform=ax.transAxes, fontsize=11,
+                weight="bold", color="#1E40AF", va="top", zorder=6)
+        ax.text(0.03, 0.900, line2, transform=ax.transAxes, fontsize=8.8,
+                color="#334155", va="top", wrap=True, zorder=6)
+        ax.text(0.03, 0.815, line3, transform=ax.transAxes, fontsize=8.3,
+                color=C_MUTE, va="top", family="DejaVu Sans Mono", zorder=6)
+
+        frac = 1.0 if final else (idx + 1) / len(non_empty)
+        ax.add_patch(Rectangle((0, 0), 1, 0.012, transform=ax.transAxes,
+                               facecolor="#E2E8F0", zorder=5))
+        ax.add_patch(Rectangle((0, 0), frac, 0.012, transform=ax.transAxes,
+                               facecolor=C_ACCENT, zorder=6))
+
+        ax.set_aspect("equal")
+        ax.set_axis_off()
+        ax.set_xlim(x_lo, x_hi)
+        ax.set_ylim(y_lo, y_hi)
+        fig.tight_layout()
+        fig.canvas.draw()
+        img = Image.frombytes(
+            "RGBA", fig.canvas.get_width_height(),
+            fig.canvas.buffer_rgba().tobytes()
+        ).convert("P", palette=Image.ADAPTIVE, colors=128)
+        plt.close(fig)
+        return img
+
+    frames = [frame(s, idx) for idx, s in enumerate(non_empty)]
+    frames.append(frame(None, len(non_empty) - 1))       # the hold frame
+    durations = [(parts_ms if s % 2 else dunnage_ms) for s in non_empty]
+    durations.append(hold_ms)
+
+    buf = BytesIO()
+    frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:],
+                   optimize=True, duration=durations, loop=0)
+    logger.info("built %s %s gif: %d frames (%d content + hold), %d bytes",
+                asset_name, bom.archetype, len(frames), len(non_empty),
+                buf.tell())
     return buf.getvalue()
 
 
@@ -926,7 +1203,6 @@ def _selfcheck(outdir) -> int:
     import sys
     import time
     from pathlib import Path
-    from PIL import Image
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from app.nesting import lattice_count
@@ -1009,6 +1285,75 @@ def _selfcheck(outdir) -> int:
                   % (e.name, e.qty,
                      LABEL_ONLY.get(e.name, "drawn").replace("not drawn: ",
                                                              "label only: ")))
+
+        # build_gif: expected frame count off the SAME step rule build_gif
+        # uses (1 + non-empty steps, the extra one being the held final
+        # frame) -- introspected via `_place` itself, not retyped.
+        placement = _place(voxels=_demo_voxels(extent, CELL_MM, kind),
+                          extent_lbh=extent, pitch_lbh=pitch, grid=grid,
+                          inner_lbh=inner, bom=bom, count=count,
+                          cell_mm=CELL_MM)
+        n_layers = grid[2]
+        non_empty = sorted(set(placement.dun_at_step)
+                           | {2 * k + 1 for k in range(n_layers)})
+        expected = 1 + len(non_empty)
+
+        t0 = time.perf_counter()
+        gif = build_gif(voxels=_demo_voxels(extent, CELL_MM, kind),
+                        extent_lbh=extent, pitch_lbh=pitch, grid=grid,
+                        inner_lbh=inner, bom=bom, asset_name=asset,
+                        count=count)
+        gdt = time.perf_counter() - t0
+        gimg = Image.open(BytesIO(gif))
+        assert gimg.n_frames == expected, \
+            "%s: %d frames, expected %d (%d non-empty steps + hold)" \
+            % (ref, gimg.n_frames, expected, len(non_empty))
+        assert gimg.width > 400, gimg.size
+        assert gdt < 20.0, "gif render took %.1fs" % gdt
+        # The step-0 highlight bug a design review caught: gate on the label
+        # volume too, or `dun_step`/`prt_step` == 0 also match every cell
+        # NOTHING was ever written into (both default to 0), painting frame 0
+        # solid. Assert `_step_masks` (what `build_gif` itself paints) picks
+        # out exactly the cells `_place` actually wrote at step 0 -- not the
+        # whole inner volume -- by checking it narrows the UNGATED match,
+        # which is what the pre-fix code used and is exactly the regression.
+        dm0, pm0 = _step_masks(placement.dun, placement.dun_step,
+                               placement.prt, placement.prt_step, 0)
+        gated0 = int(dm0.sum() + pm0.sum())
+        raw0 = int(np.count_nonzero(placement.dun_step == 0)
+                   + np.count_nonzero(placement.prt_step == 0))
+        assert gated0 < raw0, \
+            "%s: step-0 highlight is %d cells of %d raw -- the gate on the " \
+            "label volume is not narrowing the match" % (ref, gated0, raw0)
+        if placement.dun_at_step.get(0):    # this case has step-0 dunnage
+            assert gated0 > 0, "%s: has step-0 dunnage but 0 cells " \
+                "highlighted" % ref
+        # 1.5MB/20s is the ticket's target for the shipped ground-truth
+        # cases (cases[0]/[1], bar and wheel); the extra fixtures below --
+        # 16 layers vs the wheel's 8 -- are not what that budget was set
+        # against, so only report their size, don't gate on it.
+        if ref in (cases[0][0], cases[1][0]):
+            assert len(gif) < 1.5e6, "gif is %.2f MB" % (len(gif) / 1e6)
+        first = np.asarray(gimg.convert("RGB"))
+        gimg.seek(gimg.n_frames - 1)
+        last = np.asarray(gimg.convert("RGB"))
+        assert not np.array_equal(first, last), \
+            "%s: first and last gif frame are identical" % ref
+        gpath = outdir / ("build_%s_%s.gif"
+                          % (bom.archetype, ref.replace("/", "_").replace(" ", "_")))
+        gpath.write_bytes(gif)
+        print("PASS  %-14s %-9s %s  gif: %d frames  ->  %s (%dx%d, %.2f MB, "
+              "%.2fs)" % (bom.archetype, asset, ref, gimg.n_frames, gpath,
+                          gimg.width, gimg.height, len(gif) / 1e6, gdt))
+
+        if ref in (cases[0][0], cases[1][0]):   # one bar, one wheel: eyeball
+            safe_ref = ref.replace("/", "_").replace(" ", "_")
+            framedir = outdir / ("gif_frames_%s" % safe_ref)
+            framedir.mkdir(exist_ok=True)
+            for fi in range(gimg.n_frames):
+                gimg.seek(fi)
+                gimg.convert("RGB").save(framedir / ("%02d.png" % fi))
+            print("        %d frames dumped to %s" % (gimg.n_frames, framedir))
     assert not catch.msgs, catch.msgs
     print("PASS  every drawn component survives into the picture at %gmm cells"
           " (label-only by declaration: %s)"
@@ -1025,7 +1370,8 @@ def _selfcheck(outdir) -> int:
 
 if __name__ == "__main__":
     import sys
+    import tempfile
+    from pathlib import Path as _Path
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    default = ("/private/tmp/claude-501/-Users-rahulsharma-PycharmProjects-"
-               "part-intake/5b80b885-b5f3-4ba1-931f-aca6e335e404/scratchpad")
+    default = str(_Path(tempfile.gettempdir()) / "insert_drawing_check")
     raise SystemExit(_selfcheck(sys.argv[1] if len(sys.argv) > 1 else default))

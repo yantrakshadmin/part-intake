@@ -15,12 +15,16 @@ from celery import Celery
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from . import dunnage, engine as engine_mod
+from . import dunnage, engine as engine_mod, synthesis
 from .catalogue import containers, containers_named, excluded_drafts
 from .config import settings
 from .geometry import OrientationCandidate, extract_part, load_unified_mesh
-from .insert_drawing import explode_png, pose_voxels
-from .models import ExtractionJob, PartProfile, SolveJob, Vehicle
+from .insert_drawing import build_gif, explode_png, pose_voxels
+from .models import (ExtractionJob, PartProfile, Project, Proposal, SolveJob,
+                    Vehicle)
+from .proposal import build_pdf
+from .reasons import reasons_for
+from .runs import _run_out
 
 logger = logging.getLogger(__name__)
 
@@ -63,17 +67,21 @@ def run_extraction(job_id: str) -> None:
         db.commit()
 
 
-def _render_drawings(job_id: str, mesh, candidates, assets, result):
-    """Exploded insert drawings for every ranked layout plus the custom
-    design. Voxelises once per distinct pose -- `pose_voxels` is the
-    expensive call, and several ranked layouts commonly share a pose.
+def _render_drawings(job_id: str, mesh, candidates, assets, result,
+                     clearance_lbh=engine_mod.DEFAULT_CLEARANCE_LBH):
+    """Exploded insert drawings AND packing-sequence GIFs for every ranked
+    layout plus the custom design. Voxelises once per distinct pose --
+    `pose_voxels` is the expensive call, and several ranked layouts commonly
+    share a pose.
 
-    A render failure -- including `explode_png`'s own drawn-count-vs-BOM
-    AssertionError -- must never fail the solve: it is logged and that
-    layout's drawing is left absent. The count is the valuable output; the
-    picture is not worth losing it over.
+    A render failure -- including `explode_png`/`build_gif`'s own
+    drawn-count-vs-BOM AssertionError -- must never fail the solve: it is
+    logged and that layout's picture is left absent. The count is the
+    valuable output; the picture is not worth losing it over. The PNG and the
+    GIF are guarded SEPARATELY -- a GIF failure must not cost the PNG that
+    already rendered fine, and vice versa.
 
-    Returns ({catalogue index: url}, custom design url | None).
+    Returns ({catalogue index: (png_url, gif_url)}, (custom png_url, gif_url)).
     """
     rotation_by_label = {c.label: c.rotation_matrix for c in candidates}
     inner_by_name = {a.name: a.inner for a in assets}
@@ -93,58 +101,84 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result):
                 voxel_cache[pose_label] = None
         return voxel_cache[pose_label]
 
+    def _write(data: bytes, file_name: str) -> str:
+        path = Path(settings.local_storage_dir) / file_name
+        # A missing storage directory would otherwise make EVERY drawing
+        # vanish with nothing in `warnings` and nothing wrong on the
+        # caller's side. Upload happens to create the directory first in
+        # production, so this only ever showed up as a silent no-op under
+        # test.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return f"/api/files/{file_name}"
+
     def render(*, pose_label, extent_lbh, pitch_lbh, grid, inner_lbh,
-               asset_name, count, file_name) -> str | None:
+               asset_name, count, file_stem) -> tuple[str | None, str | None]:
+        voxels = voxels_for(pose_label)
+        if voxels is None:
+            return None, None
         try:
-            voxels = voxels_for(pose_label)
-            if voxels is None:
-                return None
             # Same pure expression engine.solve used to stamp `layout.dunnage`
             # -- recomputed, not a second opinion, so the drawing cannot
             # disagree with the numbers already returned.
-            bom = dunnage.bom(extent_lbh, pitch_lbh, grid, inner_lbh)
+            bom = dunnage.bom(extent_lbh, pitch_lbh, grid, inner_lbh,
+                              clearance_lbh)
+        except Exception:
+            logger.exception("dunnage.bom failed for %s (%s)",
+                             job_id, file_stem)
+            return None, None
+
+        png_url = None
+        try:
             png = explode_png(voxels=voxels, extent_lbh=extent_lbh,
                               pitch_lbh=pitch_lbh, grid=grid,
                               inner_lbh=inner_lbh, bom=bom,
                               asset_name=asset_name, count=count)
-            path = Path(settings.local_storage_dir) / file_name
-            # `except Exception` below swallows render failures on purpose --
-            # a drawing must never fail the solve -- which means a missing
-            # storage directory makes EVERY drawing vanish with nothing in
-            # `warnings` and nothing wrong on the caller's side. Upload
-            # happens to create the directory first in production, so this
-            # only ever showed up as a silent no-op under test.
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(png)
-            return f"/api/files/{file_name}"
+            png_url = _write(png, f"{file_stem}.png")
         except Exception:
             logger.exception("insert drawing failed for %s (%s)",
-                             job_id, file_name)
-            return None
+                             job_id, file_stem)
+
+        gif_url = None
+        try:
+            gif = build_gif(voxels=voxels, extent_lbh=extent_lbh,
+                            pitch_lbh=pitch_lbh, grid=grid,
+                            inner_lbh=inner_lbh, bom=bom,
+                            asset_name=asset_name, count=count)
+            gif_url = _write(gif, f"{file_stem}.gif")
+        except Exception:
+            logger.exception("build sequence gif failed for %s (%s)",
+                             job_id, file_stem)
+
+        return png_url, gif_url
 
     drawing_urls: dict = {}
+    gif_urls: dict = {}
     for i, layout in enumerate(result.catalogue):
         inner_lbh = inner_by_name.get(layout.asset_name)
         if inner_lbh is None:
             continue
-        url = render(pose_label=layout.pose_label, extent_lbh=layout.extent_lbh,
-                     pitch_lbh=layout.pitch_lbh, grid=layout.grid,
-                     inner_lbh=inner_lbh, asset_name=layout.asset_name,
-                     count=layout.count, file_name=f"drawing_{job_id}_{i}.png")
-        if url is not None:
-            drawing_urls[i] = url
+        png_url, gif_url = render(
+            pose_label=layout.pose_label, extent_lbh=layout.extent_lbh,
+            pitch_lbh=layout.pitch_lbh, grid=layout.grid,
+            inner_lbh=inner_lbh, asset_name=layout.asset_name,
+            count=layout.count, file_stem=f"drawing_{job_id}_{i}")
+        if png_url is not None:
+            drawing_urls[i] = png_url
+        if gif_url is not None:
+            gif_urls[i] = gif_url
 
-    custom_drawing_url = None
+    custom_drawing_url = custom_gif_url = None
     if result.custom is not None:
-        custom_drawing_url = render(
+        custom_drawing_url, custom_gif_url = render(
             pose_label=result.custom.pose_label,
             extent_lbh=result.custom.extent_lbh,
             pitch_lbh=result.custom.pitch_lbh, grid=result.custom.grid,
             inner_lbh=result.custom.inner, asset_name="custom design",
             count=result.custom.count,
-            file_name=f"drawing_{job_id}_custom.png")
+            file_stem=f"drawing_{job_id}_custom")
 
-    return drawing_urls, custom_drawing_url
+    return drawing_urls, gif_urls, custom_drawing_url, custom_gif_url
 
 
 @celery_app.task(name="solve_part", time_limit=600, soft_time_limit=570)
@@ -192,6 +226,36 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
             # but rebuild real objects rather than pass dicts around.
             candidates = [OrientationCandidate(**d) for d in candidate_dicts]
 
+            # Which pose the engineer signed off in the viewer, by matrix.
+            confirmed = (part.confirmed_orientation or {}).get("matrix")
+            confirmed_label = None
+            if confirmed is not None:
+                want = np.asarray(confirmed, dtype=float)
+                confirmed_label = next(
+                    (c.label for c in candidates
+                     if np.allclose(np.asarray(c.rotation_matrix, dtype=float),
+                                    want)),
+                    None,
+                )
+            warnings: list[str] = []
+            # Pose lock. All four Tata decks pack a part the engine would lay
+            # flat "in vertical orientation" (the customer's logo faces out),
+            # and the engine's flat count beat the deck's on three of them.
+            # A count in a pose the customer will not accept is not a
+            # recommendation, so the engineer can restrict the search to the
+            # pose they confirmed. Default is still every pose -- the
+            # difference between the two is itself the number worth seeing.
+            if params.get("confirmed_pose_only"):
+                if confirmed_label is None:
+                    warnings.append(
+                        "Confirmed-pose-only was requested but this part has "
+                        "no confirmed resting pose that matches a candidate; "
+                        "all poses were searched."
+                    )
+                else:
+                    candidates = [c for c in candidates
+                                  if c.label == confirmed_label]
+
             # One catalogue source for the whole request. solve() defaults to
             # containers() with NO db, which reads the seed constants -- so it
             # cannot see a box the team added and verified, and it can rank a
@@ -203,9 +267,14 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
             else:
                 assets = containers(db)
 
+            clearance_mm = params.get("clearance_mm")
+            if clearance_mm is None:
+                clearance_mm = engine_mod.DEFAULT_CLEARANCE_MM
+            clearance_lbh = (clearance_mm, clearance_mm,
+                             engine_mod.DEFAULT_STACK_CLEARANCE_MM)
             result = engine_mod.solve(
                 mesh, candidates, part_kg=part.weight_kg, assets=assets,
-                top_n=params.get("top_n", 2),
+                top_n=params.get("top_n", 2), clearance_mm=clearance_mm,
             )
 
             # The exploded insert drawing (G-DRAW), rendered here and only
@@ -213,8 +282,9 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
             # this job just solved, so the picture and the counts come from
             # one expression and cannot drift (hard rule 7: heavy geometry
             # stays in the worker, never on request).
-            drawing_urls, custom_drawing_url = _render_drawings(
-                job_id, mesh, candidates, assets, result,
+            drawing_urls, gif_urls, custom_drawing_url, custom_gif_url = (
+                _render_drawings(job_id, mesh, candidates, assets, result,
+                                 clearance_lbh)
             )
 
             # C-TARE: this is now an OVERRIDE, not the tare -- default is each
@@ -223,7 +293,29 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
             # Carry the reader's own caveats through. An INCH-declared STEP or
             # a non-watertight shell is exactly the case where a confident
             # parts-per-box number needs a label attached to it.
-            warnings: list[str] = list(extraction.result_json.get("warnings") or [])
+            warnings += list(extraction.result_json.get("warnings") or [])
+
+            # Dunnage the inner has no room for. In plane, `lattice_count`
+            # charges no wall clearance and the side separators stand beside
+            # the parts (the shipped Mubea design carries the same -5mm on L).
+            # On H the count already pays the insert's dead height, so an
+            # overflow there means a BOM the engine did not solve for -- say so
+            # rather than leave it to a flag in one panel.
+            for label, opt in ([(l.asset_name, l) for l in result.catalogue]
+                               + ([("custom", result.custom)]
+                                  if result.custom is not None else [])):
+                over = [(ax, round(-s, 1)) for ax, s
+                        in zip("LBH", (opt.dunnage or {}).get("slack_lbh", []))
+                        if s < -1e-6]
+                if over:
+                    warnings.append(
+                        f"{label}: the insert BOM overflows the inner by "
+                        + ", ".join(f"{mm}mm on {ax}" for ax, mm in over)
+                        + ". In plane the parts fill the inner with no wall "
+                        "clearance and the side separators stand beside them "
+                        "(the shipped Mubea design has the same tension; check "
+                        "how the part ends meet the separators)."
+                    )
             if requested:
                 # Caller named specific boxes: the "N unverified box(es) not
                 # ranked" warning below is about the *other* drafts they never
@@ -331,24 +423,16 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
             # CLAUDE.md hard rule 2: nothing reaches the engineer unseen.
             # They confirmed a resting pose in the viewer; the winning layout
             # may be in a different one, and pose_label alone does not tell
-            # them that. Surface it rather than restrict the pose set -- which
-            # pose a confirmation binds is a DOMAIN.md question.
-            confirmed = (part.confirmed_orientation or {}).get("matrix")
-            if confirmed is not None and result.catalogue:
-                want = np.asarray(confirmed, dtype=float)
-                match = next(
-                    (c.label for c in candidates
-                     if np.allclose(np.asarray(c.rotation_matrix, dtype=float),
-                                    want)),
-                    None,
+            # them that. Surface it; `confirmed_pose_only` above is how they
+            # restrict it.
+            if (confirmed_label is not None and result.catalogue
+                    and confirmed_label != result.catalogue[0].pose_label):
+                warnings.append(
+                    f"Best layout rests {result.catalogue[0].pose_label!r}, "
+                    f"but this part was confirmed resting {confirmed_label!r}. "
+                    "Check the recommendation is manufacturable in the pose "
+                    "you signed off, or re-solve with confirmed pose only."
                 )
-                if match is not None and match != result.catalogue[0].pose_label:
-                    warnings.append(
-                        f"Best layout rests {result.catalogue[0].pose_label!r}, "
-                        f"but this part was confirmed resting {match!r}. Check "
-                        "the recommendation is manufacturable in the pose you "
-                        "signed off."
-                    )
 
             if not result.catalogue and result.custom is None:
                 warnings.append(
@@ -359,16 +443,50 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
                     "a box' -- it means no box was found at all."
                 )
 
+            # F4: "why this design" (app/reasons.py). Composed here, last,
+            # because this is where clearance_mm, poses_searched (candidates,
+            # already pose-locked above), confirmed_label and warnings are ALL
+            # in scope together -- everything a reason cites is a field that
+            # already exists on the layout/design or was just computed above.
+            poses_searched_labels = [c.label for c in candidates]
+            assets_by_name = {a.name: a for a in assets}
+            result = dataclasses.replace(
+                result,
+                catalogue=[
+                    dataclasses.replace(l, reasons=reasons_for(
+                        l, part_lbh=l.extent_lbh, part_kg=part.weight_kg,
+                        clearance_mm=clearance_mm,
+                        poses_searched=poses_searched_labels,
+                        confirmed_label=confirmed_label,
+                        inner_lbh=assets_by_name[l.asset_name].inner,
+                        max_weight_kg=assets_by_name[l.asset_name].max_weight_kg,
+                    )) if l.asset_name in assets_by_name else l
+                    for l in result.catalogue
+                ],
+                custom=(dataclasses.replace(result.custom, reasons=reasons_for(
+                    result.custom, part_lbh=result.custom.extent_lbh,
+                    part_kg=part.weight_kg, clearance_mm=clearance_mm,
+                    poses_searched=poses_searched_labels,
+                    confirmed_label=confirmed_label,
+                    inner_lbh=result.custom.inner,
+                    max_weight_kg=synthesis.DEFAULT_MAX_WEIGHT_KG,
+                )) if result.custom is not None else None),
+            )
+
             job.result_json = {
                 "catalogue": [
                     {**dataclasses.asdict(l), "interleave": l.interleave,
-                     "drawing_url": drawing_urls.get(i)}
+                     "drawing_url": drawing_urls.get(i),
+                     "gif_url": gif_urls.get(i)}
                     for i, l in enumerate(result.catalogue)
                 ],
+                "poses_searched": [c.label for c in candidates],
+                "clearance_mm": clearance_mm,
                 "custom": (
                     {**dataclasses.asdict(result.custom),
                      "layers": result.custom.layers,
-                     "drawing_url": custom_drawing_url}
+                     "drawing_url": custom_drawing_url,
+                     "gif_url": custom_gif_url}
                     if result.custom is not None else None
                 ),
                 "custom_beats_catalogue": result.custom_beats_catalogue(),
@@ -382,3 +500,57 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
             job.status = "failed"
             job.error = f"{type(exc).__name__}: {exc}"
         db.commit()
+
+
+def run_proposal(proposal_id: int) -> None:
+    """F7: render one proposal's PDF. Plain function, same reason as
+    `run_solve`/`run_extraction` -- the API's dev fallback (no Celery broker)
+    runs this in a thread, and tests drive it directly instead of a worker.
+    """
+    with Session(_engine) as db:
+        proposal = db.get(Proposal, proposal_id)
+        if proposal is None:
+            logger.error("Proposal %s not found", proposal_id)
+            return
+        proposal.status = "processing"
+        db.commit()
+
+        try:
+            project = db.get(Project, proposal.project_id)
+            run = db.get(SolveJob, proposal.run_id)
+            if project is None or run is None:
+                raise ValueError(
+                    f"Project {proposal.project_id} or run {proposal.run_id} "
+                    "not found for this proposal"
+                )
+            part = db.scalars(
+                select(PartProfile)
+                .where(PartProfile.project_id == project.id)
+                .order_by(PartProfile.created_at.desc())
+            ).first()
+            if part is None:
+                raise ValueError(
+                    f"Project {project.id} has no part to build a proposal from"
+                )
+
+            run_out = _run_out(run, project)
+            out_dir = Path(settings.local_storage_dir)
+            # Same landmine `_render_drawings._write` guards against: a
+            # missing storage dir on a fresh checkout would otherwise fail
+            # this render with nothing on-disk to show for it.
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"proposal_{proposal_id}.pdf"
+            build_pdf(project, part, run, run_out, out_path, db=db)
+
+            proposal.pdf_path = str(out_path)
+            proposal.status = "done"
+        except Exception as exc:  # noqa: BLE001 — surface any failure to the user
+            logger.exception("Proposal render failed for %s", proposal_id)
+            proposal.status = "failed"
+            proposal.error = f"{type(exc).__name__}: {exc}"
+        db.commit()
+
+
+@celery_app.task(name="render_proposal", time_limit=300)
+def render_proposal(proposal_id: int) -> None:
+    run_proposal(proposal_id)

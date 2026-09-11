@@ -6,10 +6,13 @@
  */
 
 const POLL_MS = 1500
-// A solve is ~11s; 4 minutes (160 polls) is generous. Without a cap, a dead
-// worker (job stuck at "pending", never "processing"/"done"/"failed") spins
-// this loop silently forever — see the F2-1 review note.
-const MAX_POLLS = 160
+// Two separate caps, not one flat one (F-AUDIT-1): the Celery worker's hard
+// limit is 600s and real radiator-class parts take 40-500s once a worker
+// picks the job up, so a single ~240s cap reported "no Celery worker" on a
+// live solve. A job stuck at "pending" (never picked up) is still capped
+// tight — that's the dead-worker case a single flat cap used to catch.
+const MAX_POLLS_PENDING = 60   // 90s waiting for a worker to start it
+const MAX_POLLS_PROCESSING = 440    // 660s total once it's "processing"
 
 /** FastAPI's validation error `detail` is a list of {loc, msg, type} dicts,
  *  not a string — `String(detail)` renders "[object Object]" (F2-2 F5).
@@ -29,15 +32,21 @@ export function errorDetail(detail, fallback) {
   return detail ? String(detail) : fallback
 }
 
-/** POST the solve, then poll until the job is done/failed. Resolves the
- *  `result` object (see SolveResultOut on the backend); rejects with an
- *  Error carrying the server's detail message on failure. `signal` (an
+/** POST the solve, then poll until the job is done/failed. Resolves
+ *  `{ result, solveJobId }` (see SolveResultOut on the backend) — the id is
+ *  what lets a caller navigate to `?run=<id>` afterwards so the view shows
+ *  what was just computed instead of re-solving on the next mount; rejects
+ *  with an Error carrying the server's detail message on failure. `signal` (an
  *  AbortController's) cancels both the in-flight fetch and, if we're
  *  between polls, the wait itself — without it, a StrictMode double-mount
  *  or a fast part-to-part click leaves the previous solve's fetch/poll loop
  *  running to completion untracked (F2-2 F4). */
-export async function runSolve(partId, { tareKg, vehicleName, topN = 5, assets, signal } = {}) {
-  const r = await fetch(`/api/parts/${partId}/solve`, {
+export async function runSolve(partId, { tareKg, vehicleName, topN = 5, assets, confirmedPoseOnly, clearanceMm, signal, projectId } = {}) {
+  // Solving from a project page must land under that project's run list
+  // (F2 contract: POST /api/projects/{id}/solve) — omitting projectId keeps
+  // today's behaviour, posting straight to the part.
+  const url = projectId != null ? `/api/projects/${projectId}/solve` : `/api/parts/${partId}/solve`
+  const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -45,6 +54,10 @@ export async function runSolve(partId, { tareKg, vehicleName, topN = 5, assets, 
       // Omitting/empty keeps today's unrestricted ranking (SolveIn.assets
       // defaults to None on the backend) — never send an empty array.
       assets: assets && assets.length ? assets : null,
+      confirmed_pose_only: !!confirmedPoseOnly,
+      // null (blank in the UI) keeps the backend's own default (5.0mm) —
+      // SolveIn.clearance_mm, F-AUDIT-2.
+      clearance_mm: clearanceMm ?? null,
     }),
     signal,
   })
@@ -53,18 +66,35 @@ export async function runSolve(partId, { tareKg, vehicleName, topN = 5, assets, 
     throw new Error(errorDetail(detail?.detail, `Solve request failed (${r.status})`))
   }
   const { solve_job_id } = await r.json()
-  for (let poll = 0; poll < MAX_POLLS; poll++) {
+  // Two SEPARATE budgets: pickup (pending) and run (processing). One shared
+  // counter charged the processing budget for time spent waiting on a worker,
+  // so a slow pickup plus a legitimately long run threw "exceeded 600s" early.
+  let pendingPolls = 0
+  let processingPolls = 0
+  while (true) {
     const res = await fetch(`/api/solve-jobs/${solve_job_id}`, { signal })
     if (!res.ok) throw new Error(`Solve status check failed (${res.status})`)
     const job = await res.json()
-    if (job.status === 'done') return job.result
+    if (job.status === 'done') return { result: job.result, solveJobId: solve_job_id }
     if (job.status === 'failed') throw new Error(job.error || 'Solve failed')
+    if (job.status === 'pending') {
+      pendingPolls++
+      if (pendingPolls > MAX_POLLS_PENDING) {
+        throw new Error(`Solve did not finish in ${Math.round(MAX_POLLS_PENDING * POLL_MS / 1000)}s `
+          + "— the job is still 'pending', which usually means no Celery worker is consuming the queue.")
+      }
+    } else {
+      processingPolls++
+      if (processingPolls > MAX_POLLS_PROCESSING) {
+        throw new Error("Solve exceeded the worker's 600s limit — the job is still 'processing'.")
+      }
+    }
     await new Promise((resolve, reject) => {
       const abort = () => reject(new DOMException('Aborted', 'AbortError'))
       // Already aborted? `abort` has fired and will not fire again, so the
       // listener alone would sit out a full POLL_MS before the next fetch
       // threw. And remove the listener on the normal path — otherwise one
-      // solve leaves up to MAX_POLLS of them on the same signal.
+      // solve leaves up to MAX_POLLS_PROCESSING of them on the same signal.
       if (signal?.aborted) return abort()
       let t
       const onAbort = () => { clearTimeout(t); abort() }
@@ -75,8 +105,6 @@ export async function runSolve(partId, { tareKg, vehicleName, topN = 5, assets, 
       signal?.addEventListener('abort', onAbort, { once: true })
     })
   }
-  throw new Error(`Solve did not finish in ${Math.round(MAX_POLLS * POLL_MS / 60000)} min — the job `
-    + "is still 'pending', which usually means no Celery worker is consuming the queue.")
 }
 
 /**
@@ -86,16 +114,28 @@ export async function runSolve(partId, { tareKg, vehicleName, topN = 5, assets, 
  * affords, so nothing here adds clearance or wall on top of it.
  */
 export function layoutToFit(layout) {
-  const { count, grid, extent_lbh: extent, pitch_lbh: pitch, pose_label } = layout
+  const { count, grid, extent_lbh: extent, pitch_lbh: pitch, pose_label, dunnage, interleave } = layout
   const [nx, ny, nz] = grid
   const perLayer = nx * ny
 
-  // In-plane pitch smaller than the part's own extent means consecutive
-  // parts overlap the naive pocket-per-part box — they interleave (this is
-  // what earns the Mubea bar 40 over the cuboid answer of 8). Z pitch is
-  // excluded: pitch[2] < extent[2] is just normal nesting depth between
-  // layers, not an overlap (F2-2 F1).
-  const interleaved = pitch[0] < extent[0] || pitch[1] < extent[1]
+  // Prefer `interleave` (LayoutOut.interleave = pitch/extent per in-plane
+  // axis, already measured on the backend) over `dunnage.archetype`: since
+  // F-AUDIT-4 archetype is 'bar_and_rod' only when parts interleave BOTH
+  // in-plane AND vertically, so a layout that overlaps in plan but stacks
+  // flat (archetype 'pocket_tray', a slotted tray) would wrongly read as
+  // non-interleaved off archetype alone. A ratio < 1 on either in-plane
+  // axis means pitch is smaller than the part's own extent there —
+  // consecutive parts overlap the naive pocket-per-part box (this is what
+  // earns the Mubea bar 40 over the cuboid answer of 8). Axis 2 (stacking)
+  // is excluded on purpose, same as the raw pitch/extent fallback below.
+  // Fall back to archetype, then to the raw pitch/extent compare, only when
+  // the backend didn't ship `interleave` (CLAUDE.md hard rule 9: prefer
+  // what the backend already computed over re-deriving it).
+  const interleaved = interleave
+    ? interleave[0] < 1 || interleave[1] < 1
+    : dunnage
+      ? dunnage.archetype === 'bar_and_rod'
+      : pitch[0] < extent[0] || pitch[1] < extent[1]
 
   const placements = []
   for (let i = 0; i < nx; i++)
@@ -119,9 +159,9 @@ export function layoutToFit(layout) {
  *
  * `truck.floor_grid` / `floor_rotated` come from the same expression in
  * `engine.parts_per_truck` that produced `truck.boxes`, so the drawing and
- * the number cannot disagree. The frontend used to re-derive this with
- * `floorFit`/`bestFill`, which allows mixed-orientation split strips, and
- * drew 21 boxes per floor against the 18 the parts figure assumed.
+ * the number cannot disagree. The frontend used to re-derive its own floor
+ * fit client-side (mixed-orientation split strips allowed) and drew 21
+ * boxes per floor against the 18 the parts figure assumed.
  */
 export function floorPlanFromTruck(truck, box) {
   const [nx, ny] = truck.floor_grid

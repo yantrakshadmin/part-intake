@@ -240,8 +240,20 @@ def generate_orientation_candidates(
     """Resting orientations ranked for packing: largest footprint first,
     tie-broken by lower center of gravity.
 
-    Symmetric duplicates (same dims, ~same CG height) are merged so the user
-    typically sees 3 distinct choices, not 6.
+    One pose per OBB axis -- three, not six. The two signs of an axis are the
+    same part upside down: identical footprint, identical height, and the same
+    lattice pitch on every axis in exact geometry (A and -A have the same
+    self-collision offsets). On the RASTER they differ by up to one voxel per
+    axis, because `nesting.occupancy` re-voxelises the rotated mesh and the
+    grid origin snaps independently per transform -- measured on the YXA bar
+    at 4mm, the two signs of axis 1 read pitch (69, 144) vs (73, 140) and 60
+    vs 55 over the catalogue. That is quantisation noise, the band
+    `nesting.Layout.count_upper` reports, not geometry; the sign kept is the
+    lower-CG one because that is the only thing the sign physically changes. Keeping both used to spend two of `max_candidates`'s
+    four slots on twins and cut the third real footprint before the nester
+    saw it (ticket G-POSE measured the cap at zero parts lost, but only
+    because the cut pose happened never to win; the area ranking that decided
+    what got cut mis-ranks two of the six real parts we hold).
     """
     centroid_obb = trimesh.transform_points(
         mesh.centroid.reshape(1, 3), to_obb
@@ -262,6 +274,7 @@ def generate_orientation_candidates(
         lift = trimesh.transformations.translation_matrix([0, 0, h / 2.0])
         T = lift @ R @ to_obb
         raw.append({
+            "axis": axis,
             "dims": (round(float(L), 2), round(float(B), 2), round(float(h), 2)),
             "footprint": float(L * B),
             "height": float(h),
@@ -269,22 +282,16 @@ def generate_orientation_candidates(
             "T": T,
         })
 
-    # Deduplicate: same (L,B,H) and CG height within tolerance → keep lower CG
+    # One per up-axis, the lower-CG sign of each (the sort puts it first).
     unique: list = []
     for cand in sorted(raw, key=lambda c: (-c["footprint"], c["cg_h"])):
-        dup = any(
-            u["dims"] == cand["dims"] and abs(u["cg_h"] - cand["cg_h"]) < 0.5
-            for u in unique
-        )
-        if not dup:
+        if not any(u["axis"] == cand["axis"] for u in unique):
             unique.append(cand)
 
     out = []
     for i, c in enumerate(unique[:max_candidates]):
         if i == 0:
             label = "Largest face down (most stable)"
-        elif c["dims"] == unique[0]["dims"]:
-            label = "Same footprint, flipped"
         elif c["height"] == min(u["height"] for u in unique):
             label = "Lowest profile"
         else:

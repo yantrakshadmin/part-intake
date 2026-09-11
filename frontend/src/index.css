@@ -261,6 +261,13 @@ body {
 
 .field span { font-size: 12.5px; font-weight: 500; color: var(--text-2); }
 
+.field-note { font-size: 11px !important; font-weight: 400 !important; }
+
+/* F4/F6: plain-list reasons, verbatim backend wording — no bullets styling
+   beyond a readable list. Shared by the Overview "Why this design" card and
+   the per-card "Why" disclosure in PackingResults. */
+.reasons-list { margin: 8px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.6; color: var(--text-2); }
+
 .field input {
   font: inherit;
   padding: 8px 12px;
@@ -508,6 +515,13 @@ body {
 
 .btn-ghost:hover { background: var(--accent-soft); }
 
+.btn-primary:disabled, .btn-ghost:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-primary:disabled:hover { background: var(--accent); }
+.btn-ghost:disabled:hover { background: transparent; }
+
 .custom-box-form {
   border: 1px solid var(--accent-border);
   background: var(--accent-soft);
@@ -565,6 +579,10 @@ body {
   gap: 12px;
   margin-top: 16px;
 }
+
+/* Grid item wrapping a ranked card's button plus its "Why" disclosure below
+   it — a <details> cannot nest inside the <button> itself (F4). */
+.box-card-cell { display: flex; flex-direction: column; }
 
 .box-card {
   font: inherit;
@@ -935,6 +953,35 @@ body {
 }
 .modal-img { display: block; max-width: 100%; height: auto; }
 
+/* packing-sequence / exploded-view toggle inside the modal head (F-GIF) */
+.view-toggle {
+  display: inline-flex;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  gap: 8px;
+}
+.view-toggle button {
+  border: 0;
+  background: transparent;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.view-toggle button[aria-pressed="true"] {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.view-toggle button:hover:not([aria-pressed="true"]) {
+  color: var(--accent2);
+}
+
 .floor-svg { display: block; }
 .floor-bed { fill: var(--surface-2); stroke: var(--border-strong); }
 .floor-box { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
@@ -1112,4 +1159,120 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .truck-box { animation: none; }
+}
+
+/* ---- app shell: persistent left nav (F2) ------------------------------- */
+
+.shell {
+  display: flex;
+  align-items: flex-start;
+  max-width: 1720px;
+  margin: 0 auto;
+  min-height: 100vh;
+}
+
+.side-nav {
+  width: 216px;
+  flex: none;
+  position: sticky;
+  top: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 24px 16px;
+  border-right: 1px solid var(--border);
+}
+
+.side-nav .brand { padding: 0 8px; }
+
+.side-nav-links { display: flex; flex-direction: column; gap: 4px; }
+
+.side-nav-link {
+  display: block;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-2);
+  text-decoration: none;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.side-nav-link:hover { background: var(--surface-2); color: var(--text); }
+
+.side-nav-link.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+.side-nav-link.primary { background: var(--accent); color: #fff; font-weight: 600; margin-top: 4px; }
+.side-nav-link.primary:hover { background: #1e3a8a; color: #fff; }
+.side-nav-link.primary.active { background: #1e3a8a; color: #fff; }
+
+.side-nav-tools {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.side-nav-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  padding: 0 12px 4px;
+}
+
+.side-nav-main { flex: 1; min-width: 0; padding: 24px 24px 80px; }
+
+/* ---- status pills (project status, run status) ------------------------- */
+
+.badge.status-draft { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border); }
+.badge.status-solved { background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-border); }
+.badge.status-proposal_sent { background: var(--accent2-soft); color: var(--accent2); border: 1px solid var(--accent2-border); }
+.badge.status-trial { background: var(--amber-bg); color: var(--amber-text); border: 1px solid var(--amber-border); }
+.badge.status-approved { background: #f0fdf4; color: var(--green); border: 1px solid #bbf7d0; }
+.badge.status-archived { background: var(--surface-2); color: var(--text-3); border: 1px solid var(--border); }
+.badge.status-pending, .badge.status-processing { background: var(--amber-bg); color: var(--amber-text); border: 1px solid var(--amber-border); }
+.badge.status-done { background: #f0fdf4; color: var(--green); border: 1px solid #bbf7d0; }
+.badge.status-failed { background: #fef2f2; color: var(--red); border: 1px solid #fecaca; }
+
+.status-select {
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* ---- project header (F2) ------------------------------------------------ */
+
+.project-header-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+.owner-input {
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  color: var(--text);
+  min-width: 120px;
+}
+
+.owner-input:hover { border-color: var(--border); }
+.owner-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: var(--surface); }
+
+.overview-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+@media (max-width: 720px) {
+  .shell { flex-direction: column; }
+  .side-nav { position: static; min-height: 0; width: auto; flex-direction: row; flex-wrap: wrap; }
+  .side-nav-tools { margin-top: 0; border-top: 0; }
+  .overview-cards { grid-template-columns: 1fr; }
 }

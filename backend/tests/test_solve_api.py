@@ -100,6 +100,10 @@ def _make_wheel_part(db) -> PartProfile:
     return part
 
 
+def wheel_job_candidates(db, part) -> list[dict]:
+    return db.get(ExtractionJob, part.job_id).result_json["candidates"]
+
+
 def main() -> int:
     if not WHEEL.exists():
         print("SKIP: no customer fixtures present (NDA material, not in git)")
@@ -176,12 +180,128 @@ def main() -> int:
             check(not on_disk, "the PNG behind each drawing_url exists",
                   f": missing for {on_disk}")
 
+            # B-GIF, same hard rule 9 discipline: the packing-sequence GIF is
+            # rendered beside the PNG and shipped as `gif_url`.
+            gif_drawn = [l for l in status.result.catalogue if l.gif_url]
+            check(len(gif_drawn) == len(status.result.catalogue),
+                  "every ranked layout ships a gif_url",
+                  f": {len(gif_drawn)}/{len(status.result.catalogue)} "
+                  f"{[l.gif_url for l in status.result.catalogue]}")
+            gif_missing = [
+                l.asset_name for l in gif_drawn
+                if not (Path(settings.local_storage_dir)
+                        / l.gif_url.rsplit("/", 1)[-1]).is_file()
+            ]
+            check(not gif_missing, "the GIF behind each gif_url exists",
+                  f": missing for {gif_missing}")
+            check(status.result.custom is not None
+                  and bool(status.result.custom.gif_url)
+                  and (Path(settings.local_storage_dir)
+                       / status.result.custom.gif_url.rsplit("/", 1)[-1]
+                       ).is_file(),
+                  "custom.gif_url ships and the file exists",
+                  f": {status.result.custom.gif_url if status.result.custom else None}")
+
             # The synthesised custom design has no catalogue tare and no
             # override was given, so IT (only) gets the "no tare" warning.
             check(any("no tare weight for custom" in w.lower()
                       for w in status.result.warnings),
                   "untared custom design still gets its own tare warning",
                   f": {status.result.warnings}")
+
+        # --- 1a. AUDIT fields survive the response model (hard rule 9) -------
+        if status.status == "done":
+            res = status.result
+            check(all(l.count_upper >= l.count for l in res.catalogue),
+                  "count_upper >= count on every layout",
+                  f": {[(l.count, l.count_upper) for l in res.catalogue]}")
+            # F3/F4 over real HTTP (serialisation, not the route function's
+            # return value straight off the dataclass -- pydantic drops
+            # undeclared fields silently, CLAUDE.md hard rule 9).
+            check(all(l.cuboid_count > 0 for l in res.catalogue)
+                  and all(len(l.reasons) >= 3 for l in res.catalogue),
+                  "every catalogue LayoutOut carries cuboid_count and reasons",
+                  f": {[(l.asset_name, l.cuboid_count, len(l.reasons)) for l in res.catalogue]}")
+            check(all(l.dunnage is not None and len(l.dunnage.slack_lbh) == 3
+                      for l in res.catalogue),
+                  "dunnage.slack_lbh ships on every layout",
+                  f": {[getattr(l.dunnage, 'slack_lbh', None) for l in res.catalogue]}")
+            check(res.custom is not None and res.custom.dunnage is not None
+                  and len(res.custom.dunnage.slack_lbh) == 3,
+                  "custom.dunnage.slack_lbh ships")
+            check(res.custom is not None and res.custom.count_upper >= res.custom.count,
+                  "custom.count_upper ships and is >= count",
+                  f": {(res.custom.count, res.custom.count_upper) if res.custom else None}")
+            check(res.custom is not None and res.custom.dunnage.fits,
+                  "custom box fits its own BOM",
+                  f": slack {res.custom.dunnage.slack_lbh if res.custom else None}")
+
+            # POST /api/truck-fit through the route function and its models.
+            from app.schemas import TruckFitIn
+            tf = app_main.truck_fit(TruckFitIn(
+                outer_l_mm=1200, outer_b_mm=800, outer_h_mm=986,
+                kg_per_box=230, vehicle="32_ft_sxl"), db=db)
+            check((tf.boxes, tf.limited_by, tf.by_volume, tf.by_weight, tf.stack)
+                  == (39, "weight", 48, 39, 2),
+                  "truck-fit: 230kg box in a 32ft -> 39 by weight", f": {tf}")
+            tf0 = app_main.truck_fit(TruckFitIn(
+                outer_l_mm=1200, outer_b_mm=800, outer_h_mm=986,
+                vehicle="32_ft_sxl", max_stack=1), db=db)
+            check((tf0.boxes, tf0.limited_by, tf0.stack) == (24, "volume", 1),
+                  "truck-fit: no weight, max_stack=1 -> 24 by volume, not a 'tie'",
+                  f": {tf0}")
+            try:
+                app_main.truck_fit(TruckFitIn(outer_l_mm=1, outer_b_mm=1,
+                                              outer_h_mm=1, vehicle="nope"), db=db)
+                check(False, "truck-fit: unknown vehicle -> 404")
+            except HTTPException as exc:
+                check(exc.status_code == 404, "truck-fit: unknown vehicle -> 404",
+                      f": {exc.status_code}")
+            check(len(res.poses_searched) == 3,
+                  "unrestricted solve searched 3 poses (one per OBB axis)",
+                  f": {res.poses_searched}")
+            check(res.truck is not None and res.truck.by_volume >= res.truck.boxes
+                  and res.truck.by_weight >= res.truck.boxes and res.truck.stack >= 1,
+                  "truck by_volume/by_weight/stack ship",
+                  f": {res.truck}")
+
+            # confirmed_pose_only: confirm candidate 0 on the part, re-solve.
+            cand0 = wheel_job_candidates(db, wheel)[0]
+            wheel.confirmed_orientation = {"matrix": cand0["rotation_matrix"],
+                                           "label": cand0["label"]}
+            db.commit()
+            posted_locked = app_main.solve_part_endpoint(
+                wheel.id, SolveIn(confirmed_pose_only=True), db=db)
+            _run_enqueued()
+            locked = app_main.solve_job_status(posted_locked.solve_job_id, db=db)
+            check(locked.status == "done"
+                  and locked.result.poses_searched == [cand0["label"]],
+                  "confirmed_pose_only searches exactly the confirmed pose",
+                  f": {getattr(locked.result, 'poses_searched', None)} "
+                  f"error={locked.error}")
+            check(locked.status == "done" and locked.result.catalogue
+                  and all(l.pose_label == cand0["label"]
+                          for l in locked.result.catalogue),
+                  "every locked layout is in the confirmed pose")
+            wheel.confirmed_orientation = None
+            db.commit()
+
+            # clearance_mm reaches the engine: at 0 the wheel's in-plane pitch
+            # is its extent (no interleave), at the default it is extent + 5.
+            posted_c0 = app_main.solve_part_endpoint(
+                wheel.id, SolveIn(clearance_mm=0.0, assets=["PLS12803"]), db=db)
+            _run_enqueued()
+            c0 = app_main.solve_job_status(posted_c0.solve_job_id, db=db)
+            base = unrestricted_by_name = {l.asset_name: l for l in res.catalogue}
+            check(c0.status == "done" and c0.result.clearance_mm == 0.0
+                  and res.clearance_mm == 5.0,
+                  "clearance_mm is echoed back", f": {getattr(c0.result, 'clearance_mm', None)}")
+            l0, l5 = c0.result.catalogue[0], base["PLS12803"]
+            check(l0.pitch_lbh[0] == l5.pitch_lbh[0] - 5.0
+                  and l0.pitch_lbh[1] == l5.pitch_lbh[1] - 5.0
+                  and l0.pitch_lbh[2] == l5.pitch_lbh[2],
+                  "clearance_mm=0 takes 5mm off both in-plane pitches, not the stack",
+                  f": {l0.pitch_lbh} vs {l5.pitch_lbh}")
 
         # --- 1b. UI-2: `assets` restricts the candidate set -------------------
         # Acceptance 1: naming PLS12803 ranks only it, at the SAME count as the

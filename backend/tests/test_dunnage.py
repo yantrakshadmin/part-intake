@@ -182,10 +182,65 @@ def check_archetype(check) -> None:
     check(dunnage.archetype_of(trw.pose_lbh, trw.pitch_lbh) == "pocket_tray",
           "TRW (pitch 376.6 > extent 370) -> pocket_tray",
           f": {dunnage.archetype_of(trw.pose_lbh, trw.pitch_lbh)}")
-    # Matches frontend/src/lib/solve.js::layoutToFit's `interleaved` exactly:
-    # pitch[0] < extent[0] || pitch[1] < extent[1]. Backend owns it now.
+    # A pitch given as-is (no clearance): touching cuboids do not nest.
     check(dunnage.archetype_of((100, 100, 100), (100, 100, 100)) == "pocket_tray",
           "a cuboid (no interleave) -> pocket_tray")
+    # The engine's pitch carries 5mm of in-plane air. A part with a genuine
+    # 10mm interleave measures pitch = extent - 10 + 5 = extent - 5, which
+    # read as "5mm interleave"; at 3mm it read as extent + 2, "no interleave",
+    # and got a pocket tray. With the clearance the predicate sees the parts.
+    ext, pitch, clr = (100, 100, 100), (95, 105, 90), (5.0, 5.0, 0.0)
+    check(dunnage.archetype_of(ext, pitch, clr) == "bar_and_rod",
+          "10mm in-plane + 10mm vertical interleave under 5mm clearance -> bar_and_rod",
+          f": got {dunnage.archetype_of(ext, pitch, clr)}")
+    check(dunnage.archetype_of((100, 100, 100), (105, 105, 100), clr) == "pocket_tray",
+          "cuboid + 5mm clearance -> still pocket_tray")
+    # Both interleaves are needed for bars. In plane only (parts overlap in
+    # plan, stack flat) is a slotted tray: charging a bar the height of a
+    # whole layer pitch there was what turned the wheel's Alternative 1 pose
+    # into 21 parts, and vertical only is TRW (pocket deeper than the part).
+    check(dunnage.archetype_of((372, 140, 356), (377, 121, 356), clr) == "pocket_tray",
+          "in-plane interleave, flat stacking -> pocket_tray (slotted), not bars")
+    # An interleave inside one voxel is raster noise: the Nexon radiator read
+    # 124 extent / 125 pitch at 5mm clearance (4mm) and lost 9 of 18 to bars.
+    check(dunnage.archetype_of((716, 124, 248), (717, 125, 244), clr) == "pocket_tray",
+          "4mm 'interleave' on both axes (Nexon, 4mm voxels) -> pocket_tray")
+    check(dunnage.dead_height_mm((716, 124, 248), (717, 125, 244), clr) == 3.0,
+          "...and its dead height is one 3mm sheet")
+
+
+def check_in_plane_slack(check) -> None:
+    """The budget `lattice_count` never charges, reported per axis.
+
+    The Mubea deck: 1085mm bar in a 1150 inner L with two 35mm side
+    separators = 1155. Slack -5 on L, and the deck shipped it, so this is a
+    report (`overflow`) and not a change to `fits`, which stays the height
+    budget the count was solved on.
+    """
+    mubea = CASES[0]
+    got = dunnage.bom(mubea.pose_lbh, mubea.pitch_lbh, _grid(mubea), mubea.asset.inner)
+    check(abs(got.slack_lbh[0] - (1150 - 1085 - 70)) < 1e-6,
+          "Mubea slack L = inner - bar - 2 side separators = -5mm",
+          f": got {got.slack_lbh[0]:.1f}")
+    check(abs(got.slack_lbh[1] - 0.0) < 1e-6,
+          "Mubea slack B = 750 - (285 + 3 x 155) = 0",
+          f": got {got.slack_lbh[1]:.1f}")
+    check(abs(got.slack_lbh[2] - (790 - got.build_height_mm)) < 1e-6,
+          "slack H is the height budget", f": {got.slack_lbh[2]:.1f}")
+    check(got.overflow == [("L", 5.0)] and got.fits,
+          "overflow names L by 5mm; fits (height) still True",
+          f": overflow {got.overflow}, fits {got.fits}")
+    check(got.as_dict()["slack_lbh"] == [round(v, 2) for v in got.slack_lbh],
+          "slack_lbh is on the wire")
+
+    trw = CASES[1]
+    got = dunnage.bom(trw.pose_lbh, trw.pitch_lbh, _grid(trw), trw.asset.inner)
+    # 1150 - (370 + 2 x 376.6) = 26.8; 750 - (360 + 367.5) = 22.5. Pocket
+    # walls live inside the pitch, nothing stands beside a tray.
+    check(abs(got.slack_lbh[0] - 26.8) < 1e-6 and abs(got.slack_lbh[1] - 22.5) < 1e-6,
+          "TRW slack (26.8, 22.5): nothing beside a pocket tray",
+          f": got {tuple(round(v, 1) for v in got.slack_lbh[:2])}")
+    check(not got.overflow, "TRW has no overflow")
 
 
 def check_bottom_separator_is_the_nest_depth(check) -> None:
@@ -233,8 +288,13 @@ def check_coplanar_bars_charge_once(check) -> None:
     by construction (bar_h = floor(pitch_H)), so the parts stack has already
     paid for them.
     """
-    ext, pitch, grid, inner = (200, 100, 60), (100, 100, 60), (1, 7, 16), (1150, 750, 1000)
+    # 10mm of vertical interleave (60 -> 50): past the one-voxel noise floor
+    # `archetype_of` demands, so this IS the bar system, and bar_h 50 > nest 10
+    # so the bar's dead height is charged and the double-billing would show.
+    # (Zero vertical interleave is a slotted tray now, with no bars at all.)
+    ext, pitch, grid, inner = (200, 100, 60), (100, 100, 50), (1, 7, 19), (1150, 750, 1000)
     got = dunnage.bom(ext, pitch, grid, inner)
+    check(got.archetype == "bar_and_rod", "10mm interleave both ways -> bars")
     bar_h = float(math.floor(pitch[2]))
     dead = got.build_height_mm - got.stack_height_mm
 
@@ -248,14 +308,15 @@ def check_coplanar_bars_charge_once(check) -> None:
           f"side bar still HAS a height ({bar_h}mm), it just does not bill it",
           f": got {side.dims_mm[2]}")
 
-    expect = bar_h + max(0.0, dunnage.TOP_SEPARATOR_MM - got.nest_depth_mm)
+    expect = (bar_h - got.nest_depth_mm
+              + max(0.0, dunnage.TOP_SEPARATOR_MM - got.nest_depth_mm))
     check(abs(dead - expect) < 1e-6,
-          f"zero-interleave bar dead height = one bar + top sep = {expect:.1f}mm",
+          f"shallow-interleave bar dead height = one bar + top sep = {expect:.1f}mm",
           f": got {dead:.1f} (two bars would be {expect + bar_h:.1f})")
 
     # The algebra the fix rests on: one bar's worth, derived two ways.
     #     layers*pitch_H + bar_h - stack  ==  bar_h - nest_depth
-    for e2, p2, g2 in ((148, 68, 10), (60, 60, 16), (80, 60, 10)):
+    for e2, p2, g2 in ((148, 68, 10), (60, 50, 19), (80, 60, 10)):
         stack = e2 + (g2 - 1) * p2
         nest = max(0.0, e2 - p2)
         check(abs((g2 * p2 + math.floor(p2) - stack) - (math.floor(p2) - nest)) < 1e-6,
@@ -282,6 +343,7 @@ def main() -> int:
         check_height_budget(case, check)
     check_overflow_is_detected(check)
     check_archetype(check)
+    check_in_plane_slack(check)
     check_bottom_separator_is_the_nest_depth(check)
     check_coplanar_bars_charge_once(check)
 

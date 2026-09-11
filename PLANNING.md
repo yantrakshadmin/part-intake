@@ -140,9 +140,11 @@ pins it to 40 and 48.
   crate and there is no cargo on the dev machine, NFP needs shapely. The voxel
   raster needs numpy and trimesh, both already installed. **Zero new deps.**
 - **Exact fits are the normal case, not the edge case.** 4 x 155 in 750-285 is
-  exact; so is 3 x 376.6 in 1150. Float division silently loses a whole row — a
-  pitch typed `186.7` instead of `560/3` gives 30 instead of 40. `lattice_count`
-  carries an `EPS` and a test pins it.
+  exact; so is 3 x 376.6 in 1150. `lattice_count` carries an `EPS` of 1e-6 so
+  float noise cannot lose a whole row, and a test pins it. It does **not**
+  absorb a typo: a pitch typed `186.7` instead of `560/3` is 0.03mm wrong and
+  gives 30, not 40 (audit, 2026-09-10) — ground-truth pitches are stored as
+  exact fractions for that reason.
 - Angle ladder, in order of payoff: in-plane rotation θ → **mirrored/interlocked
   pairs** (alternating 180°, where the stab-bar gain lives) → tilted poses.
   **Stop before continuous 3D nesting.**

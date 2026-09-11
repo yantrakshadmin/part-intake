@@ -158,11 +158,22 @@ def test_cap_costs_no_parts(cap: int = SHIPPED_CAP, reverse: bool = False):
             "asset other than the ground-truth one."
         )
         truncated_any |= r["generated"] > r["searched"]
+        # Since flip twins were dropped (one pose per OBB axis) the generator
+        # yields at most three poses and every distinct footprint is searched.
+        # That is what makes the cap free BY CONSTRUCTION rather than by luck
+        # -- so assert the construction, not just its consequence.
+        assert r["generated"] <= 3, \
+            f"{r['file']}: {r['generated']} poses generated -- flip twins are back"
+        assert r["generated"] == r["footprints"], \
+            f"{r['file']}: {r['generated']} poses but {r['footprints']} footprints"
+        assert cap < 3 or not r["lost_footprints"], \
+            f"{r['file']}: footprints cut by the cap: {r['lost_footprints']}"
 
-    # Non-vacuity: if nothing is ever truncated the equalities above are free
-    # and this file is checking nothing.
-    assert truncated_any, \
-        "no case truncated any pose -- this test proves nothing as written"
+    # Non-vacuity used to be "something got truncated". With three poses and a
+    # cap of four nothing ever is, and that is the point; `--cap 2` re-creates
+    # truncation and `--reverse` still proves the count assert can fail.
+    if cap < 3:
+        assert truncated_any, "cap < 3 yet nothing was truncated"
 
 
 def main() -> int:

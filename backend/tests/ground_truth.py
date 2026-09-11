@@ -15,6 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.engine import cuboid_count  # noqa: E402 -- the F3 baseline lives here now
+
 
 @dataclass(frozen=True)
 class Asset:
@@ -103,10 +105,14 @@ CASES = [
 
 
 def cuboid_baseline(part_lbh, asset: Asset) -> tuple[int, tuple]:
-    """Best parts-per-asset treating the part as its bounding box.
+    """Best parts-per-asset treating the part as its bounding box, plus the
+    winning permutation for display.
 
     Tries all 6 axis permutations and keeps the best — a fair baseline. Fixing
-    one orientation flatters the nesting engine, so don't.
+    one orientation flatters the nesting engine, so don't. The count itself
+    is `app.engine.cuboid_count` (F3, ticket): this is the ground truth's own
+    contract now, not a second implementation of it, and the assert below
+    keeps this file's permutation search honest against that import.
 
     Returns (count, winning_permutation).
     """
@@ -117,6 +123,8 @@ def cuboid_baseline(part_lbh, asset: Asset) -> tuple[int, tuple]:
             n *= int(cap // p)
         if n > best:
             best, best_perm = n, perm
+    assert best == cuboid_count(part_lbh, asset.inner), \
+        "ground_truth's own permutation search disagrees with engine.cuboid_count"
     return best, best_perm
 
 
@@ -206,8 +214,9 @@ if __name__ == "__main__":
 
     # `evaluate()` above is only ever handed a stub engine, so nothing in this
     # file puts the REAL nesting engine on the hook for 40 and 48. This does:
-    # customer CAD in, default parameters, counts out. Skips itself when the
-    # fixtures are absent (NDA, not in git).
+    # customer CAD in, default parameters, counts out. FAILS when the
+    # fixtures are absent (NDA, not in git) -- a contract that passes on a
+    # machine with no CAD is not one. INTAKE_SKIP_NDA=1 skips it knowingly.
     print()
     print("engine vs CAD contract (tests/test_clearance.py):")
     from tests.test_clearance import main as _clearance_main

@@ -67,7 +67,15 @@ def test_truck_fit_is_consistent():
     assert light.parts == light.boxes * 40
     heavy = parts_per_truck((1200, 800, 986), 40, 50.0, 30.0, SXL32)
     assert heavy.limited_by == "weight" and heavy.boxes < 48, heavy
-    print(f"  volume-limited {light.boxes} boxes / weight-limited {heavy.boxes} boxes ok")
+    # The bounds are shipped, not re-derived by the load calculator.
+    assert (light.by_volume, heavy.by_weight) == (48, heavy.boxes), (light, heavy)
+    assert light.stack == SXL32[3] // 986 == 2, light
+    # max_stack caps boxes-high: one high halves the volume bound.
+    single = parts_per_truck((1200, 800, 986), 40, 0.001, 0.0, SXL32, max_stack=1)
+    assert (single.stack, single.boxes) == (1, 24), single
+    assert single.floor_grid[0] * single.floor_grid[1] * single.stack == single.by_volume
+    print(f"  volume-limited {light.boxes} boxes / weight-limited {heavy.boxes} boxes"
+          f" / max_stack=1 -> {single.boxes} ok")
 
 
 def test_a_tie_is_not_reported_as_volume():
@@ -84,7 +92,11 @@ def test_a_tie_is_not_reported_as_volume():
     assert fit.kg_per_box == 100.0, fit
     assert fit.boxes == 8, fit
     assert fit.limited_by == "weight and volume", fit
-    print(f"  tie at {fit.boxes} boxes -> {fit.limited_by!r}")
+    # ...but no weight at all is not a tie: by_weight is only a stand-in.
+    unweighed = parts_per_truck((1000, 1000, 1000), 10, 0.0, 0.0, veh)
+    assert unweighed.limited_by == "volume" and unweighed.boxes == 8, unweighed
+    print(f"  tie at {fit.boxes} boxes -> {fit.limited_by!r}; no weight -> "
+          f"{unweighed.limited_by!r}")
 
 
 def test_floor_grid_matches_the_number_it_illustrates():

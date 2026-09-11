@@ -172,7 +172,7 @@ def test_silhouette_round_trips_and_permutes_with_the_footprint():
     orders = list(pose.footprint_orders())
     assert len(orders) == 2, orders
 
-    (ext0, _p0, sil0), (ext1, _p1, sil1) = orders
+    (ext0, _p0, sil0, _c0), (ext1, _p1, sil1, _c1) = orders
     assert np.array_equal(_mask_from_runs(sil0), plan), sil0
     assert np.array_equal(_mask_from_runs(sil1), plan.T), sil1
     assert (sil0["rows"], sil0["cols"]) == (4, 3)
@@ -188,7 +188,7 @@ def test_silhouette_round_trips_and_permutes_with_the_footprint():
     # No pose plan (synthesis builds one from bare numbers) -> no silhouette,
     # not a fabricated one.
     bare = list(Pose("bare", (1, 1, 1), (1, 1, 1)).footprint_orders())
-    assert all(sil is None for _e, _p, sil in bare), bare
+    assert all(sil is None for _e, _p, sil, _c in bare), bare
     print("  silhouette round-trips and transposes with order (1,0,2)")
 
 
@@ -223,7 +223,7 @@ def test_bar_silhouette_is_not_solid():
     mesh, _ = load_unified_mesh(r.glb_path)
     poses = measure_poses(mesh, r.candidates)
     for pose in poses:
-        for extent, _pitch, sil in pose.footprint_orders():
+        for extent, _pitch, sil, _clr in pose.footprint_orders():
             assert sil is not None, f"{pose.label}: no silhouette measured"
             cells = sil["rows"] * sil["cols"]
             filled = sum(c1 - c0 + 1 for _r, c0, c1 in sil["runs"])
@@ -333,8 +333,10 @@ def test_ties_go_to_the_smaller_box():
     from app.nesting import rank_catalogue
 
     # 100mm cube, pitch == extent: no interleave, so counts are pure division.
+    # A pocket tray's 3mm bottom sheet is charged against the inner height
+    # (`dunnage.dead_height_mm`), so the inner is 303 for exactly 3 layers.
     pose = Pose("test", (100.0, 100.0, 100.0), (100.0, 100.0, 100.0))
-    inner = (300.0, 300.0, 300.0)                    # 3x3x3 = 27 either way
+    inner = (300.0, 300.0, 303.0)                    # 3x3x3 = 27 either way
     roomy = Container("ROOMY", inner, (900.0, 900.0, 900.0), 1000.0, "container")
     tight = Container("TIGHT", inner, (310.0, 310.0, 310.0), 1000.0, "container")
 
@@ -348,7 +350,7 @@ def test_ties_go_to_the_smaller_box():
 
     # ...and the tie-break must never outrank a genuinely higher count, however
     # much bigger the winning box is.
-    big = Container("BIG", (600.0, 300.0, 300.0), (2000.0, 2000.0, 2000.0),
+    big = Container("BIG", (600.0, 300.0, 303.0), (2000.0, 2000.0, 2000.0),
                     1000.0, "container")
     ranked = rank_catalogue(None, None, [tight, big], part_kg=1.0, top_n=0,
                             poses=[pose])
@@ -356,12 +358,43 @@ def test_ties_go_to_the_smaller_box():
         f"a smaller box outranked a higher count: " \
         f"{[(l.asset_name, l.count) for l in ranked]}"
 
+    # The feedback itself: at inner H 300 the 3mm sheet costs the third layer.
+    flush = Container("FLUSH", (300.0, 300.0, 300.0), (310.0, 310.0, 310.0),
+                      1000.0, "container")
+    got = rank_catalogue(None, None, [flush], part_kg=1.0, top_n=0, poses=[pose])[0]
+    assert (got.count, got.grid) == (18, (3, 3, 2)), (got.count, got.grid)
     print("  equal counts -> smaller outer first (TIGHT before ROOMY); "
-          "higher count still wins over a smaller box")
+          "higher count still wins over a smaller box; 3mm sheet charged "
+          "(300 inner -> 2 layers)")
+
+
+def test_count_upper_is_the_quantisation_ceiling():
+    """`count` is the floor of the raster's band and `count_upper` its ceiling.
+
+    Surface voxels round outward, so extent is over by up to a voxel and the
+    touching pitch by up to a voxel: one voxel tighter on both is the most the
+    geometry could allow. The YXA bar at 4mm reads 40 with ceiling 44 -- and a
+    3mm raster returns 44 outright (audit, 2026-09-10). Bare-number poses
+    carry no voxel and get no band.
+    """
+    from app.catalogue import Container
+    from app.nesting import layouts_for
+    box = Container("PLS12801", (1150.0, 750.0, 790.0), (1200.0, 800.0, 986.0),
+                    600.0, "container")
+    bar = Pose("bar", (1092.0, 300.0, 148.0), (1092.0, 145.0, 68.0), voxel_mm=4.0)
+    best = layouts_for([bar], box, part_kg=5.0)[0]
+    assert (best.count, best.count_upper) == (40, 44), (best.count, best.count_upper)
+    assert best.count_upper >= best.count
+    bare = Pose("bare", (1092.0, 300.0, 148.0), (1092.0, 145.0, 68.0))
+    b = layouts_for([bare], box, part_kg=5.0)[0]
+    assert b.count_upper == b.count == 40, (b.count, b.count_upper)
+    print(f"  YXA-shaped bar at 4mm: {best.count} (ceiling {best.count_upper}); "
+          f"bare numbers: {b.count} (no band)")
 
 
 if __name__ == "__main__":
     for fn in (test_ground_truth, test_exact_fit_is_not_off_by_one, test_weight_cap,
+               test_count_upper_is_the_quantisation_ceiling,
                test_pitch_is_clear_at_every_lattice_multiple,
                test_cuboid_has_no_interleave,
                test_silhouette_round_trips_and_permutes_with_the_footprint,

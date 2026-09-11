@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
-import { loadPlan } from '../lib/packing.js'
-import { errorDetail } from '../lib/solve.js'
+import { errorDetail, floorPlanFromTruck } from '../lib/solve.js'
 
-/** Standalone box-into-vehicle calculator. No part required. */
+const BIND_CLASS = { volume: 'volume', weight: 'weight', 'weight and volume': 'both' }
+
+/** Standalone box-into-vehicle calculator. No part required — the truck
+ *  numbers and the floor pattern both come straight off POST /api/truck-fit
+ *  (engine.parts_per_truck), never re-derived here (CLAUDE.md hard rule 9;
+ *  the client-side floor-fit this used to carry disagreed with the backend
+ *  on the floor pattern — F-AUDIT-1). */
 export default function LoadCalculator() {
   const [packaging, setPackaging] = useState([])
   const [vehicles, setVehicles] = useState([])
@@ -12,6 +17,8 @@ export default function LoadCalculator() {
   const [weightPerBox, setWeightPerBox] = useState('')
   const [maxStack, setMaxStack] = useState('')
   const [saveMsg, setSaveMsg] = useState('')
+  const [truck, setTruck] = useState(null)
+  const [error, setError] = useState('')
 
   useEffect(() => {
     fetch('/api/packaging').then((r) => r.json()).then((d) => {
@@ -40,9 +47,30 @@ export default function LoadCalculator() {
     if (box && box.max_weight_kg != null) setWeightPerBox(String(box.max_weight_kg))
   }, [boxId]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const plan = useMemo(() => {
-    if (!box || !vehicle) return null
-    return loadPlan({ vehicle, box, weightPerBox: +weightPerBox || 0, maxStack: +maxStack || 0 })
+  // Debounced POST /api/truck-fit on any change of box/vehicle/weight/stack.
+  // AbortController drops a stale response if the inputs change again before
+  // it lands (F2-2 F4 pattern, applied here too).
+  useEffect(() => {
+    if (!box || !vehicle) { setTruck(null); setError(''); return undefined }
+    const controller = new AbortController()
+    const t = setTimeout(() => {
+      fetch('/api/truck-fit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          outer_l_mm: box.outer_l_mm, outer_b_mm: box.outer_b_mm, outer_h_mm: box.outer_h_mm,
+          kg_per_box: +weightPerBox || 0,
+          vehicle: vehicle.name,
+          max_stack: +maxStack || 0,
+        }),
+        signal: controller.signal,
+      }).then(async (r) => {
+        if (!r.ok) throw new Error(errorDetail((await r.json().catch(() => null))?.detail, `Truck fit failed (${r.status})`))
+        return r.json()
+      }).then((d) => { setTruck(d); setError('') })
+        .catch((e) => { if (e.name !== 'AbortError') { setTruck(null); setError(e.message) } })
+    }, 250)
+    return () => { clearTimeout(t); controller.abort() }
   }, [box, vehicle, weightPerBox, maxStack])
 
   async function saveCustomBox() {
@@ -66,6 +94,14 @@ export default function LoadCalculator() {
       setSaveMsg(`Saved ${saved.item_code} as draft`)
     } catch (e) { setSaveMsg(e.message) }
   }
+
+  const noWeightGiven = (+weightPerBox || 0) === 0
+  const bindClass = truck ? (truck.boxes === 0 ? 'none' : (BIND_CLASS[truck.limited_by] || truck.limited_by)) : ''
+  const cubeUtilization = truck && box
+    ? (truck.boxes * box.outer_l_mm * box.outer_b_mm * box.outer_h_mm)
+      / (vehicle.cargo_l_mm * vehicle.cargo_b_mm * vehicle.cargo_h_mm)
+    : 0
+  const plan = truck && box && truck.boxes > 0 ? floorPlanFromTruck(truck, box) : null
 
   return (
     <>
@@ -140,34 +176,35 @@ export default function LoadCalculator() {
         )}
       </div>
 
-      {plan && vehicle && box && (
+      {error && <div className="warning">⚠ <span>{error}</span></div>}
+
+      {truck && vehicle && box && (
         <div className="card form-card result-card">
           <h2>Result</h2>
           <div className="result-grid">
             <div>
               <div className="big-number">
-                {plan.total}
+                {truck.boxes}
                 <span className="big-unit"> boxes</span>
               </div>
-              <div className={`bind-chip ${plan.binding}`}>
-                {plan.binding === 'weight' && '⚠ payload limits this load'}
-                {plan.binding === 'volume' && 'volume limits this load'}
-                {plan.binding === 'both' && 'volume and payload balanced'}
-                {plan.binding === 'none' && "box doesn't fit this vehicle"}
+              <div className={`bind-chip ${bindClass}`}>
+                {truck.boxes === 0 && "box doesn't fit this vehicle"}
+                {truck.boxes > 0 && truck.limited_by === 'weight' && '⚠ payload limits this load'}
+                {truck.boxes > 0 && truck.limited_by === 'volume' && 'volume limits this load'}
+                {truck.boxes > 0 && truck.limited_by === 'weight and volume' && 'volume and payload balanced'}
               </div>
               <dl className="result-facts">
-                <div><dt>Floor</dt><dd className="mono">{plan.floor.count} positions — {plan.floor.desc}</dd></div>
-                <div><dt>Stacking</dt><dd className="mono">{plan.layers} high
-                  ({box.outer_h_mm} mm × {plan.layers} = {box.outer_h_mm * plan.layers} ≤ {vehicle.cargo_h_mm} mm)</dd></div>
-                <div><dt>By volume</dt><dd className="mono">{plan.byVolume} boxes
-                  ({Math.round(plan.cubeUtilization * 100)}% cube at final count)</dd></div>
+                <div><dt>Floor</dt><dd className="mono">
+                  {truck.floor_grid[0] * truck.floor_grid[1]} positions — {truck.floor_grid[0]} × {truck.floor_grid[1]}</dd></div>
+                <div><dt>Stacking</dt><dd className="mono">{truck.stack} high</dd></div>
+                <div><dt>By volume</dt><dd className="mono">{truck.by_volume} boxes
+                  ({Math.round(cubeUtilization * 100)}% cube at final count)</dd></div>
                 <div><dt>By payload</dt><dd className="mono">
-                  {plan.byWeight === Infinity ? '— (no box weight given)' :
-                    `${plan.byWeight} boxes (${Math.round(plan.weightUtilization * 100)}% of ${vehicle.payload_kg} kg)`}
+                  {noWeightGiven ? '— (no box weight given)' : `${truck.by_weight} boxes`}
                 </dd></div>
               </dl>
             </div>
-            <FloorPlan vehicle={vehicle} placements={plan.floor.placements} />
+            {plan && <FloorPlan vehicle={vehicle} placements={plan.floor.placements} />}
           </div>
         </div>
       )}

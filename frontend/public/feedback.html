@@ -94,18 +94,18 @@
 
 <script>
 const SCREENS = [
-  { id:'intake-step', title:'New part — STEP upload',
-    url:'/?page=intake&mode=stp',
+  { id:'intake-step', title:'New project — STEP upload',
+    url:'/?mode=stp#/projects/new',
     hint:'Drop a real .stp file into the frame to review the upload spinner and the Confirm-orientation screen (3D isometric + front/top drawings).' },
-  { id:'intake-manual', title:'New part — Manual entry',
-    url:'/?page=intake&mode=manual',
+  { id:'intake-manual', title:'New project — Manual entry',
+    url:'/?mode=manual#/projects/new',
     hint:'Empty form state. Type dimensions to watch the live packaging fit appear.' },
-  { id:'intake-results', title:'Packaging results (demo part pre-filled)',
-    url:'/?page=intake&mode=manual&demo=1',
-    hint:'Pre-filled 400×300×150 / 12 kg demo part — box fit, insert tray drawings, 3D tray and the animated truck loading plan.' },
-  { id:'parts', title:'Parts list', url:'/?page=parts',
-    hint:'Saved parts with search. Needs the backend running with some parts saved.' },
-  { id:'calc', title:'Load calculator', url:'/?page=calc',
+  { id:'intake-results', title:'New project (demo part pre-filled)',
+    url:'/?mode=manual&demo=1#/projects/new',
+    hint:'Pre-filled 400×300×150 / 12 kg demo part — Save & calculate to create the project and see the packaging fit.' },
+  { id:'parts', title:'Projects list', url:'/#/projects',
+    hint:'Projects with search. Needs the backend running with some projects saved.' },
+  { id:'calc', title:'Load calculator', url:'/#/tools/load-calculator',
     hint:'Standalone truck load calculator.' },
 ]
 

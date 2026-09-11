@@ -44,6 +44,25 @@ logger = logging.getLogger(__name__)
 
 EPS = 1e-6
 
+# Clearance the caller's pitch already carries, per asset axis. Zero by
+# default -- a deck's pitch is taken as given -- and `engine.solve` passes the
+# clearance `nesting.measure_poses` baked in. The archetype predicate has to
+# take it back out: it asks whether the PARTS nest, and a pitch that already
+# carries 5mm of air answers a different question -- a part with a genuine
+# 3mm interleave read pitch = extent + 2 and was handed a pocket tray, the
+# wrong system from the wrong generator.
+NO_CLEARANCE_LBH = (0.0, 0.0, 0.0)
+
+# An interleave smaller than this is raster noise, not a nesting mechanism.
+# `nesting.occupancy` rounds outward per pose, so two rasters of the same
+# part disagree by up to one voxel (4mm); the Nexon radiator, a near-cuboid,
+# read a 4mm in-plane "interleave" at 4mm voxels, was handed the bar system,
+# and the bar's height (a full 244mm layer pitch with a 4mm nest depth) was
+# then charged against the box: 18 shipped, 9 predicted. Same value as
+# `nesting.VOXEL_MM`, kept separate because this is a dunnage judgement
+# ("would anyone build bars for a 4mm overlap") rather than a raster fact.
+INTERLEAVE_MIN_MM = 4.0
+
 # ---------------------------------------------------------------------------
 # PROVISIONAL. PLANNING §6 stock vocabulary -- what the team buys, not
 # anything measured. DOMAIN.md (owned by the packaging engineers) does not
@@ -135,11 +154,27 @@ class Bom:
     build_height_mm: float = 0.0   # stack + dead height from the dunnage
     inner_h_mm: float = 0.0
     nest_depth_mm: float = 0.0     # vertical interleave: extent_H - pitch_H
+    # Inner minus (lattice span + dunnage thickness) per asset axis, mm. The
+    # in-plane budget `lattice_count` never charges: it fills the inner with
+    # parts and zero wall clearance, then this BOM adds two side separators
+    # beside them. On the Mubea deck's own numbers that is 1085 + 2 x 35 =
+    # 1155 in a 1150 inner, slack -5 -- a tension the SHIPPED design carries
+    # too (the bar ends presumably sit into the separators), so it is
+    # reported, not enforced: `fits` stays the height budget, which is the
+    # axis the count was solved on, and negative in-plane slack reaches the
+    # engineer as a warning with the number in it.
+    slack_lbh: tuple = (0.0, 0.0, 0.0)
     caveat: str = CAVEAT
 
     @property
     def fits(self) -> bool:
         return self.build_height_mm <= self.inner_h_mm + EPS
+
+    @property
+    def overflow(self) -> list:
+        """Axes whose dunnage does not fit beside the lattice: [(axis, mm)]."""
+        return [(ax, round(-s, 1)) for ax, s in zip("LBH", self.slack_lbh)
+                if s < -EPS]
 
     def as_dict(self) -> dict:
         return {
@@ -149,25 +184,56 @@ class Bom:
             "build_height_mm": round(self.build_height_mm, 2),
             "inner_h_mm": round(self.inner_h_mm, 2),
             "nest_depth_mm": round(self.nest_depth_mm, 2),
+            "slack_lbh": [round(s, 2) for s in self.slack_lbh],
             "fits": self.fits,
             "caveat": self.caveat,
         }
 
 
-def archetype_of(extent_lbh, pitch_lbh) -> str:
+def archetype_of(extent_lbh, pitch_lbh, clearance_lbh=NO_CLEARANCE_LBH,
+                 min_interleave_mm: float = INTERLEAVE_MIN_MM) -> str:
     """Which dunnage system this lattice needs.
 
-    The predicate is the in-plane interleave -- `pitch < extent` on either
-    floor axis -- which is exactly what `frontend/src/lib/solve.js::layoutToFit`
-    computed as `interleaved`. Per CLAUDE.md hard rule 9 the backend owns it and
-    ships it; the frontend must not re-derive it.
+    Bars and rods are the Mubea mechanism: layers sit INTO each other on bars
+    whose height is the vertical pitch, and the parts overlap in plan. Both
+    interleaves have to be real -- beyond `min_interleave_mm` -- for that
+    system to make sense. A part that overlaps in plan but stacks flat is a
+    slotted tray per layer with a sheet between (the pocket-tray structure
+    with cells at the pitch); a part that nests vertically but not in plan is
+    a pocket tray whose pockets are deeper than the part (TRW). The touching
+    pitch is the measured pitch minus the clearance baked into it. Per
+    CLAUDE.md hard rule 9 the backend owns this and ships it.
     """
-    interleaved = (pitch_lbh[0] < extent_lbh[0] - EPS
-                   or pitch_lbh[1] < extent_lbh[1] - EPS)
-    return "bar_and_rod" if interleaved else "pocket_tray"
+    def nests(i):
+        return pitch_lbh[i] - clearance_lbh[i] < extent_lbh[i] - min_interleave_mm
+
+    in_plane = nests(0) or nests(1)
+    vertical = nests(2)
+    return "bar_and_rod" if in_plane and vertical else "pocket_tray"
+
+
+def dead_height_mm(extent_lbh, pitch_lbh, clearance_lbh=NO_CLEARANCE_LBH,
+                   **kw) -> float:
+    """Height the insert adds ABOVE the parts stack, mm. Independent of the grid.
+
+    Every `net_height_mm` in both generators is a function of extent_H,
+    pitch_H and the archetype alone -- a bar taller than the nest depth, a top
+    separator above it, the sheet under the bottom tray -- never of how many
+    layers there are. So the count can charge it up front:
+    `nesting.layouts_for` and `synthesis.synthesise` both hand `lattice_count`
+    an inner height of `inner_H - dead_height_mm(...)`, which is the feedback
+    the audit found missing (dunnage designed after the count, then reported
+    as not fitting). By construction `Bom.fits` is then true on H for every
+    layout the engine returns; it stays reported because callers can still
+    feed `bom()` a grid the engine did not solve for.
+    """
+    return sum(e.net_height_mm for e in
+               bom(extent_lbh, pitch_lbh, (1, 1, 1), (1e9, 1e9, 1e9),
+                   clearance_lbh, **kw).elements)
 
 
 def bom(extent_lbh, pitch_lbh, grid, inner_lbh,
+        clearance_lbh=NO_CLEARANCE_LBH,
         side_separator_mm: float = SIDE_SEPARATOR_MM,
         top_separator_mm: float = TOP_SEPARATOR_MM,
         top_separator_inset_mm: float = TOP_SEPARATOR_INSET_MM,
@@ -189,7 +255,7 @@ def bom(extent_lbh, pitch_lbh, grid, inner_lbh,
     nest_depth = max(0.0, ext_h - pitch_h)
     stack = ext_h + (layers - 1) * pitch_h
 
-    kind = archetype_of(extent_lbh, pitch_lbh)
+    kind = archetype_of(extent_lbh, pitch_lbh, clearance_lbh)
     build = (_bar_and_rod if kind == "bar_and_rod" else _pocket_tray)
     elements = build(extent_lbh, pitch_lbh, grid, inner_lbh, nest_depth,
                      side_separator_mm=side_separator_mm,
@@ -200,12 +266,21 @@ def bom(extent_lbh, pitch_lbh, grid, inner_lbh,
                      centre_bar_w_mm=centre_bar_w_mm,
                      side_bar_w_mm=side_bar_w_mm)
     dead = sum(e.net_height_mm for e in elements)
+    # In-plane: the lattice span plus whatever stands BESIDE it. Side
+    # separators are the only such element (they close the L ends; the bars
+    # lie in layer boundaries and pocket walls are inside the pitch already).
+    span = [float(e) + (int(n) - 1) * float(p)
+            for e, p, n in zip(extent_lbh, pitch_lbh, grid)]
+    beside_l = 2 * side_separator_mm if kind == "bar_and_rod" else 0.0
+    slack = (float(inner_lbh[0]) - span[0] - beside_l,
+             float(inner_lbh[1]) - span[1],
+             inner_h - (stack + dead))
     result = Bom(archetype=kind, elements=elements, stack_height_mm=stack,
                  build_height_mm=stack + dead, inner_h_mm=inner_h,
-                 nest_depth_mm=nest_depth)
-    if not result.fits:
-        logger.warning("dunnage BOM overflows: build %.1f > inner H %.1f (%s)",
-                       result.build_height_mm, inner_h, kind)
+                 nest_depth_mm=nest_depth, slack_lbh=slack)
+    if result.overflow:
+        logger.debug("dunnage BOM overflows the inner on %s (%s)",
+                       result.overflow, kind)
     return result
 
 

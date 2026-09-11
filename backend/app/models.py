@@ -87,8 +87,19 @@ class SolveJob(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)  # uuid4
     part_id: Mapped[int] = mapped_column(Integer, index=True)
+    # F1: which Project this run belongs to, nullable — solves from before
+    # projects existed, and the standalone /api/parts/{id}/solve path, both
+    # have none. Added via main._ensure_added_columns (landmine 5), not
+    # create_all, since solve_jobs already exists on every dev.db.
+    project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(16), default="pending")
     result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # F1: the SAME params dict sent to the task (tare_kg, vehicle, top_n,
+    # assets, confirmed_pose_only, clearance_mm), recorded at enqueue time so
+    # a run's inputs survive over HTTP. result_json cannot hold this: the
+    # worker overwrites that column with the result (see run_solve's
+    # docstring), so this is a separate column, not a reuse of that one.
+    inputs_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime, default=dt.datetime.utcnow
@@ -111,6 +122,69 @@ class PartProfile(Base):
     job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     glb_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     confirmed_orientation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # F1: which Project this part belongs to, nullable — parts created before
+    # projects existed have none. Added via main._ensure_added_columns.
+    project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime, default=dt.datetime.utcnow
+    )
+
+
+class Project(Base):
+    """F1: a customer part being pursued, owning one PartProfile and many
+    SolveJobs. Status is hand-driven (no automation on solve completion) —
+    the ladder is enforced only via schemas.ProjectPatch's Literal."""
+
+    __tablename__ = "projects"
+
+    STATUSES = ("draft", "solved", "proposal_sent", "trial", "approved", "archived")
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer: Mapped[str] = mapped_column(String(128), index=True)
+    part_number: Mapped[str] = mapped_column(String(64), index=True)
+    part_name: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16), default="draft",
+                                        server_default="draft")
+    owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    annual_volume: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    route_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    vehicle_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The customer's OWN current parts-per-box and box, entered — never
+    # estimated (hard rule 2/PRD F3(b)). "customer_count" not "baseline_count":
+    # this is what the customer told us, not a number the engine derived.
+    customer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    customer_box: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    cost_per_trip: Mapped[float | None] = mapped_column(Float, nullable=True)
+    emission_factor_kg_per_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recommended_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime, default=dt.datetime.utcnow
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime, default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow
+    )
+
+
+class Proposal(Base):
+    """F7: a rendered PDF proposal for one project, from one run.
+
+    A NEW table -- `create_all` makes it for free, so no `_ensure_added_columns`
+    shim is needed (contrast `SolveJob.project_id`, added to an EXISTING table).
+    """
+
+    __tablename__ = "proposals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, index=True)
+    # Which SolveJob the PDF's numbers come from -- recommended_run_id if the
+    # project has one, else the newest done run, resolved once at POST time
+    # (see main.create_proposal) so a later re-solve does not silently change
+    # what an already-created proposal says.
+    run_id: Mapped[str] = mapped_column(String(36))
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    pdf_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime, default=dt.datetime.utcnow
     )

@@ -41,8 +41,18 @@ def test_shipped_counts_from_cad():
 
     missing = [p.name for p, *_ in CASES if not p.exists()]
     if missing:
-        print(f"  skipped: no customer fixtures (NDA, not in git): {missing}")
-        return
+        # FAIL, do not skip. This is the one test that puts the real engine on
+        # the hook for 40 and 48; `ground_truth.py` used to print "all
+        # ground-truth counts reproduced from CAD" on a machine with no CAD.
+        # Set INTAKE_SKIP_NDA=1 to run the rest of the suite without them.
+        import os
+        msg = f"customer fixtures missing (NDA, not in git): {missing}"
+        if os.environ.get("INTAKE_SKIP_NDA"):
+            print(f"  SKIPPED by INTAKE_SKIP_NDA -- {msg}")
+            return "skipped"
+        raise AssertionError(msg + " -- the CAD contract cannot run. Copy the "
+                             "files into tests/fixtures/customer/ or set "
+                             "INTAKE_SKIP_NDA=1 to skip knowingly.")
 
     for path, part_kg, asset, target, grid in CASES:
         r = extract_part(str(path))
@@ -63,10 +73,16 @@ def test_shipped_counts_from_cad():
 
 
 def main() -> int:
+    skipped = False
     for fn in (test_shipped_counts_from_cad,):
         print(f"{fn.__name__}:")
-        fn()
-    print("\nall ground-truth counts reproduced from CAD")
+        try:
+            skipped |= fn() == "skipped"
+        except AssertionError as exc:
+            print(f"  FAIL: {exc}")
+            return 1
+    print("\nNO ground-truth count was checked against CAD (skipped)" if skipped
+          else "\nall ground-truth counts reproduced from CAD")
     return 0
 
 

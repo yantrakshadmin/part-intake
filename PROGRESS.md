@@ -1818,3 +1818,432 @@ he has to.** It is in `.env` (gitignored), the value is not in any tracked file
 or in git history, and no code in the repo reads it — the only references
 anywhere are `.env` itself and this log. Format note for later: the AI Studio
 key is the newer `AQ.`-prefixed kind, not `AIza`.
+
+## 2026-09-10 (later) — Whole-approach audit, no code changed
+
+Asked for: audit the approach and find the flaws. Read PLANNING, the engine
+(nesting/engine/synthesis/dunnage/geometry/worker), the contract tests and
+the frontend adapter. Two measurements, both with the venv:
+
+**The 40 is a voxel-size artefact.** YXA bar in PLS12801, defaults otherwise:
+
+| VOXEL_MM | count | grid | pose extent |
+|---|---|---|---|
+| 3 | 44 | (1,4,11) | 1095x303x147 |
+| 4 | **40** | (1,4,10) | 1092x300x148 |
+| 5 | 36 | (1,9,4) | 1095x145x305 (different pose wins) |
+| 6 | 36 | (1,9,4) | 1098x150x306 |
+
+Nothing physical sets the vertical pitch; the deck's is the 66mm bar. The
+constant is standing in for DOMAIN.md. And the YXA bar is not the Mubea part
+(298 wide vs 190), so the CAD contract reproducing 40 is coincidence.
+
+**PLANNING §4's EPS claim is false.** `lattice_count` with pitch 186.7 instead
+of 560/3 gives 30, not 40; EPS=1e-6 cannot absorb a 0.03mm typo. Documented
+safety net does not exist.
+
+Ranked flaws recorded in the session summary (Rahul has it): pitch derived
+from the part alone with dunnage designed afterwards (root of the Tata 3/4
+miss, the 1155>1150 side separators, custom `fits: False`); N=2 calibration
+with >=5 knobs; ground-truth run passes vacuously without NDA fixtures;
+custom box height overhead 40mm vs catalogue 196mm biases the truck card;
+pose search is accidental (area key, cap 4, 0.5mm dedup); confirmed pose and
+dims never reach the engine; two truck calculators and three sets of dunnage
+constants still live (engine, packing.js loadPlan/trayGeometry); frontend
+poll cap 240s vs worker limit 600s so the UI reports "no worker" on a live
+solve of any radiator-class part.
+
+## 2026-09-10 (deploy session) — part-intake is on GCP
+
+Separate session, working from `deploy/BRIEF.md`. No application source
+touched; nothing committed.
+
+**Live:** https://34-47-230-213.sslip.io — HTTP basic auth site-wide
+(user `yantra`; password in Secret Manager `part-intake-basic-auth`), Let's
+Encrypt cert via Caddy on the sslip.io name. Project `yantra-part-intake`
+(new, org trakkia.com, gcloud configuration `part-intake`), VM
+`part-intake-vm` in `asia-south1-a` (e2-standard-2, 50 GB, Debian 12), static
+IP 34.47.230.213, SSH only through IAP. Images in Artifact Registry
+`asia-south1-docker.pkg.dev/yantra-part-intake/part-intake/{backend,frontend}`
+tagged `latest` + `20260910-101504`. Daily boot-disk snapshot at 20:00 UTC,
+7-day retention. Secrets: `part-intake-basic-auth`, `part-intake-db-password`.
+Runbook: `deploy/README.md`. Ship: `deploy/deploy.sh`.
+
+**Verified over real HTTPS:** `/api/packaging` returns the seeded catalogue;
+`/` returns the SPA; no credentials → 401 on both; all five compose services
+Up, worker log `celery@1b507d5b2959 ready` on `redis://redis:6379/0`. End to
+end with the QY2i steering-wheel STEP: upload 13 MB in 3.5 s → job `done` in
+~15 s, `dims [371.0, 353.9, 137.71] mm`, and the **worker** log shows
+`Task extract_step[...] succeeded in 10.2s` with zero in-process-fallback
+lines in the API log. Part created → solve `done` in 25 s, `solve_part`
+succeeded in the worker log, catalogue **PLS1280 count=48 grid=[3,2,8]**
+(ground truth) and PLS12803 also 48. `deploy.sh --no-build` rerun is clean.
+
+**Not verified:** a snapshot has not yet been taken (first one runs 20:00
+UTC) so the restore procedure in the README is untested; no browser session,
+only curl; cert renewal (Caddy handles it, first renewal ~Nov 2026).
+
+**Caveat for the PM:** Cloud Build uploads the *working tree*, not HEAD. At
+10:15 UTC the tree was at 97fcc33 with only PROGRESS.md modified, but by the
+end of this session 23 source files under backend/app, backend/tests and
+frontend/src showed uncommitted edits from another session. The source
+tarball was uploaded at 15:45:04 IST; `backend/app/{main,worker,engine}.py`
+were modified 15:42–15:43 IST, so those uncommitted backend edits ARE in the
+live backend image. `frontend/src/lib/{packing,solve}.js` (15:49, 15:52) are
+not. Commit, then rerun `deploy/deploy.sh`, to know exactly what is live.
+
+**Files added:** `frontend/Dockerfile`, `deploy/Caddyfile`,
+`deploy/docker-compose.prod.yml`, `deploy/cloudbuild.yaml`, `deploy/deploy.sh`,
+`deploy/vm-startup.sh`, `deploy/README.md` (plus the PM's `deploy/BRIEF.md`).
+Also: compute default SA granted `roles/cloudbuild.builds.builder` and
+`roles/artifactregistry.reader` (new projects grant it nothing, first build
+failed on `storage.objects.get`); default `allow-ssh`/`allow-rdp` firewall
+rules deleted. Cost ≈ $70–75/month.
+
+## 2026-09-10 (evening) — Audit fixes: dunnage feeds the count, the engine reports its own uncertainty
+
+Goal set by Rahul: fix the audit's flaws and make this the best engine we can.
+Deployment handed to a second session via `deploy/BRIEF.md` (untouched here).
+Everything below is in the working tree, **uncommitted**; `/code-review` ran
+(three reviewers) and every CONFIRMED finding is fixed with a check behind it.
+
+**The root fix — dunnage now feeds back into the count.** `dunnage.dead_height_mm`
+(pure function of extent, pitch, archetype; grid-independent) is charged
+against the inner height by both `nesting.layouts_for` and
+`synthesis.synthesise`. A pocket tray's 3mm sheet, a bar or top separator
+taller than the nest depth, come out of the room the lattice gets. Mubea and
+TRW do not move (dead 0 and 3mm), and `Bom.fits` is now true on H by
+construction for anything the engine returns. `test_self_consistent` recomputes
+on inner-minus-dead — the review caught the first version of this putting a
+layer back on the taller inner (42 reported in a box solved for 21).
+
+**Also landed:**
+- **Pose search complete by construction.** One pose per OBB axis (lower-CG
+  sign); the flipped twin has the same footprint, height and — in exact
+  geometry — pitch. On the raster the two signs differ by up to a voxel (bar
+  axis 1: (69,144) vs (73,140), 60 vs 55 catalogue-wide) — quantisation noise
+  the `count_upper` band covers, recorded in the docstring. 3 poses searched,
+  nothing cut; ~25% cheaper.
+- **`count_upper`** on every layout and the custom design: `lattice_count` one
+  voxel tighter. YXA bar 40 → ceiling 44, which 3mm and 2mm rasters return
+  outright. The single constant no longer decides the answer silently.
+- **Archetype sees the parts, not the air — and needs both interleaves.**
+  `archetype_of(…, clearance_lbh)` subtracts the baked-in clearance, and
+  `bar_and_rod` now requires interleave in plane AND vertically, each beyond
+  one voxel (`INTERLEAVE_MIN_MM = 4`). The first cut required in-plane only:
+  the Nexon radiator's 4mm raster-noise overlap became "bars", the new dead
+  height charged a 244mm bar, and the pinned 18 fell to 9 — caught by
+  `test_tata --cad`, which is exactly what the fixtures were added for. In
+  plane only is a slotted tray (pocket-tray structure); vertical only is TRW.
+  Worker's drawing recomputes the BOM with the job's own clearance.
+- **In-plane budget reported.** `Bom.slack_lbh` per axis; Mubea's own deck
+  reads −5 on L (1085 + 2×35 in 1150). Solve warns with the number, on any axis.
+- **Custom box outer H = inner + 196** (catalogue overhead), not + 40.
+- **Pose lock**: `SolveIn.confirmed_pose_only`; `poses_searched` echoed.
+- **Clearance is a parameter**: `SolveIn.clearance_mm` (default 5), echoed
+  back. The Tata decks pack their dense axis at 0.3mm (X104) and 10.3mm (P118);
+  no constant is right for both.
+- **One truck calculator.** `POST /api/truck-fit` runs `engine.parts_per_truck`
+  (now `max_stack`, `by_volume`, `by_weight`, `stack`); `loadPlan`/`floorFit`/
+  `bestFill` deleted from the frontend. No-weight is labelled "volume", not a
+  tie (review).
+- **Frontend poll**: pending 90s → "no worker"; processing up to 660s on its
+  own counter (review: a shared counter charged pickup time to the run).
+  `interleaved` from `dunnage.archetype`; tray drawing takes pocket depth and
+  sheet from the BOM; `count_upper`, pose checkbox, clearance input, small print.
+- **Contract fails without fixtures.** `test_clearance` raises when the NDA CAD
+  is absent (`INTAKE_SKIP_NDA=1` skips and says so). PLANNING §4's false EPS
+  claim corrected.
+- **Tata STEP files are fixtures** (gitignored). `test_tata.py --cad` runs the
+  engine on them, all poses and the deck's pose, both pinned:
+
+  | case | all poses | deck pose | deck ships |
+  |---|---|---|---|
+  | X104 | 64 (8,1,8) | 55 (11,1,5) | 60 |
+  | Nexon EV | 18 (9,1,2) | 18 | 18 |
+  | P118 | 12 (2,1,6) | 11 (11,1,1) | 10 |
+  | P125/P126 | 64 (8,1,8) | 55 (11,1,5) | 65 (60 regular) |
+
+  In the deck's pose the remaining gap is the clearance constant, not geometry.
+
+**Verified:** `ground_truth.py` full sweep (40/PLS12801, 48/PLS1280 from CAD,
+Tata arithmetic, dunnage), `test_solve_api` through the response models
+(count_upper, slack_lbh, poses_searched, clearance_mm, truck bounds,
+confirmed_pose_only → one pose, truck-fit 39/24/404), tester over real HTTP on
+:8011 (every field, in-process fallback), `test_pose_search`,
+`test_lattice_vectors`, `npm run build` + four check scripts.
+
+**Open, from the reviews and the tester:**
+- `.delay()` against a live redis with no worker succeeds and the job hangs at
+  pending; the dev fallback only fires on a refused connection. The UI now says
+  "no worker" after 90s; the API still cannot tell. Landmine 2, unchanged.
+- In-plane-only interleave gets the pocket-tray BOM (cells at the pitch, so
+  the "pockets" overlap in plan — a slotted tray). The frontend's tray drawing
+  refuses that case via `interleave` ratios; a real slotted-tray generator is
+  DOMAIN.md.
+- `count_upper` is an estimate of the ceiling (extent can be over by two
+  voxels), documented as such.
+- Nothing seen in a browser this session. Item 7 of `## Next` stands.
+
+### Same day, later — CI/CD: push to `main` deploys
+
+Repo created: **github.com/yantrakshadmin/part-intake** (private; created under
+yantra-logistics first, transferred to yantrakshadmin where every other repo
+lives). Local branch renamed `master` → `main`, remote `origin` added. Cloud
+Build 2nd-gen GitHub connection `part-intake-github` (asia-south1), trigger
+**`part-intake-main`** on `^main$` running `deploy/cloudbuild.yaml` with
+`_TAG=$SHORT_SHA`, service account = compute default SA.
+
+`cloudbuild.yaml` now builds → pushes → deploys: the `deploy` step scps
+compose + Caddyfile and runs `docker compose pull && up -d` over IAP ssh.
+Two things it took to get right: (1) Cloud Build runs as root and the guest
+agent refuses ssh keys for root → ssh as `deploy@vm` with
+`--ssh-key-expire-after=1h`; (2) a build with an explicit SA must set
+`logging: CLOUD_LOGGING_ONLY`. Compute SA gained `compute.instanceAdmin.v1`,
+`iap.tunnelResourceAccessor`, `iam.serviceAccountUser`; Cloud Build service
+agent gained `secretmanager.admin` (connection stores the GitHub token).
+
+Proof: push of `1344cd0` → build 8812c5f4 SUCCESS, images tagged `1344cd0`
++ `latest`, VM containers restarted on the new image, site 401/200 as before.
+`deploy/deploy.sh` still works by hand and runs the identical pipeline.
+
+Committed only the deploy files (three commits on top of 97fcc33). The other
+session's 23 modified source files are still uncommitted — the next push to
+`main` deploys whatever is committed, so review then commit them.
+
+### Same day — DNS: https://packit.trakkia.com
+
+trakkia.com is Cloud DNS zone `trakkia-com` in project `trakkia-uat` (live NS
+match). Added A `packit.trakkia.com` → 34.47.230.213 (TTL 300). VM `.env`
+`SITE_HOST=packit.trakkia.com`, caddy recreated, Let's Encrypt cert obtained.
+The sslip.io name is no longer served (single-host Caddyfile); to bring it
+back set SITE_HOST to it. Runbook updated.
+
+## 2026-09-10 — Packing-sequence GIF in the Explode view; PRD for the next goal
+
+Goal: "Add that explode and gif view which actually shows how to pack the part
+shared, use actual part; Gemini for design purposes." Done, verified over HTTP.
+
+**What shipped**
+- `insert_drawing.build_gif(...)`: packing sequence rendered from the real
+  customer mesh voxels at the engine's own lattice (same `_place` the exploded
+  PNG uses — one placement expression, not a second one). Step rule
+  `_dun_step`: dunnage at height z0 lands at step `2·#{layers below z0}`,
+  parts layer k at step `2k+1`, top dunnage after the last layer. Pacing
+  600 ms dunnage / 1500 ms parts / 3000 ms final hold, progress bar at the
+  bottom, opaque caption panel "Layer k of N · Place q × Name", step-0 caption
+  "Base dunnage" (or "Empty box" when nothing lands there).
+- Worker `_render_drawings` → `build_{job}_{i}.gif` / `build_{job}_custom.gif`,
+  each artifact in its own try (a GIF failure never fails the solve; `dunnage.bom`
+  now guarded too). `gif_url` beside `drawing_url` on every catalogue entry and
+  on custom, in `result_json` and on `LayoutOut` / `BoxDesignOut` together
+  (hard rule 9). `test_solve_api.py` asserts every ranked layout ships a
+  `gif_url` whose file exists and opens with PIL.
+- Frontend `ExplodeModal`: "Packing sequence | Exploded view" toggle
+  (`aria-pressed`), "▶ Pack" button on the BOM; `.view-toggle` sits on the 8 px
+  rhythm; solve-time copy now says "about a minute".
+- Sizes: 736×528, bar 22 frames 1.11 MB, wheel 18 frames 1.20 MB. Render time
+  per GIF 4.5–6.0 s (PNG 0.6–1.0 s). A full solve with drawings + GIFs is now
+  ~40–50 s wall-clock (bar 50.7 s, wheel 38.3 s) against ~11 s before.
+
+**Gemini** (`gemini-3.1-pro-preview`, key in gitignored `.env`, rotate it):
+used for design critique only. It was shown fully synthetic renders with
+made-up numbers (`scratchpad/gemini/synth.py`), never customer CAD or decks.
+Fourteen items; adopted: part edge strokes, lower dunnage alpha, solid
+dog-leg leaders, dashboard palette + Fira, solid build-height dimension line,
+variable pacing, progress bar, caption panel, instructional wording,
+highlight-on-placement frame. Rejected: removing PATTERN/MEASURED/DERIVED
+tags (they say which numbers are measured vs derived — hard rule 2 in
+picture form), a fake vertical "explode" offset on the static render (the
+GIF is the explode now), fade-out loop frames (adds 400 ms of nothing), and
+moving the title block into React (the PNG is downloaded standalone).
+
+**Code review** (`/code-review`) found and we fixed: frame 0 painted the whole
+box orange because `dun_step == 0` also matched every never-written cell —
+`_step_masks` gates on the label volume and the self-check asserts
+`gated0 < raw0`; `dunnage.bom` had drifted outside the try; label column
+lines overlapped (now per-block measured line heights); leaders pointed at
+empty space (now anchored to the nearest-camera solid instance of the row,
+dropped when a row draws nothing, e.g. MS Rod); `__main__` default outdir
+was a hard-coded scratchpad path (now `tempfile.gettempdir()`).
+
+**Ranking note, not a bug:** an unrestricted Mubea solve ranks PLS12103 /
+FLC12102 at 65 parts above PLS12801 at 40 — parts per box is the key.
+40/PLS12801 is the answer when `assets=["PLS12801"]`, which is what the
+ground truth and `test_engine.py` do.
+
+**Checks run this session, all pass:** `tests/ground_truth.py` (40 / 48 and
+the Tata decks), `python -m app.insert_drawing <dir>` (incl. new step-0
+assert), `tests/test_solve_api.py` on redis db 9, `npm run build`.
+
+**Still owed:** nothing seen in a browser this session — the Explode modal
+toggle and GIF playback must be walked through with screenshots next time.
+`deploy/` and `frontend/Dockerfile` untouched (deploy session owns them).
+Nothing committed.
+
+**PRD.md written** (project root) after cross-checking the Fitsol-derived
+`Green_Packaging_Optimization_PRD.md`: adopt the shape (project + status,
+baseline, why-panel, alternatives, proposal report), keep our substance (CAD
+nesting, generated insert, no sliders, no invented numbers). Delivery order
+F1 project entity → F2 shell → F3 baselines → F4 reasons → F5 runs → F6
+trips/year → F7 proposal PDF. Next goal starts there.
+
+Session close (2026-09-11): stack was brought up for Rahul's browser test
+(API 127.0.0.1:8000, worker on redis db 9, Vite 5173) and torn down again.
+Browser findings not yet recorded — start the next session by asking what
+the Explode modal / GIF looked like. Working tree uncommitted, PRD.md ready.
+
+## 2026-09-11 — F1 project entity + F2 app shell: the app reads as a product
+
+Goal (`/goal`): "read the PRD and start making the part intake and steps look
+more like a product rather than just a packaging calculator." Started PRD §8
+delivery order at F1 and F2, and pulled F5 (runs as scenarios) forward because
+without it the Packaging tab re-solved on every visit. Engine untouched
+(PRD principle 4). Ground truth 40 / 48 passed after the last backend change.
+
+**F1 — backend** (`models.py`, `schemas.py`, `main.py`, `tests/test_projects_api.py`)
+- `projects` table (customer, part_number, part_name, status ladder
+  `draft → solved → proposal_sent → trial → approved → archived`, owner, notes,
+  annual_volume, route_km, vehicle_id, customer_count, customer_box,
+  cost_per_trip, emission_factor_kg_per_km, recommended_run_id, timestamps).
+  `part_profiles.project_id`, `solve_jobs.project_id` + `inputs_json` added
+  via `_ensure_added_columns` (landmine 5); the real dev.db booted and logged
+  the three column adds. One part per project: a second `POST /api/parts`
+  with the same project_id is a 409.
+- Routes: `POST/GET /api/projects` (`?q=` search), `GET/PATCH /api/projects/{id}`,
+  `POST /api/projects/{id}/solve`. `_enqueue_solve` is the single solve path
+  for both the old part route and the project route; it derives project_id
+  from the part, so old-route solves list under the project too.
+- `RunOut` summarises a solve server-side (hard rule 9): best_count/best_asset
+  always describe the SAME object (`best_asset == "custom"` when the
+  synthesised box wins), plus catalogue_count/catalogue_asset, custom_count,
+  truck_boxes, truck_vehicle, clearance_mm, poses_searched, inputs, part_id.
+  Runs ordered created_at desc with the uuid as a deterministic tiebreaker.
+- 26 checks in `test_projects_api.py` incl. a real landmine-5 proof (old
+  schema built by raw DDL, shim adds the columns).
+
+**F2 (+F5) — frontend** (`App.jsx` = shell + 20-line hash router; new
+`NewProject.jsx`, `ProjectsList.jsx`, `ProjectPage.jsx`, `Assets.jsx`,
+`lib/router.js`, `lib/api.js`; `PartList.jsx` deleted)
+- Left nav: Projects · New project · Assets · Tools › Load calculator.
+- Projects list with search; New project = old intake flow + customer and an
+  optional collapsed "Customer's current pack" fieldset; creates the project,
+  attaches the part, lands on Packaging. Retry after a failed part save reuses
+  the created project (no orphan duplicate).
+- Project page: header (status `<select>` and owner PATCH inline), tabs
+  Overview · Packaging · Truck · Runs · Proposal. Overview hero reads the
+  recommended run (else newest done). Packaging/Truck share ONE
+  `PackingResults` and show the STORED run (`GET /api/solve-jobs/{id}`);
+  a new solve only starts from "Re-run with these parameters", whose rail is
+  mirrored from the viewed run's `inputs` and titled "Parameters of this run".
+  Runs table: row click → `?run=<id>`, "Mark recommended" → PATCH.
+  Proposal is an empty state (F7). Assets is read-only (F8 adds edit).
+- `runSolve` takes `projectId` and returns `{result, solveJobId}`.
+  `feedback.html` deep links moved to the hash routes.
+
+**Verified** — tester over real HTTP (port 8011) and three headless-Chrome
+walks driven over the DevTools protocol (Node 22 WebSocket + Chrome.app;
+recipe saved to memory — always pass `--user-data-dir`, or a launch hands
+the URL to Rahul's open Chrome and pops a visible tab, which happened once),
+screenshots read back: no console errors in passes 1–2 (pass 3 sampled only
+the tabs left open at the end), no solve on mount or tab switch (run_count
+flat while clicking around), hero numbers equal the API's RunOut, network
+log shows zero fetches of the old recommended run after a re-run, the
+processing state renders within 1.6 s of the POST and resolves without a
+reload, a blocked part save leaves exactly one project and the retry
+attaches the part to it. Solves 18–25 s on the wheel, ~60 s with GIFs at
+top_n 5. `top_n` is a fixed 5 in the frontend and is not in the rail.
+
+**Defects found and fixed this session** (tester + `/code-review`): old
+route dropped project linkage; best_count paired with catalogue asset name
+(65 "in PLS12801" when 40 fit); Truck tab mounted a second solve; Packaging
+re-solved on every visit; Re-run used pristine rail defaults instead of the
+viewed run's; recommended-run flash after re-run; pending stored run shown
+red; orphan project on part-save failure; create_project skipped the
+vehicle_id check; runs order had no tiebreaker; feedback.html links dead.
+
+**Known / deliberate**
+- Legacy rows with `project_id NULL` (2 parts, 7 solves in dev.db) are not
+  backfilled and are invisible in the new UI. Re-upload the Mubea/TRW files
+  as projects.
+- Rail params are mirrored from the run on screen — solver parameters, not
+  part dims; hard rule 2 stands for the part.
+- StrictMode double-mount may enqueue one extra dev-only solve on the very
+  first (no stored run) mount; the first is aborted client-side.
+
+**Next**: F3 baseline fields (cuboid_count, customer_count gain) on the solve
+result + Overview hero; F4 `reasons: list[str]`; F6 trips/year; F7 proposal
+PDF. Commit: the whole tree (today's F1/F2 plus the earlier GIF session) is
+still uncommitted; a push to main deploys.
+
+## 2026-09-11, later — F3 baseline, F4 reasons, F6 trips, F7 proposal PDF
+
+Goal (`/goal`): "pick f3,f4 till f7". All four shipped and verified; ground
+truth 40 / 48 on the final code (`gt_final.log`: Mubea 8 → 40 5.0×, TRW 42 →
+48 1.1×). Engine math untouched — fields, stamps and read-time helpers only.
+Nothing committed.
+
+**F3 — baseline and gain.** `engine.cuboid_count(part_lbh, inner, part_kg,
+max_weight_kg)` (moved from ground_truth.py, which now cross-checks it and
+keeps its own `base < achieved` assert). `Layout.cuboid_count` and
+`BoxDesign.cuboid_count` stamped in `engine.solve`. `RunOut`/`ProjectSummaryOut`
+gain `cuboid_count` (of the same object as best_count), `customer_count`,
+`gain_vs_cuboid` (ratio, 2 dp), `gain_vs_customer_pct` — computed read-time
+in `runs._run_out` (moved out of main.py), so editing the customer's pack
+updates the gain without a re-solve. UI: hero lines "65 vs 18 cuboid (3.61×)"
+/ "65 vs 32 today (+103.1 %)", a Project inputs card (annual volume,
+customer parts/box, customer box, route km — PATCH on blur, "not provided"
+when blank), "vs cuboid" column on the list, "cuboid N" chip on ranked cards.
+
+*Fact learned:* the CAD-measured Mubea baseline is **10**, not the deck's 8 —
+the resting extent is 1092×298×143 against the nominal 1085×190×285.
+CLAUDE.md now says both. The 40 stands.
+
+**F4 — reasons.** `app/reasons.py: reasons_for(...)` composes ≥ 3 sentences
+per layout/design from existing fields (pose, interleave %, geometry- or
+weight-cap, raster band, clearance, cuboid, dunnage fit); stamped in the
+worker; `LayoutOut`/`BoxDesignOut`/`RunOut.reasons`. UI: "Why this design"
+card on the Overview, "Why" disclosure on every ranked card. Self-check
+`python -m app.reasons`.
+
+**F6 — demand → trips.** `engine.trips_per_year(annual_volume, parts_per_truck)`,
+read-time on `RunOut` (`parts_per_truck`, `trips_per_year`), not stored, so
+the volume can be entered after the solve. Truck card shows both; "enter
+annual volume" when null.
+
+**F7 — proposal PDF.** `proposals` table + `ProposalOut`; `POST
+/api/projects/{id}/proposal` (202; 422 without a finished, non-empty run),
+`GET /api/projects/{id}/proposals`, `GET /api/proposals/{id}`; Celery task
+`render_proposal` → `worker.run_proposal` with the same dev fallback as
+solves. `app/proposal.py: build_pdf(project, part, run, run_out, out_path,
+db, png_dir)` — matplotlib PdfPages, A4 landscape, 9 pages: cover, part &
+pose, ranked comparison, insert BOM, exploded PNG, GIF first/middle/last
+strip, truck load to scale inside the cargo bay, baseline & gain + reasons,
+assumptions. Returns `numbers` (~24 printed values) which
+`tests/test_proposal.py` (22 checks) compares to `RunOut`/`result_json`,
+plus a negative proof that a corrupted truck value changes them. Run
+selection lives once in `runs.proposal_run_for` (recommended, else newest
+done with content) for the route and the `python -m app.proposal <id>
+[--png]` CLI. Renders in ~1.3 s on the worker. `/api/files` now answers HEAD.
+UI: Proposal tab (generate, list, status pill, Download PDF; 2 s interval
+poll), Overview's Generate button live via `?generate=1`, stripped so a
+reload does not re-fire.
+
+**Verified.** Tester walks over real HTTP and headless Chrome (CDP) for
+F3/F4/F6 (Mubea) and F7 (TRW), all numbers equal between API, PDF `numbers`
+and screen, no console errors. Defects found by testers and `/code-review`
+and fixed: proposal polling that stopped after one cycle; "cuboid 0" chip on
+legacy runs; PDF crash on a run with no box; truck page drawn from seed data
+instead of the DB box; `numbers` covering 9 of ~25 printed values; CLI
+ignoring the recommended run; HEAD 405 on files; tables clipping text; truck
+page without the bay outline.
+
+**Known / deliberate.** `cuboid_count` uses the first pose's extent for every
+layout (one wheel pose differs by a voxel; no seeded asset changes count).
+No Fira Sans on this machine → DejaVu in the PDF; install the font on the VM
+for the real look. `top_n` is fixed at 5 in the frontend. Legacy runs show
+"Reasons ship with the next solve".
+
+**Next:** F10 stage ladder while solving, F8 assets edit UI, F9 cost/CO₂
+(inputs exist on the project), F11 activity. Then commit and deploy — the
+whole tree is still uncommitted and a push to main deploys.

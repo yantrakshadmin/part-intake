@@ -49,6 +49,9 @@ class PartProfileIn(BaseModel):
     # STP-only fields
     job_id: Optional[str] = None
     confirmed_orientation: Optional[list[list[float]]] = None  # 4x4
+    # F1: which Project this part belongs to. None keeps today's standalone
+    # part-profile behaviour.
+    project_id: Optional[int] = None
 
     @field_validator("breadth_mm")
     @classmethod
@@ -126,6 +129,26 @@ class SolveIn(BaseModel):
     # None still means unrestricted; [] is now a 422 that names the field.
     assets: Optional[list[Annotated[str, Field(min_length=1, max_length=32)]]] = \
         Field(default=None, min_length=1, max_length=20)
+    # Search only the resting pose confirmed in the viewer. Default searches
+    # every pose and warns when the winner is a different one.
+    confirmed_pose_only: bool = False
+    # In-plane air between neighbouring parts, mm (`nesting.DEFAULT_CLEARANCE_MM`
+    # when omitted). A parameter, not a constant: the Tata decks pack their
+    # dense axis at 0.3mm (X104) and 10.3mm (P118) -- no single value is right
+    # for both, and DOMAIN.md does not exist. Stacking clearance stays 0 (a
+    # layer rests on the layer below; see `nesting.DEFAULT_STACK_CLEARANCE_MM`).
+    clearance_mm: Optional[float] = Field(default=None, ge=0, le=50)
+
+
+class TruckFitIn(BaseModel):
+    """POST /api/truck-fit body: the standalone load calculator's question."""
+
+    outer_l_mm: float = Field(gt=0, le=20000)
+    outer_b_mm: float = Field(gt=0, le=20000)
+    outer_h_mm: float = Field(gt=0, le=20000)
+    kg_per_box: float = Field(default=0.0, ge=0, le=50000)
+    vehicle: str
+    max_stack: int = Field(default=0, ge=0, le=50)
 
 
 class SilhouetteOut(BaseModel):
@@ -168,6 +191,10 @@ class DunnageOut(BaseModel):
     build_height_mm: float
     inner_h_mm: float
     nest_depth_mm: float
+    # Inner minus (lattice span + dunnage beside it) per axis. Negative on L
+    # or B means the side separators do not fit beside the parts; the worker
+    # turns that into a warning. `fits` is the height budget only.
+    slack_lbh: tuple[float, float, float]
     fits: bool
     caveat: str
 
@@ -181,6 +208,16 @@ class LayoutOut(BaseModel):
     pitch_lbh: tuple[float, float, float]
     limited_by: str
     interleave: tuple[float, float, float]
+    # Ceiling of the raster's quantisation band: `lattice_count` one voxel
+    # tighter on every extent and pitch. `count` is the floor. Equal when the
+    # difference is nothing.
+    count_upper: int
+    # F3/F4: the cuboid baseline for this SAME asset, and the "why this
+    # design" sentences (`app.reasons.reasons_for`). Declared here or
+    # pydantic drops them silently (hard rule 9) -- 0 / [] on older stored
+    # results that predate these fields.
+    cuboid_count: int = 0
+    reasons: list[str] = []
     # Declared here or pydantic drops them silently and the interleaved insert
     # drawing is back to a bounding rectangle with a BOM the UI cannot show
     # (CLAUDE.md hard rule 9 -- this response model IS the contract).
@@ -191,6 +228,8 @@ class LayoutOut(BaseModel):
     # count is the valuable output and a render failure must never fail the
     # solve (CLAUDE.md hard rule 9: declare it here or pydantic drops it).
     drawing_url: Optional[str] = None
+    # The packing-sequence GIF, same file/failure discipline as drawing_url.
+    gif_url: Optional[str] = None
 
 
 class BoxDesignOut(BaseModel):
@@ -198,6 +237,7 @@ class BoxDesignOut(BaseModel):
     inner: tuple[float, float, float]
     outer: tuple[float, float, float]
     count: int
+    count_upper: int      # quantisation ceiling, as LayoutOut.count_upper
     grid: tuple[int, int, int]
     layers: int
     # The insert drawing is built from extent + pitch. Omitting them here does
@@ -210,6 +250,11 @@ class BoxDesignOut(BaseModel):
     silhouette: Optional[SilhouetteOut] = None
     dunnage: Optional[DunnageOut] = None
     drawing_url: Optional[str] = None
+    gif_url: Optional[str] = None
+    # Same as LayoutOut.cuboid_count / reasons (F3/F4), against this box's own
+    # inner.
+    cuboid_count: int = 0
+    reasons: list[str] = []
 
 
 class TruckFitOut(BaseModel):
@@ -230,6 +275,11 @@ class TruckFitOut(BaseModel):
     # frontend re-derive it out of kg_per_box, and pydantic would drop it
     # silently if it were left off this model.
     tare_kg: float
+    # The bounds `boxes` is the minimum of, and the boxes-high used. The load
+    # calculator shows these; it must not compute its own.
+    by_volume: int
+    by_weight: int
+    stack: int
 
 
 class SolveResultOut(BaseModel):
@@ -239,6 +289,12 @@ class SolveResultOut(BaseModel):
     best_count: int
     truck: Optional[TruckFitOut]
     warnings: list[str]
+    # Pose labels the engine searched -- all candidates, or the one confirmed
+    # pose when `SolveIn.confirmed_pose_only` was set.
+    poses_searched: list[str] = []
+    # The in-plane clearance this result was solved at (hard rule 9: the UI
+    # labels the number with the parameter that made it, never assumes 5).
+    clearance_mm: float = 5.0
 
 
 class SolveJobStatusOut(BaseModel):
@@ -258,6 +314,162 @@ class PartProfileOut(BaseModel):
     weight_kg: float
     source: str
     glb_url: Optional[str]
+    project_id: Optional[int] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# --- F1: Project entity -----------------------------------------------------
+
+
+class ProjectIn(BaseModel):
+    customer: str = Field(min_length=1, max_length=128)
+    part_number: str = Field(min_length=1, max_length=64)
+    part_name: str = Field(min_length=1, max_length=128)
+    owner: Optional[str] = Field(default=None, max_length=64)
+    notes: Optional[str] = None
+    annual_volume: Optional[int] = Field(default=None, ge=1)
+    route_km: Optional[float] = Field(default=None, ge=0)
+    vehicle_id: Optional[int] = None
+    # The customer's OWN current parts-per-box and box — entered, never
+    # estimated (hard rule 2).
+    customer_count: Optional[int] = Field(default=None, ge=1)
+    customer_box: Optional[str] = Field(default=None, max_length=32)
+    cost_per_trip: Optional[float] = Field(default=None, ge=0)
+    emission_factor_kg_per_km: Optional[float] = Field(default=None, ge=0)
+
+
+class ProjectPatch(BaseModel):
+    """Every ProjectIn field, optional, plus status and recommended_run_id.
+
+    `model_dump(exclude_unset=True)` in the route means a field omitted from
+    the request body is left untouched, while an explicit `null` clears it.
+    """
+
+    customer: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    part_number: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    part_name: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    owner: Optional[str] = Field(default=None, max_length=64)
+    notes: Optional[str] = None
+    annual_volume: Optional[int] = Field(default=None, ge=1)
+    route_km: Optional[float] = Field(default=None, ge=0)
+    vehicle_id: Optional[int] = None
+    customer_count: Optional[int] = Field(default=None, ge=1)
+    customer_box: Optional[str] = Field(default=None, max_length=32)
+    cost_per_trip: Optional[float] = Field(default=None, ge=0)
+    emission_factor_kg_per_km: Optional[float] = Field(default=None, ge=0)
+    status: Optional[Literal[
+        "draft", "solved", "proposal_sent", "trial", "approved", "archived"
+    ]] = None
+    recommended_run_id: Optional[str] = None
+
+
+class RunOut(BaseModel):
+    """A SolveJob summarised server-side — hard rule 9: the frontend never
+    digs into result_json for these, it reads this model."""
+
+    solve_job_id: str
+    part_id: int
+    status: Literal["pending", "processing", "done", "failed"]
+    created_at: datetime
+    error: Optional[str] = None
+    inputs: dict = {}
+    # best_count/best_asset describe the SAME option: result.best_count (the
+    # engine's overall winner, catalogue or custom) paired with "custom" when
+    # the custom design is that winner, else catalogue[0].asset_name. Never
+    # pair best_count with catalogue[0]'s name -- when custom_beats_catalogue
+    # those are two different boxes (hard rule 9).
+    best_count: Optional[int] = None
+    best_asset: Optional[str] = None
+    # catalogue[0] specifically, so a reader who wants "the best STOCKED
+    # option" (as opposed to best_count/best_asset, which may be custom) has
+    # a count and a name that are guaranteed to agree with each other.
+    catalogue_count: Optional[int] = None
+    catalogue_asset: Optional[str] = None
+    custom_count: Optional[int] = None
+    truck_boxes: Optional[int] = None
+    truck_vehicle: Optional[str] = None
+    clearance_mm: Optional[float] = None
+    poses_searched: list[str] = []
+    # F3: baseline and gain, for the SAME object best_count/best_asset
+    # describe (custom when custom wins, else catalogue[0]). None on older
+    # stored results that predate these fields, never a crash (hard rule 9
+    # reads server-computed only -- this is read-time in `_run_out`, so
+    # editing customer_count later updates the gain without a re-solve).
+    cuboid_count: Optional[int] = None
+    customer_count: Optional[int] = None      # project.customer_count, verbatim
+    gain_vs_cuboid: Optional[float] = None    # best_count / cuboid_count, 2dp
+    gain_vs_customer_pct: Optional[float] = None  # (best_count/customer_count - 1) x 100, 1dp
+    # F4: the reasons of that same object. [] on older stored results.
+    reasons: list[str] = []
+    # F6: truck.parts verbatim, and trips/year computed read-time from
+    # project.annual_volume -- same reason as gain_vs_customer_pct above.
+    parts_per_truck: Optional[int] = None
+    trips_per_year: Optional[int] = None
+
+
+class ProjectSummaryOut(BaseModel):
+    id: int
+    customer: str
+    part_number: str
+    part_name: str
+    status: str
+    owner: Optional[str] = None
+    updated_at: datetime
+    run_count: int
+    best_count: Optional[int] = None
+    best_asset: Optional[str] = None
+    catalogue_count: Optional[int] = None
+    catalogue_asset: Optional[str] = None
+    # F3, same semantics as RunOut's.
+    cuboid_count: Optional[int] = None
+    customer_count: Optional[int] = None
+    gain_vs_cuboid: Optional[float] = None
+    gain_vs_customer_pct: Optional[float] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ProjectOut(BaseModel):
+    id: int
+    customer: str
+    part_number: str
+    part_name: str
+    status: str
+    owner: Optional[str] = None
+    notes: Optional[str] = None
+    annual_volume: Optional[int] = None
+    route_km: Optional[float] = None
+    vehicle_id: Optional[int] = None
+    customer_count: Optional[int] = None
+    customer_box: Optional[str] = None
+    cost_per_trip: Optional[float] = None
+    emission_factor_kg_per_km: Optional[float] = None
+    recommended_run_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    part: Optional[PartProfileOut] = None
+    runs: list[RunOut] = []
+
+    class Config:
+        from_attributes = True
+
+
+# --- F7: proposal PDF --------------------------------------------------------
+
+
+class ProposalOut(BaseModel):
+    id: int
+    project_id: int
+    run_id: str
+    status: Literal["pending", "processing", "done", "failed"]
+    # `/api/files/<basename of pdf_path>`, same discipline as LayoutOut's
+    # drawing_url -- None, not a broken link, until the render is done.
+    pdf_url: Optional[str] = None
+    error: Optional[str] = None
     created_at: datetime
 
     class Config:

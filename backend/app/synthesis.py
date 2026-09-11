@@ -19,8 +19,9 @@ stating 46 kits and shipping 48 (PLANNING §7).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from . import dunnage
 from .nesting import EPS, Pose, lattice_count
 
 logger = logging.getLogger(__name__)
@@ -44,12 +45,16 @@ MAX_INNER_HEIGHT_MM = 1000.0
 # PLS family weight limit.
 DEFAULT_MAX_WEIGHT_KG = 600.0
 
-# Base separator sheet under the bottom layer, and clearance under the lid.
-# These sit OUTSIDE the inner height, i.e. they add to the outer height -- see
-# the note in `synthesise`. 35mm is the thickest sheet in use; the Mubea deck's
-# bottom separator assembly is 1150x750x123.
-BASE_SEPARATOR_MM = 35.0
-TOP_CLEARANCE_MM = 5.0
+# Outer height over inner height: pallet feet, base and lid. Taken from the
+# catalogue the custom box competes against, not invented -- every PLS asset
+# in `seed_data.PACKAGING` reads outer H = inner H + 196 (986/790, 686/490,
+# 1196/1000), the FLC family + 215, PLS1280 + 200. This used to be 40 (a
+# 35mm sheet plus 5mm lid clearance), which made every synthesised box
+# ~156mm shorter than a real one of the same inner height and let it stack
+# one more tier in the truck: a custom box beat the catalogue per truck on
+# height it would not have had. The Mubea deck's 123mm bottom separator sits
+# INSIDE the inner height (see `synthesise`), so it is not part of this.
+OUTER_HEIGHT_OVERHEAD_MM = 196.0
 
 # (name, inner_L, inner_B). Derived, so the 25mm wall stays honest.
 ALLOWED_INNER_FOOTPRINTS = tuple(
@@ -63,7 +68,8 @@ class BoxDesign:
     """One synthesised box, plus the lattice problem it was solved for.
 
     `count`/`grid` are `lattice_count(extent_lbh, pitch_lbh, inner)` for this
-    box's own `inner` -- recomputable, never a second opinion.
+    box's own `inner` less its insert's dead height (`dunnage.dead_height_mm`)
+    -- recomputable, never a second opinion.
     """
 
     footprint: str                 # pallet outer, e.g. "1200x1000"
@@ -85,6 +91,16 @@ class BoxDesign:
     # count with no pose, and the pose is what decides whether the insert can
     # actually be moulded -- the catalogue half reports pose_label already.
     pose_label: str = ""
+    # Same quantisation ceiling as `nesting.Layout.count_upper`, stamped by
+    # `engine.solve` (which knows the pose's voxel size) on the winner. Equal
+    # to `count` until then, and for bare-number poses.
+    count_upper: int = 0
+    # Same baseline as `nesting.Layout.cuboid_count`, stamped by `engine.solve`
+    # against this box's own `inner` (F3). 0 until then.
+    cuboid_count: int = 0
+    # Same as `nesting.Layout.reasons`, composed in the worker (F4). Empty
+    # until then.
+    reasons: list[str] = field(default_factory=list)
 
     @property
     def layers(self) -> int:
@@ -94,7 +110,8 @@ class BoxDesign:
 def synthesise(extent_lbh, pitch_lbh, part_kg: float = 0.0,
                max_weight_kg: float = DEFAULT_MAX_WEIGHT_KG,
                max_inner_height_mm: float = MAX_INNER_HEIGHT_MM,
-               silhouettes: tuple = (None, None)) -> BoxDesign | None:
+               silhouettes: tuple = (None, None),
+               clearance_lbh=dunnage.NO_CLEARANCE_LBH) -> BoxDesign | None:
     """Best custom box for one resting pose. -> most parts, or None if none fits.
 
     `extent_lbh` / `pitch_lbh` are a pose's bounding extent and lattice spacing
@@ -108,11 +125,21 @@ def synthesise(extent_lbh, pitch_lbh, part_kg: float = 0.0,
       * The weight cap SHRINKS the box rather than capping the count of a taller
         one. So `count` is always what this box's own geometry gives, and
         `lattice_count` on `inner` agrees with it (PLANNING §7).
-      * `inner` is the height the lattice gets. The base separator and top
-        clearance are added to `outer`, because ground truth measures inner
-        height that way: Mubea stacks 190 + 9x66.67 = 790.0 in a 790mm inner
-        with a 123mm bottom separator, and TRW stacks 8x120 = 960 in a 1000mm
-        inner. Charging those 40mm to the inner height costs TRW a whole layer.
+      * The box is tall enough for its OWN insert BOM. `dunnage.bom` says how
+        much dead height the dunnage adds above the parts stack (a pocket
+        tray's bottom sheet, a bar taller than the nest depth); the inner
+        height carries it, and a layer is dropped when that pushes past
+        `max_inner_height_mm`. Without this the synthesised box shipped with
+        `fits: False` on its own BOM -- 3mm short on the wheel -- and the
+        catalogue side never can, because a stock box's height is a given.
+        `clearance_lbh` is what the pitch already carries, for the archetype
+        predicate (`engine.solve` passes it).
+      * `inner` is the height the lattice gets, and `outer` is inner plus the
+        catalogue's own overhead (`OUTER_HEIGHT_OVERHEAD_MM`). Ground truth
+        measures inner height as the lattice's: Mubea stacks 190 + 9x66.67 =
+        790.0 in a 790mm inner WITH a 123mm bottom separator inside it, and
+        TRW stacks 8x120 = 960 in a 1000mm inner. Charging dunnage to the
+        inner height costs TRW a whole layer.
     """
     best: BoxDesign | None = None
     # `silhouettes` is the measured pose's own (engine.solve passes it through),
@@ -123,8 +150,15 @@ def synthesise(extent_lbh, pitch_lbh, part_kg: float = 0.0,
                 silhouettes=silhouettes)
 
     for name, inner_l, inner_b in ALLOWED_INNER_FOOTPRINTS:
-        for extent, pitch, silhouette in pose.footprint_orders():
+        for extent, pitch, silhouette, _clr in pose.footprint_orders():
             if pitch[2] <= 0 or extent[2] > max_inner_height_mm + EPS:
+                continue
+            # What the insert adds above the stack; the box carries it and the
+            # lattice does not get it. Same expression `nesting.layouts_for`
+            # charges the catalogue with.
+            dead = dunnage.dead_height_mm(extent, pitch, clearance_lbh)
+            usable_h = max_inner_height_mm - dead
+            if extent[2] > usable_h + EPS:
                 continue
 
             # One layer first: it fixes parts-per-layer, which the weight cap
@@ -133,23 +167,28 @@ def synthesise(extent_lbh, pitch_lbh, part_kg: float = 0.0,
             if not per_layer:
                 continue
 
-            layers = int((max_inner_height_mm - extent[2]) / pitch[2] + EPS) + 1
+            layers = int((usable_h - extent[2]) / pitch[2] + EPS) + 1
             if part_kg > 0 and max_weight_kg > 0:
                 layers = min(layers, int(max_weight_kg / (part_kg * per_layer) + EPS))
             if layers < 1:
                 continue
 
-            inner_h = extent[2] + (layers - 1) * pitch[2]
-            inner = (inner_l, inner_b, inner_h)
-            count, grid, _ = lattice_count(extent, pitch, inner)
+            # The box is exactly stack + dead tall. `count` is the lattice in
+            # the stack, and `lattice_count(extent, pitch, inner minus dead)`
+            # reproduces it (test_self_consistent) -- the height the insert
+            # occupies is never counted as room for parts.
+            stack_h = extent[2] + (layers - 1) * pitch[2]
+            inner = (inner_l, inner_b, stack_h + dead)
+            count, grid, _ = lattice_count(extent, pitch, (inner_l, inner_b, stack_h))
             if not count:
                 continue
 
             design = BoxDesign(
                 footprint=name,
+                count_upper=count,
                 inner=inner,
                 outer=(inner_l + 2 * WALL_MM, inner_b + 2 * WALL_MM,
-                       inner_h + BASE_SEPARATOR_MM + TOP_CLEARANCE_MM),
+                       inner[2] + OUTER_HEIGHT_OVERHEAD_MM),
                 count=count,
                 grid=grid,
                 extent_lbh=extent,

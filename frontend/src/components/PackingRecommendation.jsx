@@ -24,7 +24,7 @@ export function usePackingData() {
 }
 
 export function defaultPackingParams() {
-  return { vehicleId: '', tareKg: '', assets: [] }
+  return { vehicleId: '', tareKg: '', assets: [], confirmedPoseOnly: false, clearanceMm: '' }
 }
 
 const MAX_ASSETS = 20 // SolveIn.assets: max_length=20 (backend/app/schemas.py)
@@ -79,7 +79,7 @@ function BoxPicker({ packaging, selected, onChange }) {
  * together (drawing-only clearance/wall/foam moved to the insert tab, D4 —
  * they never change a count, only where they're edited).
  */
-export function PackingParams({ params, onChange, vehicles, packaging, onAddBox }) {
+export function PackingParams({ params, onChange, vehicles, packaging, onAddBox, title = 'Ship it in' }) {
   const [showCustom, setShowCustom] = useState(false)
   const [custom, setCustom] = useState({
     code: '', il: '', ib: '', ih: '', ol: '', ob: '', oh: '', wt: '',
@@ -112,7 +112,7 @@ export function PackingParams({ params, onChange, vehicles, packaging, onAddBox 
 
   return (
     <div className="card form-card">
-      <h2>Ship it in</h2>
+      <h2>{title}</h2>
       <div className="form-grid rail-grid">
         <label className="field">
           <span>Box tare weight (kg)</span>
@@ -131,8 +131,20 @@ export function PackingParams({ params, onChange, vehicles, packaging, onAddBox 
         <BoxPicker packaging={packaging} selected={params.assets}
           onChange={(assets) => onChange({ ...params, assets })} />
       </div>
+      <div className="form-grid rail-grid" style={{ marginTop: 10 }}>
+        <label className="field">
+          <span>Clearance (mm)</span>
+          <input type="number" min="0" max="50" value={params.clearanceMm} placeholder="default 5"
+            onChange={(e) => onChange({ ...params, clearanceMm: e.target.value })} />
+        </label>
+        <label className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <input type="checkbox" checked={!!params.confirmedPoseOnly}
+            onChange={(e) => onChange({ ...params, confirmedPoseOnly: e.target.checked })} />
+          <span>Search confirmed pose only</span>
+        </label>
+      </div>
       <p className="muted" style={{ fontSize: 12, margin: '8px 0 0' }}>
-        A solve takes ~11s, so changes here apply on the next Save &amp; calculate
+        A solve takes about a minute (drawings and the packing GIF are rendered with it), so changes here apply on the next Save &amp; calculate
         or Re-solve — not as you type.
       </p>
 
@@ -187,29 +199,45 @@ export function PackingParams({ params, onChange, vehicles, packaging, onAddBox 
   )
 }
 
+function fmtRunDate(iso) {
+  if (!iso) return null
+  return new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+}
+
 /**
- * Ranked packaging fit for one part, from the real nesting engine
- * (POST /api/parts/{id}/solve). Solves on mount and on an explicit
- * Re-solve — never on a keystroke, since a solve is an ~11s server job.
+ * Ranked packaging fit for one part. Two ways to land on a result, and
+ * `runSolve` (a real POST that costs 20-50s) is called from exactly two
+ * places: the mount effect below when there's no stored `run` to read yet
+ * (the very first solve, right after New project's Save & calculate), and
+ * the explicit "Re-run" button. Everything else — including switching
+ * Packaging <-> Truck, or opening a project that already has a run — reads
+ * the stored result over GET /api/solve-jobs/{id} and never re-solves
+ * (PRD F5: "any row opens the existing results view").
  */
-export default function PackingResults({ part, params, packaging, vehicles }) {
+export default function PackingResults({ part, params, packaging, vehicles, projectId, tab, run, onSolved }) {
   const vehicle = vehicles.find((v) => String(v.id) === params.vehicleId) || null
   const type = insertType(part)
 
   const [job, setJob] = useState({ status: 'idle' })
   const [startedAt, setStartedAt] = useState(null)
   const [, forceTick] = useState(0)
-  const [version, setVersion] = useState(0)
   const [selectedAsset, setSelectedAsset] = useState(null)
+  // The solve_job_id currently on screen, so a `run` prop that changes to
+  // the id we just re-ran to (via onSolved -> parent navigate) is
+  // recognised as already-shown instead of re-fetched.
+  const shownRunId = useRef(null)
+  // One AbortController for whichever fetch/poll is in flight — button
+  // click, stored-run GET or the no-run mount solve all go through here, so
+  // starting one always aborts whatever the previous one left running
+  // (F2-2 F4), and unmounting aborts it too (cleanup below reads the ref,
+  // not a closed-over variable).
+  const controllerRef = useRef(null)
 
-  useEffect(() => {
-    if (!part?.id) { setJob({ status: 'no-id' }); return undefined }
-    // AbortController, not a `cancelled` flag: a flag only stops the state
-    // update, not the fetch/poll loop itself, so StrictMode's double-mount
-    // (or clicking through parts fast) left every previous solve running to
-    // completion on the worker — see F2-2 F4.
+  function solve() {
+    controllerRef.current?.abort()
     const controller = new AbortController()
-    setJob({ status: 'pending' })
+    controllerRef.current = controller
+    setJob({ status: 'pending', kind: 'solve' })
     setStartedAt(Date.now())
     setSelectedAsset(null)
     runSolve(part.id, {
@@ -217,14 +245,76 @@ export default function PackingResults({ part, params, packaging, vehicles }) {
       vehicleName: vehicle?.name,
       topN: 5,
       assets: params.assets,
+      confirmedPoseOnly: params.confirmedPoseOnly,
+      clearanceMm: params.clearanceMm !== '' ? +params.clearanceMm : null,
       signal: controller.signal,
-    }).then((result) => setJob({ status: 'done', result }))
-      .catch((err) => { if (err.name !== 'AbortError') setJob({ status: 'failed', error: err.message }) })
-    return () => controller.abort()
-    // Fires on mount + Re-solve (version) only — params/vehicle are read at
-    // that moment, not on every keystroke. See D11.
+      projectId,
+    }).then(({ result, solveJobId }) => {
+      shownRunId.current = solveJobId
+      setJob({ status: 'done', result })
+      onSolved?.(solveJobId)
+    }).catch((err) => { if (err.name !== 'AbortError') setJob({ status: 'failed', error: err.message }) })
+  }
+
+  // Stored-run path: nothing here ever POSTs a solve. A run that's still
+  // pending/processing (opened right after a solve was kicked off
+  // elsewhere, e.g. another tab) is the ordinary pending state, not a
+  // failure — re-poll it every 3s, same as the shape of runSolve's own
+  // poll loop, until it's done or actually failed.
+  useEffect(() => {
+    if (!run?.solve_job_id) return undefined
+    if (shownRunId.current === run.solve_job_id) return undefined // already showing it — e.g. just re-ran to it
+    controllerRef.current?.abort()
+    const controller = new AbortController()
+    controllerRef.current = controller
+    setJob({ status: 'pending', kind: 'load' })
+    setSelectedAsset(null)
+
+    async function poll() {
+      while (true) {
+        const r = await fetch(`/api/solve-jobs/${run.solve_job_id}`, { signal: controller.signal })
+        if (!r.ok) throw new Error(`Failed to load run (${r.status})`)
+        const j = await r.json()
+        if (j.status === 'done') {
+          shownRunId.current = run.solve_job_id
+          setJob({ status: 'done', result: j.result })
+          return
+        }
+        if (j.status === 'failed') {
+          setJob({ status: 'failed', error: j.error || 'Run failed' })
+          return
+        }
+        setJob({ status: 'pending', kind: 'processing' })
+        await new Promise((resolve, reject) => {
+          const t = setTimeout(resolve, 3000)
+          controller.signal.addEventListener('abort',
+            () => { clearTimeout(t); reject(new DOMException('Aborted', 'AbortError')) }, { once: true })
+        })
+      }
+    }
+
+    poll().catch((err) => { if (err.name !== 'AbortError') setJob({ status: 'failed', error: err.message }) })
+    return undefined
+  }, [run?.solve_job_id])
+
+  // No-run mount path — the very first solve for a project with no runs
+  // yet. AbortController, not a `cancelled` flag: a flag only stops the
+  // state update, not the fetch/poll loop itself, so StrictMode's
+  // double-mount (or clicking through parts fast) left every previous solve
+  // running to completion on the worker — see F2-2 F4.
+  useEffect(() => {
+    if (run?.solve_job_id) return undefined
+    if (!part?.id) { setJob({ status: 'no-id' }); return undefined }
+    solve()
+    return undefined
+    // Fires once on mount only, when there's no stored run to show —
+    // params/vehicle are read at that moment. See D11.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [part?.id, version])
+  }, [part?.id])
+
+  // Unmount (or part swap) safety net — abort whatever's in flight,
+  // regardless of which of the three paths above started it.
+  useEffect(() => () => controllerRef.current?.abort(), [part?.id])
 
   // Elapsed-seconds tick for the pending spinner — independent of the poll
   // loop inside runSolve, which owns no UI state of its own.
@@ -235,6 +325,14 @@ export default function PackingResults({ part, params, packaging, vehicles }) {
   }, [job.status])
 
   const elapsedS = startedAt ? Math.round((Date.now() - startedAt) / 1000) : 0
+  const runDate = fmtRunDate(run?.created_at)
+  const runCaption = job.status === 'done' && run
+    ? [
+        runDate ? `Run of ${runDate}` : 'Stored run',
+        job.result.clearance_mm != null ? `${job.result.clearance_mm} mm clearance` : null,
+        job.result.truck?.vehicle ? job.result.truck.vehicle : null,
+      ].filter(Boolean).join(' · ')
+    : null
 
   return (
     <div className="card form-card result-card">
@@ -246,6 +344,8 @@ export default function PackingResults({ part, params, packaging, vehicles }) {
         </span>
       </h2>
 
+      {runCaption && <p className="muted" style={{ margin: '-8px 0 14px', fontSize: 12.5 }}>{runCaption}</p>}
+
       {job.status === 'no-id' && (
         <p className="muted">Save this part first — the packing fit runs the
           real nesting solve against its saved CAD file.</p>
@@ -253,7 +353,12 @@ export default function PackingResults({ part, params, packaging, vehicles }) {
 
       {job.status === 'pending' && (
         <div className="solve-pending">
-          <div className="spinner" /><span>Solving… {elapsedS}s</span>
+          <div className="spinner" />
+          <span>
+            {job.kind === 'processing' ? 'Run is still processing…'
+              : job.kind === 'load' ? 'Loading stored run…'
+              : `Solving… ${elapsedS}s`}
+          </span>
         </div>
       )}
 
@@ -264,13 +369,14 @@ export default function PackingResults({ part, params, packaging, vehicles }) {
       {job.status === 'done' && (
         <ResultView result={job.result} part={part} type={type}
           packaging={packaging} vehicles={vehicles} params={params}
-          selectedAsset={selectedAsset} onSelectAsset={setSelectedAsset} />
+          selectedAsset={selectedAsset} onSelectAsset={setSelectedAsset}
+          controlledTab={tab} />
       )}
 
       {job.status !== 'pending' && job.status !== 'no-id' && (
         <button className="btn-ghost" style={{ marginTop: 14 }}
-          onClick={() => setVersion((v) => v + 1)}>
-          ↻ Re-solve
+          onClick={() => solve()}>
+          ↻ Re-run with these parameters
         </button>
       )}
     </div>
@@ -306,7 +412,7 @@ function boxForTruckAsset(assetName, packaging, custom) {
   return packaging.find((p) => p.item_code === assetName) || null
 }
 
-function ResultView({ result, part, type, packaging, vehicles, params, selectedAsset, onSelectAsset }) {
+function ResultView({ result, part, type, packaging, vehicles, params, selectedAsset, onSelectAsset, controlledTab }) {
   const { catalogue, custom, custom_beats_catalogue: beatsCatalogue, truck, warnings } = result
   const empty = catalogue.length === 0 && !custom
   const customLayout = custom ? asCustomLayout(custom) : null
@@ -317,7 +423,13 @@ function ResultView({ result, part, type, packaging, vehicles, params, selectedA
   const truckBox = truck ? boxForTruckAsset(truck.asset_name, packaging, custom) : null
   // One tab set for whichever box is selected — switching boxes keeps the
   // reader on the same question (e.g. still looking at the truck plan).
-  const [tab, setTab] = useState('layers')
+  const [tab, setTab] = useState(controlledTab || 'layers')
+  // controlledTab is how the Project page's Packaging/Truck tabs steer a
+  // single, already-mounted PackingResults (no second solve): it only
+  // fires when the PROP changes (i.e. the project tab switched), so a
+  // manual click on Layers/Insert/Truck inside LayoutDetail below isn't
+  // fought back to controlledTab on every render.
+  useEffect(() => { if (controlledTab) setTab(controlledTab) }, [controlledTab])
 
   return (
     <>
@@ -355,6 +467,19 @@ function ResultView({ result, part, type, packaging, vehicles, params, selectedA
               truck={truck} truckBox={truckBox} vehicles={vehicles}
               dropdownVehicleId={params.vehicleId} />
           )}
+
+          {(result.poses_searched?.length > 0 || result.clearance_mm != null) && (
+            <p className="muted" style={{ fontSize: 11.5, marginTop: 10 }}>
+              {result.poses_searched?.length > 0 && `Poses searched: ${result.poses_searched.join(', ')}`}
+              {result.poses_searched?.length > 0 && result.clearance_mm != null && ' — '}
+              {result.clearance_mm != null &&
+                // Only the in-plane clearance is a solve parameter
+                // (SolveIn.clearance_mm); stacking clearance is a fixed
+                // engine constant (nesting.DEFAULT_STACK_CLEARANCE_MM = 0),
+                // not returned by the API, so it's stated here as a label.
+                `Clearance ${result.clearance_mm} mm in-plane, 0 mm between layers`}
+            </p>
+          )}
         </>
       )}
     </>
@@ -363,21 +488,49 @@ function ResultView({ result, part, type, packaging, vehicles, params, selectedA
 
 function LayoutCard({ layout, rank, box, selected, onClick, label, beats }) {
   return (
-    <button className={`box-card${selected ? ' selected' : ''}`} onClick={onClick}>
-      <div className="bc-code">
-        {label ?? layout.asset_name}
-        {rank === 0 && <span className="badge stp">best</span>}
-        {beats && <span className="badge stp">beats catalogue</span>}
-      </div>
-      <div className="bc-count">{layout.count}<span> parts / box</span></div>
-      <div className="bc-sub">grid {layout.grid.join(' × ')} · {layout.pose_label}</div>
-      <div className="bc-sub">
-        {box
-          ? `${box.inner_l_mm} × ${box.inner_b_mm} × ${box.inner_h_mm} mm inner`
-          : 'no packaging record for this box'}
-      </div>
-      {layout.limited_by === 'weight' && <div className="bc-truck">weight-limited</div>}
-    </button>
+    <div className="box-card-cell">
+      <button className={`box-card${selected ? ' selected' : ''}`} onClick={onClick}>
+        <div className="bc-code">
+          {label ?? layout.asset_name}
+          {rank === 0 && <span className="badge stp">best</span>}
+          {beats && <span className="badge stp">beats catalogue</span>}
+        </div>
+        <div className="bc-count">
+          {layout.count}<span> parts / box</span>
+          {/* cuboid_count is a required int on LayoutOut/BoxDesignOut, so
+              stored results that predate the field default to 0 rather than
+              null — `> 0`, not `!= null`, or old runs show "cuboid 0". */}
+          {layout.cuboid_count > 0 && (
+            <span className="badge manual" style={{ marginLeft: 8, fontSize: 11, verticalAlign: 'middle' }}>
+              cuboid {layout.cuboid_count}
+            </span>
+          )}
+        </div>
+        {layout.count_upper > layout.count && (
+          <div className="muted" style={{ fontSize: 11.5 }}>
+            geometry allows up to {layout.count_upper}
+            {layout.silhouette?.cell_mm
+              ? ` — ${layout.count} is the ${fmtMm(layout.silhouette.cell_mm)}mm raster floor`
+              : ` — ${layout.count} is the raster floor`}
+          </div>
+        )}
+        <div className="bc-sub">grid {layout.grid.join(' × ')} · {layout.pose_label}</div>
+        <div className="bc-sub">
+          {box
+            ? `${box.inner_l_mm} × ${box.inner_b_mm} × ${box.inner_h_mm} mm inner`
+            : 'no packaging record for this box'}
+        </div>
+        {layout.limited_by === 'weight' && <div className="bc-truck">weight-limited</div>}
+      </button>
+      {layout.reasons?.length > 0 && (
+        <details className="disclosure" onClick={(e) => e.stopPropagation()}>
+          <summary>Why</summary>
+          <ul className="reasons-list">
+            {layout.reasons.map((r, i) => <li key={i}>{r}</li>)}
+          </ul>
+        </details>
+      )}
+    </div>
   )
 }
 
@@ -398,6 +551,11 @@ function LayoutDetail({ layout, box, part, type, tab, onTabChange, truck, truckB
   const clearance = +drawParams.clearance || 0
   const wall = +drawParams.wall || 0
   const foam = +drawParams.foam || 0
+  // Pocket depth / floor sheet come off the measured insert BOM when this
+  // layout has one (dunnage.py::_pocket_tray) — that supersedes the
+  // clearance/foam drawing knobs below (CLAUDE.md hard rule 9). `wall` is
+  // drawing-only (the divider width) either way, so it is never in this BOM.
+  const bom = layout.dunnage?.archetype === 'pocket_tray' ? layout.dunnage : null
 
   const contentWeight = layout.count * part.weight_kg
   const stackHeight = layout.extent_lbh[2] + (layout.grid[2] - 1) * layout.pitch_lbh[2]
@@ -502,6 +660,12 @@ function LayoutDetail({ layout, box, part, type, tab, onTabChange, truck, truckB
       {activeTab === 'insert' && (
         box ? (
           <>
+            {bom && (
+              <p className="muted" style={{ fontSize: 12, margin: '6px 0 10px' }}>
+                Pocket depth {fmtMm(bom.elements[0].cell_mm[2])} mm, layer sheet{' '}
+                {fmtMm(bom.elements[1].dims_mm[2])} mm — from the insert BOM.
+              </p>
+            )}
             <details className="disclosure">
               <summary>Insert drawing parameters</summary>
               <p className="muted" style={{ fontSize: 12, margin: '6px 0 10px' }}>
@@ -510,25 +674,34 @@ function LayoutDetail({ layout, box, part, type, tab, onTabChange, truck, truckB
                 below immediately.
               </p>
               <div className="form-grid rail-grid">
-                <label className="field">
-                  <span>Clearance / side (mm)</span>
-                  <input type="number" value={drawParams.clearance}
-                    onChange={(e) => setDrawParams({ ...drawParams, clearance: e.target.value })} />
-                </label>
+                {/* Clearance/foam are superseded by the BOM's pocket depth /
+                    layer sheet above when one is present — showing them too
+                    would look editable but silently do nothing. Divider wall
+                    has no BOM source (F-AUDIT-2 flag) — it's a pure drawing
+                    knob and stays editable either way. */}
+                {!bom && (
+                  <label className="field">
+                    <span>Clearance / side (mm)</span>
+                    <input type="number" value={drawParams.clearance}
+                      onChange={(e) => setDrawParams({ ...drawParams, clearance: e.target.value })} />
+                  </label>
+                )}
                 <label className="field">
                   <span>Divider wall (mm)</span>
                   <input type="number" value={drawParams.wall}
                     onChange={(e) => setDrawParams({ ...drawParams, wall: e.target.value })} />
                 </label>
-                <label className="field">
-                  <span>Layer foam (mm)</span>
-                  <input type="number" value={drawParams.foam}
-                    onChange={(e) => setDrawParams({ ...drawParams, foam: e.target.value })} />
-                </label>
+                {!bom && (
+                  <label className="field">
+                    <span>Layer foam (mm)</span>
+                    <input type="number" value={drawParams.foam}
+                      onChange={(e) => setDrawParams({ ...drawParams, foam: e.target.value })} />
+                  </label>
+                )}
               </div>
             </details>
             <InsertPanel box={box} fit={fit} layout={layout} type={type}
-              clearance={clearance} wall={wall} foam={foam} />
+              clearance={clearance} wall={wall} foam={foam} bom={bom} />
           </>
         ) : (
           <p className="muted">No packaging record for {layout.asset_name} —
@@ -540,7 +713,7 @@ function LayoutDetail({ layout, box, part, type, tab, onTabChange, truck, truckB
           lattice and needs no packaging row, so a layout missing from the
           master list still gets its insert design. */}
       {activeTab === 'insert' && (
-        <DunnageBom dunnage={layout.dunnage} drawingUrl={layout.drawing_url} />
+        <DunnageBom dunnage={layout.dunnage} drawingUrl={layout.drawing_url} gifUrl={layout.gif_url} />
       )}
 
       {activeTab === 'truck' && truck && (
@@ -622,20 +795,30 @@ function TruckSection({ truck, vehicles, dropdownVehicleId, box }) {
  * Not every layout carries one yet, so this renders nothing when absent —
  * same convention as the rest of the tab (no packaging record → no drawing).
  */
-function DunnageBom({ dunnage, drawingUrl }) {
-  const [exploded, setExploded] = useState(false)
+function DunnageBom({ dunnage, drawingUrl, gifUrl }) {
+  const [modalView, setModalView] = useState(null) // null: closed; else 'png' | 'gif'
   if (!dunnage) return null
   const budget = heightBudget(dunnage)
   const showExplode = hasDrawing(drawingUrl)
+  const showPack = hasDrawing(gifUrl)
 
   return (
     <div className="detail-block dunnage-block">
       <div className="insert-card-head">
         <h3 style={{ margin: 0 }}><span className="h-icon">▤</span> Insert BOM</h3>
-        {showExplode && (
-          <button className="btn-ghost" onClick={() => setExploded(true)}>
-            ⛶ Explode
-          </button>
+        {(showExplode || showPack) && (
+          <div className="insert-card-actions">
+            {showExplode && (
+              <button className="btn-ghost" onClick={() => setModalView('png')}>
+                ⛶ Explode
+              </button>
+            )}
+            {showPack && (
+              <button className="btn-ghost" onClick={() => setModalView('gif')}>
+                ▶ Pack
+              </button>
+            )}
+          </div>
         )}
       </div>
 
@@ -673,17 +856,22 @@ function DunnageBom({ dunnage, drawingUrl }) {
       {/* Verbatim — it says physical trials still decide; not ours to paraphrase. */}
       {dunnage.caveat && <p className="muted" style={{ marginTop: 10 }}>{dunnage.caveat}</p>}
 
-      {exploded && (
-        <ExplodeModal url={drawingUrl} onClose={() => setExploded(false)} />
+      {modalView && (
+        <ExplodeModal drawingUrl={drawingUrl} gifUrl={gifUrl} initial={modalView}
+          onClose={() => setModalView(null)} />
       )}
     </div>
   )
 }
 
 /** Click-outside and Esc close, focus starts on the close button. No new
- *  dependency — CLAUDE.md keeps frontend deps at react + three. */
-function ExplodeModal({ url, onClose }) {
+ *  dependency — CLAUDE.md keeps frontend deps at react + three. `initial`
+ *  picks which image opens (the button clicked, 'png' or 'gif'); the toggle
+ *  only appears when both exist — one image never needs a choice. */
+function ExplodeModal({ drawingUrl, gifUrl, initial, onClose }) {
   const closeRef = useRef(null)
+  const hasBoth = hasDrawing(drawingUrl) && hasDrawing(gifUrl)
+  const [view, setView] = useState(initial)
 
   useEffect(() => {
     closeRef.current?.focus()
@@ -692,15 +880,31 @@ function ExplodeModal({ url, onClose }) {
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  const showGif = view === 'gif'
+  const label = showGif ? 'Packing sequence' : 'Exploded view'
+
   return (
     <div className="modal-backdrop"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
-      <div className="modal-card" role="dialog" aria-modal="true" aria-label="Exploded insert view">
+      <div className="modal-card" role="dialog" aria-modal="true" aria-label="Insert view">
         <div className="modal-head">
-          <span>Exploded view</span>
+          {hasBoth ? (
+            <div className="view-toggle" role="group" aria-label="View">
+              <button type="button" aria-pressed={showGif} onClick={() => setView('gif')}>
+                Packing sequence
+              </button>
+              <button type="button" aria-pressed={!showGif} onClick={() => setView('png')}>
+                Exploded view
+              </button>
+            </div>
+          ) : (
+            <span>{label}</span>
+          )}
           <button ref={closeRef} className="btn-ghost" onClick={onClose} aria-label="Close">✕</button>
         </div>
-        <img src={url} alt="Exploded insert drawing" className="modal-img" />
+        <img src={showGif ? gifUrl : drawingUrl}
+          alt={showGif ? 'Packing sequence' : 'Exploded insert drawing'}
+          className="modal-img" />
       </div>
     </div>
   )
@@ -711,7 +915,7 @@ function ExplodeModal({ url, onClose }) {
  * isometric drawing + spec card (no tabs — a solution with two tray designs
  * shows both). The rotating 3D view is an optional per-tray toggle.
  */
-function InsertPanel({ box, fit, layout, type, clearance, wall, foam }) {
+function InsertPanel({ box, fit, layout, type, clearance, wall, foam, bom }) {
   // Interleaved layouts (pitch < extent, in-plane): a pocket-per-part tray
   // would draw pockets that overlap by (extent - pitch) mm — unmanufacturable.
   // The count and pitch are still measured and correct; only the tray
@@ -746,7 +950,7 @@ function InsertPanel({ box, fit, layout, type, clearance, wall, foam }) {
       )}
       {groups.map((g, i) => (
         <InsertCard key={g.key} idx={i + 1} total={groups.length} group={g}
-          geom={trayGeometry({ box, group: g, clearance, wall, foam })}
+          geom={trayGeometry({ box, group: g, clearance, wall, foam, bom })}
           boxCode={box.item_code} />
       ))}
     </div>
