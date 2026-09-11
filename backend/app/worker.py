@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import time
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,14 @@ from .reasons import reasons_for
 from .runs import _run_out
 
 logger = logging.getLogger(__name__)
+
+# A packing-sequence GIF costs ~40s/layout on the e2-standard-2 production
+# VM (vs ~5s on a dev Mac) -- with top_n=5 that was 5 GIFs + 1 custom GIF on
+# every solve, ~5 minutes of worker time for pictures nobody opens but the
+# top box and the custom design. Restrict GIF building to those two; every
+# layout still gets its exploded PNG. Flip off to go back to one GIF per
+# ranked layout.
+GIF_FOR_TOP_CATALOGUE_ONLY = True
 
 celery_app = Celery("intake", broker=settings.redis_url, backend=settings.redis_url)
 celery_app.conf.task_acks_late = True
@@ -69,10 +78,11 @@ def run_extraction(job_id: str) -> None:
 
 def _render_drawings(job_id: str, mesh, candidates, assets, result,
                      clearance_lbh=engine_mod.DEFAULT_CLEARANCE_LBH):
-    """Exploded insert drawings AND packing-sequence GIFs for every ranked
-    layout plus the custom design. Voxelises once per distinct pose --
-    `pose_voxels` is the expensive call, and several ranked layouts commonly
-    share a pose.
+    """Exploded insert drawings for every ranked layout plus the custom
+    design. Packing-sequence GIFs are built only for catalogue[0] (top
+    ranked) and the custom design when GIF_FOR_TOP_CATALOGUE_ONLY is set --
+    see that constant. Voxelises once per distinct pose -- `pose_voxels` is
+    the expensive call, and several ranked layouts commonly share a pose.
 
     A render failure -- including `explode_png`/`build_gif`'s own
     drawn-count-vs-BOM AssertionError -- must never fail the solve: it is
@@ -112,8 +122,11 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
         path.write_bytes(data)
         return f"/api/files/{file_name}"
 
+    render_counts = {"png": 0, "gif": 0}
+
     def render(*, pose_label, extent_lbh, pitch_lbh, grid, inner_lbh,
-               asset_name, count, file_stem) -> tuple[str | None, str | None]:
+               asset_name, count, file_stem,
+               want_gif: bool = True) -> tuple[str | None, str | None]:
         voxels = voxels_for(pose_label)
         if voxels is None:
             return None, None
@@ -135,34 +148,43 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
                               inner_lbh=inner_lbh, bom=bom,
                               asset_name=asset_name, count=count)
             png_url = _write(png, f"{file_stem}.png")
+            render_counts["png"] += 1
         except Exception:
             logger.exception("insert drawing failed for %s (%s)",
                              job_id, file_stem)
 
         gif_url = None
-        try:
-            gif = build_gif(voxels=voxels, extent_lbh=extent_lbh,
-                            pitch_lbh=pitch_lbh, grid=grid,
-                            inner_lbh=inner_lbh, bom=bom,
-                            asset_name=asset_name, count=count)
-            gif_url = _write(gif, f"{file_stem}.gif")
-        except Exception:
-            logger.exception("build sequence gif failed for %s (%s)",
-                             job_id, file_stem)
+        if want_gif:
+            try:
+                gif = build_gif(voxels=voxels, extent_lbh=extent_lbh,
+                                pitch_lbh=pitch_lbh, grid=grid,
+                                inner_lbh=inner_lbh, bom=bom,
+                                asset_name=asset_name, count=count)
+                gif_url = _write(gif, f"{file_stem}.gif")
+                render_counts["gif"] += 1
+            except Exception:
+                logger.exception("build sequence gif failed for %s (%s)",
+                                 job_id, file_stem)
 
         return png_url, gif_url
 
+    start = time.monotonic()
     drawing_urls: dict = {}
     gif_urls: dict = {}
     for i, layout in enumerate(result.catalogue):
         inner_lbh = inner_by_name.get(layout.asset_name)
         if inner_lbh is None:
             continue
+        # catalogue[0] is the top-ranked box -- the one the engineer opens
+        # first. Everyone else gets its exploded PNG but not the ~40s GIF
+        # (see GIF_FOR_TOP_CATALOGUE_ONLY).
+        want_gif = (not GIF_FOR_TOP_CATALOGUE_ONLY) or i == 0
         png_url, gif_url = render(
             pose_label=layout.pose_label, extent_lbh=layout.extent_lbh,
             pitch_lbh=layout.pitch_lbh, grid=layout.grid,
             inner_lbh=inner_lbh, asset_name=layout.asset_name,
-            count=layout.count, file_stem=f"drawing_{job_id}_{i}")
+            count=layout.count, file_stem=f"drawing_{job_id}_{i}",
+            want_gif=want_gif)
         if png_url is not None:
             drawing_urls[i] = png_url
         if gif_url is not None:
@@ -178,6 +200,9 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
             count=result.custom.count,
             file_stem=f"drawing_{job_id}_custom")
 
+    logger.info("rendered %d png + %d gif in %.1fs for %s",
+                render_counts["png"], render_counts["gif"],
+                time.monotonic() - start, job_id)
     return drawing_urls, gif_urls, custom_drawing_url, custom_gif_url
 
 

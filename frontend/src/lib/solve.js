@@ -41,7 +41,7 @@ export function errorDetail(detail, fallback) {
  *  between polls, the wait itself — without it, a StrictMode double-mount
  *  or a fast part-to-part click leaves the previous solve's fetch/poll loop
  *  running to completion untracked (F2-2 F4). */
-export async function runSolve(partId, { tareKg, vehicleName, topN = 5, assets, confirmedPoseOnly, clearanceMm, signal, projectId } = {}) {
+export async function runSolve(partId, { tareKg, vehicleName, topN = 5, assets, confirmedPoseOnly, clearanceMm, signal, projectId, onStarted } = {}) {
   // Solving from a project page must land under that project's run list
   // (F2 contract: POST /api/projects/{id}/solve) — omitting projectId keeps
   // today's behaviour, posting straight to the part.
@@ -66,6 +66,12 @@ export async function runSolve(partId, { tareKg, vehicleName, topN = 5, assets, 
     throw new Error(errorDetail(detail?.detail, `Solve request failed (${r.status})`))
   }
   const { solve_job_id } = await r.json()
+  // Fired before the poll loop below, which can run for minutes — lets a
+  // caller (ProjectPage) land this job in `project.runs` right away, so a
+  // remount of the component that started it finds a pending/processing
+  // run to poll (rule 1 of pickedRun) instead of posting a second solve
+  // for the same part (PROD defect: two solve_part tasks 35s apart).
+  onStarted?.(solve_job_id)
   // Two SEPARATE budgets: pickup (pending) and run (processing). One shared
   // counter charged the processing budget for time spent waiting on a worker,
   // so a slow pickup plus a legitimately long run threw "exceeded 600s" early.

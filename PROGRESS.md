@@ -2252,3 +2252,11 @@ Deployed: commit 488df8f pushed to main; Cloud Build 7468e02a SUCCESS at
 13:22 IST (build → push → compose up on the VM); packit.trakkia.com answers
 401 (basic auth) as before. Postgres on the VM gained the three columns via
 `_ensure_added_columns` and the projects/proposals tables via create_all.
+
+Hotfix after first live use (VM e2-standard-2): a solve took ~5 min because a
+GIF was rendered for all 5 ranked boxes + custom (~40 s each on the VM) and
+leaving/returning to Packaging during a pending solve enqueued a second one.
+Now: GIF only for catalogue[0] + custom (`worker.GIF_FOR_TOP_CATALOGUE_ONLY`);
+`pickedRun` falls back to the newest pending/processing run and polls it;
+`onSolveStarted` reloads the project so a remount sees the pending job; the
+vehicle select defaults to 32_ft_sxl.

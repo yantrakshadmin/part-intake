@@ -87,6 +87,17 @@ export function PackingParams({ params, onChange, vehicles, packaging, onAddBox,
   const [customMsg, setCustomMsg] = useState('')
   const set = (key) => (e) => onChange({ ...params, [key]: e.target.value })
 
+  // Vehicle select showed "—" until a run mirrored one in (PROD defect) —
+  // once the vehicle list loads, default a still-blank selection to the
+  // backend's own SolveIn default (SolveIn.vehicle = "32_ft_sxl"), else the
+  // first vehicle, so a fresh project's rail already names a real truck.
+  useEffect(() => {
+    if (params.vehicleId || vehicles.length === 0) return
+    const preferred = vehicles.find((v) => v.name === '32_ft_sxl') || vehicles[0]
+    onChange({ ...params, vehicleId: String(preferred.id) })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vehicles])
+
   async function saveCustomBox() {
     setCustomMsg('')
     try {
@@ -214,7 +225,7 @@ function fmtRunDate(iso) {
  * the stored result over GET /api/solve-jobs/{id} and never re-solves
  * (PRD F5: "any row opens the existing results view").
  */
-export default function PackingResults({ part, params, packaging, vehicles, projectId, tab, run, onSolved }) {
+export default function PackingResults({ part, params, packaging, vehicles, projectId, tab, run, onSolved, onSolveStarted }) {
   const vehicle = vehicles.find((v) => String(v.id) === params.vehicleId) || null
   const type = insertType(part)
 
@@ -249,6 +260,13 @@ export default function PackingResults({ part, params, packaging, vehicles, proj
       clearanceMm: params.clearanceMm !== '' ? +params.clearanceMm : null,
       signal: controller.signal,
       projectId,
+      // Fires as soon as the POST returns the id, well before this promise
+      // resolves — lets the caller land the pending job in project.runs
+      // right away (PROD defect: a remount that only sees `run: null`
+      // starts a second solve for the same part). Mark it shown here too,
+      // same as the `.then` below, so a reload that hands this same run
+      // back through `run` is recognised as already in flight, not re-polled.
+      onStarted: (id) => { shownRunId.current = id; onSolveStarted?.(id) },
     }).then(({ result, solveJobId }) => {
       shownRunId.current = solveJobId
       setJob({ status: 'done', result })

@@ -180,26 +180,33 @@ def main() -> int:
             check(not on_disk, "the PNG behind each drawing_url exists",
                   f": missing for {on_disk}")
 
-            # B-GIF, same hard rule 9 discipline: the packing-sequence GIF is
-            # rendered beside the PNG and shipped as `gif_url`.
-            gif_drawn = [l for l in status.result.catalogue if l.gif_url]
-            check(len(gif_drawn) == len(status.result.catalogue),
-                  "every ranked layout ships a gif_url",
-                  f": {len(gif_drawn)}/{len(status.result.catalogue)} "
-                  f"{[l.gif_url for l in status.result.catalogue]}")
-            gif_missing = [
-                l.asset_name for l in gif_drawn
-                if not (Path(settings.local_storage_dir)
-                        / l.gif_url.rsplit("/", 1)[-1]).is_file()
+            # B-GIF, same hard rule 9 discipline, tightened for the VM cost
+            # fix (worker.GIF_FOR_TOP_CATALOGUE_ONLY): the packing-sequence
+            # GIF is now only rendered for catalogue[0] (top-ranked box) and
+            # the custom design -- every other ranked layout still gets its
+            # exploded PNG but ships gif_url=None on purpose.
+            def _opens(url: str) -> bool:
+                from PIL import Image
+                path = Path(settings.local_storage_dir) / url.rsplit("/", 1)[-1]
+                with Image.open(path) as im:
+                    im.verify()
+                return path.is_file()
+
+            top = status.result.catalogue[0]
+            check(bool(top.gif_url) and _opens(top.gif_url),
+                  "catalogue[0] (top ranked) ships a gif_url that opens",
+                  f": {top.gif_url}")
+            others_have_gif = [
+                l.asset_name for l in status.result.catalogue[1:]
+                if l.gif_url is not None
             ]
-            check(not gif_missing, "the GIF behind each gif_url exists",
-                  f": missing for {gif_missing}")
+            check(not others_have_gif,
+                  "other ranked layouts ship gif_url=None",
+                  f": unexpected gif on {others_have_gif}")
             check(status.result.custom is not None
                   and bool(status.result.custom.gif_url)
-                  and (Path(settings.local_storage_dir)
-                       / status.result.custom.gif_url.rsplit("/", 1)[-1]
-                       ).is_file(),
-                  "custom.gif_url ships and the file exists",
+                  and _opens(status.result.custom.gif_url),
+                  "custom.gif_url ships and opens with PIL",
                   f": {status.result.custom.gif_url if status.result.custom else None}")
 
             # The synthesised custom design has no catalogue tare and no

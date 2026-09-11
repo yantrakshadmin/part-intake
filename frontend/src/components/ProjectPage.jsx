@@ -39,7 +39,18 @@ function pickedRun(project, query) {
     const r = runs.find((r) => r.solve_job_id === project.recommended_run_id)
     if (r) return r
   }
-  return runs.find((r) => r.status === 'done') || null
+  const done = runs.find((r) => r.status === 'done')
+  if (done) return done
+  // No finished run yet — if one is already pending/processing, show that
+  // instead of null. PackingResults polls a stored run in those states
+  // every 3s and shows it once it lands, so a remount (e.g. Packaging ->
+  // Overview -> Packaging) finds a run to poll here instead of falling
+  // through to the mount-solve path and starting a SECOND solve for the
+  // same part (PROD defect: two solve_part tasks 35s apart).
+  const busy = runs.filter((r) => r.status === 'pending' || r.status === 'processing')
+  return busy.reduce((newest, r) => (
+    !newest || new Date(r.created_at) > new Date(newest.created_at) ? r : newest
+  ), null)
 }
 
 /**
@@ -93,6 +104,12 @@ export default function ProjectPage({ id, tab, query }) {
     await reload()
   }
 
+  // Fired the moment a solve is POSTed (rule 2 of the PROD fix above) — just
+  // reload so the new pending job lands in `project.runs`; no navigate here,
+  // `run` on screen is already this one (PackingResults marks it shown as
+  // soon as it starts, see onSolveStarted in solve()).
+  async function onSolveStarted() { await reload() }
+
   return (
     <div>
       <ProjectHeader project={project} onPatch={patch} />
@@ -116,7 +133,7 @@ export default function ProjectPage({ id, tab, query }) {
             second mount would mean a second ~40-50s solve. */}
         {(activeTab === 'packaging' || activeTab === 'truck') && (
           <PackagingTruckTab project={project} query={query} packing={packing} params={params}
-            onParamsChange={setParams} onSolved={onSolved}
+            onParamsChange={setParams} onSolved={onSolved} onSolveStarted={onSolveStarted}
             resultTab={activeTab === 'truck' ? 'truck' : 'layers'} />
         )}
         {activeTab === 'runs' && <RunsTab project={project} onPatch={patch} />}
@@ -357,7 +374,7 @@ function NoPart() {
 /** Packaging and Truck are one PackingResults, not two — a solve is
  *  40-50s, so a tab switch must never re-mount it. `resultTab` is the only
  *  thing that changes between the two project tabs. */
-function PackagingTruckTab({ project, query, packing, params, onParamsChange, onSolved, resultTab }) {
+function PackagingTruckTab({ project, query, packing, params, onParamsChange, onSolved, onSolveStarted, resultTab }) {
   const run = project.part ? pickedRun(project, query) : null
 
   // The rail must reflect the run on screen, not whatever it was last set
@@ -397,7 +414,8 @@ function PackagingTruckTab({ project, query, packing, params, onParamsChange, on
       <main className="stage">
         <PackingResults part={project.part} params={params}
           packaging={packing.packaging} vehicles={packing.vehicles}
-          projectId={project.id} onSolved={onSolved} tab={resultTab} run={run} />
+          projectId={project.id} onSolved={onSolved} onSolveStarted={onSolveStarted}
+          tab={resultTab} run={run} />
       </main>
     </div>
   )
