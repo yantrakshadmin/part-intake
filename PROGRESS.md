@@ -2247,3 +2247,8 @@ for the real look. `top_n` is fixed at 5 in the frontend. Legacy runs show
 **Next:** F10 stage ladder while solving, F8 assets edit UI, F9 cost/CO₂
 (inputs exist on the project), F11 activity. Then commit and deploy — the
 whole tree is still uncommitted and a push to main deploys.
+
+Deployed: commit 488df8f pushed to main; Cloud Build 7468e02a SUCCESS at
+13:22 IST (build → push → compose up on the VM); packit.trakkia.com answers
+401 (basic auth) as before. Postgres on the VM gained the three columns via
+`_ensure_added_columns` and the projects/proposals tables via create_all.
