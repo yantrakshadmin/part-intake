@@ -2260,3 +2260,11 @@ Now: GIF only for catalogue[0] + custom (`worker.GIF_FOR_TOP_CATALOGUE_ONLY`);
 `pickedRun` falls back to the newest pending/processing run and polls it;
 `onSolveStarted` reloads the project so a remount sees the pending job; the
 vehicle select defaults to 32_ft_sxl.
+
+Session close (2026-09-13): hotfix 224d994 deployed and confirmed on the VM
+(worker restarted with GIF_FOR_TOP_CATALOGUE_ONLY=True). Rahul has the site
+credentials (Secret Manager `part-intake-basic-auth`). Open for next session:
+browser findings from Rahul on the live site (4 console errors seen in
+DevTools, not yet identified); F10 stage ladder, F8 assets UI, F9 cost/CO2,
+F11 activity; consider a background artifact task so the count returns
+before the drawings on the 2-vCPU VM.
