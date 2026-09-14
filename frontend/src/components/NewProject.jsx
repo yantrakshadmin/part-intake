@@ -227,47 +227,49 @@ export default function NewProject() {
   return (
     <div className="workspace">
       <aside className="rail">
-        <div className="segmented sub-mode">
-          <button className={mode === 'stp' ? 'active' : ''}
-            onClick={() => setMode('stp')}>STEP file</button>
-          <button className={mode === 'manual' ? 'active' : ''}
-            onClick={() => setMode('manual')}>Manual entry</button>
-        </div>
-
-        {mode === 'stp' && (
-          <div
-            className={`dropzone compact${dragging ? ' dragging' : ''}${busy ? ' busy' : ''}`}
-            onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={onDrop}
-          >
-            {busy ? (
-              <>
-                <div className="spinner" />
-                <div className="dz-title">{status}</div>
-                <div className="dz-hint">Large assemblies can take up to ~30 s</div>
-              </>
-            ) : (
-              <>
-                <div className="dz-icon">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" strokeWidth="2" strokeLinecap="round"
-                    strokeLinejoin="round">
-                    <path d="M12 16V4m0 0L7 9m5-5 5 5" />
-                    <path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2" />
-                  </svg>
-                </div>
-                <div className="dz-title">
-                  Drop a STEP file, or <em>browse</em>
-                </div>
-                <div className="dz-hint">
-                  .stp / .step / .igs / .iges — dimensions extracted automatically
-                </div>
-                <input type="file" accept=".stp,.step,.igs,.iges"
-                  onChange={(e) => handleFile(e.target.files[0])} />
-              </>
-            )}
-          </div>
+        {mode === 'stp' ? (
+          <>
+            <div
+              className={`dropzone compact${dragging ? ' dragging' : ''}${busy ? ' busy' : ''}`}
+              onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={onDrop}
+            >
+              {busy ? (
+                <>
+                  <div className="spinner" />
+                  <div className="dz-title">{status}</div>
+                  <div className="dz-hint">Large assemblies can take up to ~30 s</div>
+                </>
+              ) : (
+                <>
+                  <div className="dz-icon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                      stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                      strokeLinejoin="round">
+                      <path d="M12 16V4m0 0L7 9m5-5 5 5" />
+                      <path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2" />
+                    </svg>
+                  </div>
+                  <div className="dz-title">
+                    Drop a STEP file, or <em>browse</em>
+                  </div>
+                  <div className="dz-hint">
+                    .stp / .step / .igs / .iges — dimensions extracted automatically
+                  </div>
+                  <input type="file" accept=".stp,.step,.igs,.iges"
+                    onChange={(e) => handleFile(e.target.files[0])} />
+                </>
+              )}
+            </div>
+            <button type="button" className="link-btn" onClick={() => setMode('manual')}>
+              Enter dimensions manually
+            </button>
+          </>
+        ) : (
+          <button type="button" className="link-btn" onClick={() => setMode('stp')}>
+            ← Upload a STEP file instead
+          </button>
         )}
 
         <div className="card form-card">

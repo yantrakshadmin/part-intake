@@ -117,7 +117,11 @@ export function PackingParams({ params, onChange, vehicles, packaging, onAddBox,
       const saved = await r.json()
       onAddBox(saved)
       setShowCustom(false)
-      setCustomMsg(`Added ${saved.item_code} (draft)`)
+      // "draft" = unverified dims (backend/app/models.py Packaging.status);
+      // the row is global, not project-scoped, so it's excluded from the
+      // default ranked search everywhere until someone marks it checked —
+      // not hidden from other projects.
+      setCustomMsg(`Added ${saved.item_code} — draft, excluded from default rankings until checked`)
     } catch (e) { setCustomMsg(e.message) }
   }
 
@@ -395,8 +399,7 @@ export default function PackingResults({ part, params, packaging, vehicles, proj
       {runCaption && <p className="muted" style={{ margin: '-8px 0 14px', fontSize: 12.5 }}>{runCaption}</p>}
 
       {job.status === 'no-id' && (
-        <p className="muted">Save this part first — the packing fit runs the
-          real nesting solve against its saved CAD file.</p>
+        <p className="muted">Save the part first to see the fit.</p>
       )}
 
       {job.status === 'pending' && (

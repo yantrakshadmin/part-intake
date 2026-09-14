@@ -313,11 +313,15 @@ function WhyThisDesign({ run }) {
   )
 }
 
+// route_km used to live here: Project.route_km (models.py) is stored and
+// echoed on ProjectOut (schemas.py) but no engine calculation reads it
+// (checked engine.py — trips_per_year only uses annual_volume and
+// parts_per_truck) — dropped per CLAUDE.md rule "never name an action that
+// does not exist."
 const PROJECT_INPUT_FIELDS = [
   ['annual_volume', "Annual volume (parts/yr)", 'number'],
   ['customer_count', "Customer's current parts per box", 'number'],
   ['customer_box', "Customer's current box", 'text'],
-  ['route_km', 'Route (km)', 'number'],
 ]
 
 /** F3b/F6: entered data, never estimated (CLAUDE.md hard rule 2). Each
@@ -330,7 +334,7 @@ function ProjectInputs({ project, onPatch }) {
 
   useEffect(() => {
     setValues(Object.fromEntries(PROJECT_INPUT_FIELDS.map(([key]) => [key, project[key] ?? ''])))
-  }, [project.annual_volume, project.customer_count, project.customer_box, project.route_km])
+  }, [project.annual_volume, project.customer_count, project.customer_box])
 
   async function commit(key, type) {
     const raw = values[key]
@@ -348,7 +352,7 @@ function ProjectInputs({ project, onPatch }) {
         {PROJECT_INPUT_FIELDS.map(([key, label, type]) => (
           <label className="field" key={key}>
             <span>{label}</span>
-            <input type={type} min={type === 'number' ? (key === 'route_km' ? '0' : '1') : undefined}
+            <input type={type} min={type === 'number' ? '1' : undefined}
               value={values[key]}
               onChange={(e) => setValues((v) => ({ ...v, [key]: e.target.value }))}
               onBlur={() => commit(key, type)} />

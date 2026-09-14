@@ -327,9 +327,20 @@ body {
   margin-top: 8px;
 }
 
-/* ---- intake sub-mode toggle ---------------------------------------------- */
+/* ---- intake sub-mode link (STEP <-> manual entry) ------------------------ */
 
-.segmented.sub-mode { margin-bottom: 16px; }
+.link-btn {
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 12.5px;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 8px 2px;
+  align-self: flex-start;
+}
+.link-btn:hover { color: var(--accent); }
 
 /* ---- part list ------------------------------------------------------------ */
 
@@ -1112,7 +1123,6 @@ body {
 }
 
 .rail .form-card, .rail .dropzone { margin-top: 0; }
-.rail .sub-mode { align-self: flex-start; }
 
 .rail-grid { grid-template-columns: 1fr 1fr; }
 
