@@ -2268,3 +2268,18 @@ browser findings from Rahul on the live site (4 console errors seen in
 DevTools, not yet identified); F10 stage ladder, F8 assets UI, F9 cost/CO2,
 F11 activity; consider a background artifact task so the count returns
 before the drawings on the 2-vCPU VM.
+
+## 2026-09-14 — Live IGES outage: libGL missing from the backend image
+
+Rahul: nothing parses post upload. Worker log on the VM: every IGES job died
+with `ImportError: libGL.so.1` from `step_fallback.iges_declared_unit`.
+`python:3.12-slim` has no apt packages and cadquery-ocp links libGL/X11 even
+headless — OCP has never been importable in the container. STEP hid it
+(cascadio is self-contained); only IGES and the OCP STEP fallback import OCP.
+
+Fix `e10abc7`: apt-install `libgl1 libglu1-mesa libxext6 libxrender1 libsm6
+libfontconfig1` + a build-time `RUN python -c "import OCP…"` guard. Cloud
+Build SUCCESS 11:13 IST; tester verified on the VM (import ok, 0 ImportError,
+`sample.igs` upload → done, 916/916 faces). That test upload left one stray
+part on prod — delete it from the UI. Still open: Rahul's 4 console errors,
+F10/F8/F9/F11, count-before-drawings on the 2-vCPU VM.
