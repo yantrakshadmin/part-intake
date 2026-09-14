@@ -80,7 +80,23 @@ Order = what we build next. One ticket each; acceptance check stated.
 5. `count` vs `count_upper`: would you show the band (40–44) or the single
    calculated count with the bound in the certificate only?
 
-## Still to merge
+## Rahul's findings from live use (2026-09-14) — merged
 
-Rahul's own list of defects from live use. Add them here with a step number
-from `docs/USER_JOURNEY.md` and they get slotted into the table above.
+| # | Sev | Finding | Fix |
+|---|---|---|---|
+| R1 | P0 | After a solve the first screen is the box list; the solution (count, exploded view, GIF) is hidden below | Packaging lands on the recommended solution: hero count + run id, exploded PNG, GIF, certificate. Box ranking becomes the second block. Absorbs fix #1 (run id on the hero) and #3 (certificate). |
+| R2 | P1 | Too many yellow warning labels | One line: "3 notes ▸", expands on click. Backend emits 15 distinct `warnings.append` (geometry.py, engine, worker) — classify into units / geometry / pose / capacity; one chip per class, not per message. |
+| R3 | P1 | Too much text nobody reads | Reasons → certificate rows (label: value). Cut prose paragraphs on Overview and cards; hard cap: no paragraph over two lines outside a disclosure. |
+| R4 | P1 | Exploded view / GIF should look like a product infographic (reference: Fossil exploded-view — dark ground, leader-line callouts per component, spec column, detail insets) | Restyle `insert_drawing.py` output from the engine's real layout: callouts for tray / separator / part, spec column from the BOM, dark theme. **Not** an image model: the drawing must come from the same expression as the count (hard rule 9); a generated picture cannot be checked against the number. |
+
+Round 2 with the agency is deferred until the table above is done.
+
+## Build order (tickets, in sequence)
+
+1. **R1 — Solution-first Packaging screen** (frontend). Includes run id on the hero and the certificate card. Check: after "Save & calculate", the first viewport shows count · run · pose · box · exploded PNG · GIF; no scrolling.
+2. **#2 — Count before pictures** (backend). Check: count on screen < 60 s on the VM; drawings follow; render failure leaves the count.
+3. **R2 + R3 + #6 — Warnings, text, dead ends** (frontend). Check: one collapsed notes line per screen; no message names a missing action.
+4. **R4 — Exploded view v2** (geometry). Check: same BOM counts as the PNG today; callouts match `insert BOM` rows 1:1.
+5. **#1 rest — Proposal takes `run_id`** (backend, small).
+6. **#4 / #5 — Bounded async, health, deploy gate.**
+7. **#7 / #8 — CAD revision; team-two gate.**
