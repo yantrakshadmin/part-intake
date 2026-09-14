@@ -41,7 +41,7 @@ export function errorDetail(detail, fallback) {
  *  between polls, the wait itself — without it, a StrictMode double-mount
  *  or a fast part-to-part click leaves the previous solve's fetch/poll loop
  *  running to completion untracked (F2-2 F4). */
-export async function runSolve(partId, { tareKg, vehicleName, topN = 5, assets, confirmedPoseOnly, clearanceMm, signal, projectId, onStarted } = {}) {
+export async function runSolve(partId, { tareKg, vehicleName, topN = 5, assets, confirmedPoseOnly, clearanceMm, signal, projectId, onStarted, onCounts } = {}) {
   // Solving from a project page must land under that project's run list
   // (F2 contract: POST /api/projects/{id}/solve) — omitting projectId keeps
   // today's behaviour, posting straight to the part.
@@ -81,9 +81,20 @@ export async function runSolve(partId, { tareKg, vehicleName, topN = 5, assets, 
     const res = await fetch(`/api/solve-jobs/${solve_job_id}`, { signal })
     if (!res.ok) throw new Error(`Solve status check failed (${res.status})`)
     const job = await res.json()
-    if (job.status === 'done') return { result: job.result, solveJobId: solve_job_id }
-    if (job.status === 'failed') throw new Error(job.error || 'Solve failed')
-    if (job.status === 'pending') {
+    if (job.status === 'done') {
+      // Ticket 2b: counts land (status "done") before drawing_url/gif_url/
+      // packed_url do -- render_status stays "pending" until a second
+      // Celery task fills those in. Tell the caller the count is ready NOW
+      // (onCounts) and keep polling this same job/cadence for the pictures
+      // instead of resolving. job.status is "done" the whole time we wait
+      // here, so neither poll cap above ticks up -- no timeout during the
+      // render wait, only during the actual solve.
+      const renderStatus = job.result.render_status ?? 'done'
+      if (renderStatus !== 'pending') return { result: job.result, solveJobId: solve_job_id }
+      onCounts?.(job.result)
+    } else if (job.status === 'failed') {
+      throw new Error(job.error || 'Solve failed')
+    } else if (job.status === 'pending') {
       pendingPolls++
       if (pendingPolls > MAX_POLLS_PENDING) {
         throw new Error(`Solve did not finish in ${Math.round(MAX_POLLS_PENDING * POLL_MS / 1000)}s `

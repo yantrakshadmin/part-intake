@@ -135,6 +135,30 @@ assert.ok(Date.now() - t0 < 500, `pre-aborted signal waited ${Date.now() - t0}ms
 console.log('packing.check.mjs: runSolve checks passed — 422 detail readable,'
   + ` abort stops polling (${pollsAtAbort} poll(s), none after)`)
 
+// Ticket 2b: counts land (job.status "done") before drawing_url/gif_url/
+// packed_url do. onCounts must fire with the still-pending result as soon
+// as status flips to "done", and runSolve must keep polling the SAME job
+// (not stop, not throw) until render_status leaves "pending".
+let renderPolls = 0
+const onCountsSeen = []
+globalThis.fetch = async (url) => {
+  if (String(url).includes('/solve-jobs/')) {
+    renderPolls++
+    return renderPolls < 3
+      ? jsonRes({ status: 'done', result: { best_count: 48, render_status: 'pending' } })
+      : jsonRes({ status: 'done', result: { best_count: 48, render_status: 'done', drawing_url: '/x.png' } })
+  }
+  return jsonRes({ solve_job_id: 'j2' })
+}
+const { result: renderResult } = await runSolve(1, { onCounts: (r) => onCountsSeen.push(r.render_status) })
+assert.deepEqual(onCountsSeen, ['pending', 'pending'], 'onCounts should fire once per still-pending poll')
+assert.equal(renderResult.render_status, 'done')
+assert.equal(renderResult.drawing_url, '/x.png')
+assert.equal(renderPolls, 3, 'should have kept polling the same job through the pending renders')
+
+console.log('packing.check.mjs: render_status pending->done checks passed —'
+  + ` ${renderPolls} polls, onCounts fired ${onCountsSeen.length}x before drawing_url landed`)
+
 // --- floorPlanFromTruck: the drawing must not disagree with the number -----
 // Real backend output for the wheel (tests/test_solve_api.py block 2):
 // PLS12803, 48 boxes, 2304 parts, floor_grid (8,3), floor_rotated false.

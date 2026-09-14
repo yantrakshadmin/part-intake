@@ -24,7 +24,17 @@ services:
 
   worker:
     <<: *backend
-    command: celery -A app.worker worker --loglevel=info --concurrency=2
+    # -Q celery (the default queue): solve_part and everything else except
+    # render_run, which task_routes sends to its own queue (see worker.py) --
+    # this worker never picks up a ~40s render behind the next solve.
+    command: celery -A app.worker worker --loglevel=info --concurrency=2 -Q celery
+
+  worker-render:
+    <<: *backend
+    # ticket 2: render_run's own worker/queue so a GIF in flight never
+    # blocks the next solve_part. concurrency=1 -- rendering is one big
+    # matplotlib/PIL job per layout already, not worth parallelising here.
+    command: celery -A app.worker worker --loglevel=info --concurrency=1 -Q render
 
   db:
     image: postgres:16-alpine

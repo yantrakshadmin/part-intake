@@ -15,10 +15,14 @@ ticket asks for.
 """
 from __future__ import annotations
 
+import json
 import os
+import socket
+import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -43,7 +47,7 @@ from app.models import (ExtractionJob, Packaging, PartProfile,  # noqa: E402
                         SolveJob, Vehicle)
 from app.config import settings  # noqa: E402
 from app.schemas import SolveIn  # noqa: E402
-from app.worker import run_solve  # noqa: E402
+from app.worker import render_run, run_render, run_solve  # noqa: E402
 
 _ENQUEUED: list[tuple] = []
 
@@ -54,6 +58,15 @@ def _capture_delay(*args, **kwargs):
 
 
 app_main.solve_part.delay = _capture_delay
+
+# Ticket 2: run_solve() now enqueues a second task (render_run) itself once
+# the count is done, instead of the endpoint enqueuing one task up front.
+# No worker consumes that queue in this test process either, so stand in for
+# it the same way as solve_part.delay above -- run it inline, synchronously,
+# the moment run_solve asks for it. Every assertion below that reads
+# drawing_url/gif_url/packed_url still runs right after `_run_enqueued()`
+# returns, exactly as before the split.
+render_run.delay = lambda *a, **kw: run_render(*a, **kw)
 
 
 def _run_enqueued() -> None:
@@ -654,5 +667,192 @@ def main() -> int:
     return 0
 
 
+def _wait_for_port(host: str, port: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return True
+        except OSError:
+            time.sleep(0.3)
+    return False
+
+
+def _http_json(method: str, url: str, payload: dict | None = None) -> dict:
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"Content-Type": "application/json"} if data else {},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read())
+
+
+def _http_upload_step(url: str, path: Path) -> dict:
+    boundary = "----intakeTestBoundary"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{path.name}"\r\n'
+        "Content-Type: application/octet-stream\r\n\r\n"
+    ).encode() + path.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read())
+
+
+def main_http() -> int:
+    """Ticket 2 acceptance: the count must return before the pictures --
+    proved over REAL HTTP against a REAL uvicorn + a REAL (non-eager)
+    Celery worker, not the direct route-function / run_solve() calls the
+    rest of this file uses. Those skip both FastAPI's response-model
+    serialisation and the actual .delay()/queue round trip, which is
+    exactly what this split depends on (CLAUDE.md hard rule 9).
+
+    Opt-in, not part of the default `main()` run: spinning uvicorn + celery
+    subprocesses and paying for one real ~15-30s solve+render is not
+    something every quick `python tests/test_solve_api.py` run should cost.
+
+    Run:  venv/bin/python tests/test_solve_api.py --http
+    """
+    if not WHEEL.exists():
+        print("SKIP (--http): no customer fixtures present (NDA material)")
+        return 0
+
+    host = "127.0.0.1"
+    port = int(os.environ.get("INTAKE_TEST_HTTP_PORT", "8015"))
+    redis_url = os.environ.get("INTAKE_TEST_REDIS_URL",
+                               "redis://127.0.0.1:6379/13")
+    tmp = Path(tempfile.mkdtemp(prefix="solve_http_test_"))
+    env = {**os.environ,
+          "INTAKE_DATABASE_URL": f"sqlite:///{tmp / 'test.db'}",
+          "INTAKE_LOCAL_STORAGE_DIR": str(tmp / "files"),
+          "INTAKE_REDIS_URL": redis_url}
+
+    # landmine 2: a worker left subscribed to this redis db from an earlier
+    # run answers "Job not found" forever and looks exactly like a hung job
+    # with error: null. Flush it before this run claims the db.
+    subprocess.run(["redis-cli", "-n", redis_url.rsplit("/", 1)[-1], "FLUSHDB"],
+                   check=False, capture_output=True)
+
+    backend_dir = Path(__file__).resolve().parents[1]
+    failures: list[str] = []
+
+    def check(ok, label, detail=""):
+        print(f"{'PASS' if ok else 'FAIL'}  {label}{detail}")
+        if not ok:
+            failures.append(f"{label}{detail}")
+
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "app.main:app",
+             "--host", host, "--port", str(port)],
+            cwd=backend_dir, env=env),
+        # -Q celery,render: one worker covers both queues for this test --
+        # the queue SPLIT itself (task_routes in app/worker.py, the second
+        # docker-compose service) is a routing config, not something this
+        # HTTP round trip needs two processes to prove.
+        subprocess.Popen(
+            [sys.executable, "-m", "celery", "-A", "app.worker", "worker",
+             "--loglevel=info", "-Q", "celery,render", "--concurrency=2"],
+            cwd=backend_dir, env=env),
+    ]
+    try:
+        if not _wait_for_port(host, port, timeout=30):
+            check(False, "uvicorn came up", ": timed out waiting for port")
+            return 1
+        time.sleep(3)  # celery worker boot (OCP/trimesh import) -- no port to poll
+
+        base = f"http://{host}:{port}"
+        up = _http_upload_step(f"{base}/api/parts/upload-step", WHEEL)
+        job_id = up["job_id"]
+        j = {}
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            j = _http_json("GET", f"{base}/api/jobs/{job_id}")
+            if j["status"] in ("done", "failed"):
+                break
+            time.sleep(0.5)
+        check(j.get("status") == "done", "STEP extraction reaches done over HTTP",
+              f": {j.get('status')} {j.get('error')}")
+        if j.get("status") != "done":
+            return 1
+
+        part = _http_json("POST", f"{base}/api/parts", {
+            "part_number": "TRW-WHEEL-HTTP", "part_name": "Steering wheel",
+            "length_mm": 370, "breadth_mm": 360, "height_mm": 135,
+            "weight_kg": WHEEL_KG, "source": "stp", "job_id": job_id,
+        })
+        posted = _http_json("POST", f"{base}/api/parts/{part['id']}/solve", {})
+        solve_job_id = posted["solve_job_id"]
+
+        polls: list[dict] = []
+        seen_pending_render = False
+        seen_done_render = False
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            s = _http_json("GET", f"{base}/api/solve-jobs/{solve_job_id}")
+            polls.append(s)
+            result = s.get("result") or {}
+            catalogue = result.get("catalogue") or []
+            if s["status"] == "done" and result:
+                if (result.get("render_status") == "pending"
+                        and catalogue and catalogue[0].get("drawing_url") is None):
+                    seen_pending_render = True
+                if (result.get("render_status") == "done"
+                        and catalogue and catalogue[0].get("drawing_url")):
+                    seen_done_render = True
+                    break
+            if s["status"] == "failed":
+                break
+            time.sleep(0.25)
+
+        statuses_seen = [(p["status"], (p.get("result") or {}).get("render_status"))
+                         for p in polls]
+        check(seen_pending_render,
+              "a poll exists with status=done, counts present, "
+              "render_status=pending, catalogue[0].drawing_url is None",
+              f": statuses seen={statuses_seen}")
+        counts_while_pending = any(
+            p["status"] == "done" and (p.get("result") or {}).get("render_status") == "pending"
+            and (p.get("result") or {}).get("best_count") is not None
+            for p in polls
+        )
+        check(counts_while_pending,
+              "best_count is present on that same pending-render poll")
+        check(seen_done_render,
+              "a LATER poll has render_status=done with catalogue[0]."
+              "drawing_url/gif_url/packed_url all non-null",
+              f": statuses seen={statuses_seen}")
+        if seen_done_render:
+            cat0 = polls[-1]["result"]["catalogue"][0]
+            check(bool(cat0.get("drawing_url")) and bool(cat0.get("gif_url"))
+                  and bool(cat0.get("packed_url")),
+                  "catalogue[0] drawing_url/gif_url/packed_url all non-null",
+                  f": {cat0.get('drawing_url')}, {cat0.get('gif_url')}, "
+                  f"{cat0.get('packed_url')}")
+    finally:
+        for p in procs:
+            p.terminate()
+        for p in procs:
+            try:
+                p.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                p.kill()
+
+    print()
+    if failures:
+        print(f"{len(failures)} FAILURE(S):")
+        for f in failures:
+            print(f"  - {f}")
+        return 1
+    print("all --http checks passed")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--http" in sys.argv:
+        sys.exit(main_http())
     sys.exit(main())

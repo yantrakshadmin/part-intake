@@ -355,13 +355,12 @@ def extract_part(step_path: str | Path, glb_out: str | Path | None = None) -> Ex
     glb_path = convert_step_to_glb(step_path, glb_out)
     mesh, solid_count = load_unified_mesh(glb_path)
 
-    if solid_count > 1:
-        warnings.append(f"File contains {solid_count} solids — treated as one "
-                        "assembly for dimensioning.")
-    if not mesh.is_watertight:
-        warnings.append("Geometry is not watertight (surface model or open "
-                        "edges) — dimensions are from the convex hull and "
-                        "should be reliable; volume is not.")
+    # ponytail: no warning for solid_count > 1 or for an open shell. Both are
+    # facts on the result below (`solid_count`, `watertight`), not problems: a
+    # sweep of 16 real customer files fired not-watertight on 16/16 and
+    # multi-solid on 9/16. A warning that always fires carries no information.
+    # `mesh_volume_mm3` is already None when not watertight, which is the only
+    # consequence the caller has to act on (hard rule 4).
 
     to_obb, extents = minimum_obb(mesh)
     dims_sorted = tuple(round(float(v), 2) for v in sorted(extents, reverse=True))

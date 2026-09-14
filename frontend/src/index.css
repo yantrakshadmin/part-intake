@@ -638,6 +638,12 @@ body {
 
 .hero-image .modal-img { max-height: 480px; width: 100%; object-fit: contain; }
 
+/* Ticket 2b: the "drawing the packed box" / "could not be rendered" text
+   sits where the .modal-img above lands once it arrives — a fixed height
+   close to the image's own max-height keeps the hero from jumping when the
+   picture shows up mid-poll. */
+.hero-image-wait { min-height: 320px; display: flex; align-items: center; justify-content: center; text-align: center; }
+
 .cert-card {
   border: 1px solid var(--border);
   border-radius: var(--radius);

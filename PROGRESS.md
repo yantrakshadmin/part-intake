@@ -2308,3 +2308,31 @@ and 1100×800 in the session scratchpad.
 Next in build order: #2 count before pictures (split render task), ticket 3
 warnings/text ("not watertight" fires on 16/16 customer files — drop it from
 the UI), R4 exploded view v2, R5–R7 pose honesty/stability/angle ladder.
+
+## 2026-09-14 — Ticket 2 count-before-pictures; ticket 3a warning noise
+
+Ticket 2 (audit #2): `run_solve` commits the counts and marks the run `done`
+in ~3 s, then enqueues `render_run(job_id)` on a new `render` queue; a
+second compose service `worker-render` (`-Q render --concurrency=1`) draws
+PNG/GIF/packed/PDF and stamps the URLs into `result_json` in place.
+`SolveResultOut.render_status` pending|done|failed (+ `render_error`),
+default "done" so old runs still read as rendered. Broker down: nested
+in-process fallback inside the existing background thread (landmine 6).
+Frontend keeps polling while `status=done && render_status=pending`; the
+hero shows the count with a "Drawing the packed box…" placeholder and the
+Packed image lands on the same page without reload. New opt-in real-HTTP
+test `test_solve_api.py --http` (real uvicorn + celery) proves the count
+poll precedes the drawing poll; shown to fail against the old single-phase
+worker. Review clean on drift/stuck-pending/race/compose.
+
+Ticket 3a: the "not watertight" warning fired on 16/16 customer files and
+the multi-solid one on 9/16 — both deleted from `warnings`; the facts were
+already on `ExtractionResult`/`ExtractionResultOut` as `watertight` and
+`solid_count`. Remaining warnings: unit not mm, unit unreadable, unusual
+dims. `test_open_shell_is_a_fact_not_a_warning` bites.
+
+Deploy note: `up -d` creates `worker-render` on the next deploy; check
+`docker compose ps` shows three backend containers. Open: Rahul to click
+Re-solve on prod project 1 to see the Packed tab on a fresh run; ticket 3b
+(frontend text cuts, hide Manual entry, route_km), R4 exploded view v2,
+R5–R7 pose.

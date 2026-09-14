@@ -10,11 +10,13 @@ import dataclasses
 import logging
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from celery import Celery
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from . import dunnage, engine as engine_mod, synthesis
 from .catalogue import containers, containers_named, excluded_drafts
@@ -40,6 +42,11 @@ GIF_FOR_TOP_CATALOGUE_ONLY = True
 celery_app = Celery("intake", broker=settings.redis_url, backend=settings.redis_url)
 celery_app.conf.task_acks_late = True
 celery_app.conf.worker_prefetch_multiplier = 1  # fair dispatch for long tasks
+# Ticket 2: render_run is the ~40s/layout GIF work; solve_part is the fast
+# count. Routed to its own queue so a render in flight never delays the next
+# solve behind it -- deploy/docker-compose.prod.yml runs a dedicated
+# worker-render (-Q render, concurrency=1) for it.
+celery_app.conf.task_routes = {"render_run": {"queue": "render"}}
 
 _engine = create_engine(settings.database_url, pool_pre_ping=True)
 
@@ -322,23 +329,21 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
                 top_n=params.get("top_n", 2), clearance_mm=clearance_mm,
             )
 
-            # The exploded insert drawing (G-DRAW), rendered here and only
-            # here: the worker already holds the loaded mesh and the numbers
-            # this job just solved, so the picture and the counts come from
-            # one expression and cannot drift (hard rule 7: heavy geometry
-            # stays in the worker, never on request).
-            (drawing_urls, gif_urls, packed_urls, custom_drawing_url,
-             custom_gif_url, custom_packed_url) = (
-                _render_drawings(job_id, mesh, candidates, assets, result,
-                                 clearance_lbh)
-            )
+            # ticket 2: the exploded insert drawing (G-DRAW) used to render
+            # right here, blocking "done" on a ~40s/layout GIF the user is
+            # not looking at yet. It now runs in `render_run`, a second
+            # task enqueued once this job is marked done below -- the count
+            # is ready in seconds, the pictures follow. `render_run` reloads
+            # its own mesh/candidates/assets from the DB by job_id rather
+            # than take them as task args (Celery args must be JSON-safe).
 
             # C-TARE: this is now an OVERRIDE, not the tare -- default is each
             # option's own Packaging.tare_kg, resolved per option below.
             override_tare = params.get("tare_kg")
-            # Carry the reader's own caveats through. An INCH-declared STEP or
-            # a non-watertight shell is exactly the case where a confident
-            # parts-per-box number needs a label attached to it.
+            # Carry the reader's own caveats through. An INCH-declared STEP
+            # is exactly the case where a confident parts-per-box number needs
+            # a label attached to it. Open shells and multi-body files are
+            # facts, not caveats -- see extract_part; they no longer warn.
             warnings += list(extraction.result_json.get("warnings") or [])
 
             # Dunnage the inner has no room for. In plane, `lattice_count`
@@ -521,10 +526,10 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
 
             job.result_json = {
                 "catalogue": [
+                    # drawing_url/gif_url/packed_url start null -- render_run
+                    # fills them in place once the pictures exist.
                     {**dataclasses.asdict(l), "interleave": l.interleave,
-                     "drawing_url": drawing_urls.get(i),
-                     "gif_url": gif_urls.get(i),
-                     "packed_url": packed_urls.get(i)}
+                     "drawing_url": None, "gif_url": None, "packed_url": None}
                     for i, l in enumerate(result.catalogue)
                 ],
                 "poses_searched": [c.label for c in candidates],
@@ -532,21 +537,125 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
                 "custom": (
                     {**dataclasses.asdict(result.custom),
                      "layers": result.custom.layers,
-                     "drawing_url": custom_drawing_url,
-                     "gif_url": custom_gif_url,
-                     "packed_url": custom_packed_url}
+                     "drawing_url": None, "gif_url": None, "packed_url": None}
                     if result.custom is not None else None
                 ),
                 "custom_beats_catalogue": result.custom_beats_catalogue(),
                 "best_count": result.best_count,
                 "truck": dataclasses.asdict(truck) if truck is not None else None,
                 "warnings": warnings,
+                # ticket 2: the count above is real now; the pictures are a
+                # separate task (render_run). "pending" until it lands.
+                "render_status": "pending",
+                "render_error": None,
             }
             job.status = "done"
         except Exception as exc:  # noqa: BLE001 — surface any failure to the user
             logger.exception("Solve failed for job %s", job_id)
             job.status = "failed"
             job.error = f"{type(exc).__name__}: {exc}"
+        solved_ok = job.status == "done"
+        db.commit()
+
+    if solved_ok:
+        try:
+            render_run.delay(job_id)
+        except Exception:
+            # Same broker-down dev fallback as main._enqueue_solve: render
+            # synchronously in-process instead of leaving render_status
+            # stuck at "pending" forever (landmine 6).
+            logger.warning(
+                "Celery enqueue failed for render job %s — rendering "
+                "in-process (dev fallback)", job_id, exc_info=True,
+            )
+            run_render(job_id)
+
+
+@celery_app.task(name="render_run", time_limit=900, soft_time_limit=840)
+def render_run(job_id: str) -> None:
+    run_render(job_id)
+
+
+def run_render(job_id: str) -> None:
+    """Ticket 2, second half of a solve: build the exploded PNG/GIF/packed
+    drawings `run_solve` already deferred and stamp them into the existing
+    result_json in place. Plain function for the same reason as
+    run_solve/run_extraction -- the in-process broker-down fallback and
+    tests call it directly, not through Celery.
+
+    Never re-solves: `engine_mod.solve` already ran in run_solve and its
+    counts are committed. Re-running it here risks a second opinion that
+    disagrees with what the user already saw as "done" (hard rule 9).
+    Instead this reloads exactly what `_render_drawings` needs -- the mesh,
+    the pose candidates (for their rotation matrices) and the asset list --
+    and rebuilds lightweight stand-ins for `result.catalogue`/`result.custom`
+    out of the catalogue/custom dicts already sitting in result_json.
+    """
+    with Session(_engine) as db:
+        job = db.get(SolveJob, job_id)
+        if job is None:
+            logger.error("Solve job %s not found for render", job_id)
+            return
+        r = dict(job.result_json or {})
+        try:
+            part = db.get(PartProfile, job.part_id)
+            extraction = (db.get(ExtractionJob, part.job_id)
+                          if part and part.job_id else None)
+            if part is None or extraction is None or not extraction.result_json:
+                raise ValueError(
+                    f"Solve job {job_id} has no part/extraction to render from"
+                )
+            mesh, _solid_count = load_unified_mesh(part.glb_path)
+            candidates = [OrientationCandidate(**d)
+                         for d in extraction.result_json["candidates"]]
+
+            params = job.inputs_json or {}
+            requested = params.get("assets")
+            assets = (containers_named(db, requested)[0] if requested
+                     else containers(db))
+            clearance_mm = r.get("clearance_mm", engine_mod.DEFAULT_CLEARANCE_MM)
+            clearance_lbh = (clearance_mm, clearance_mm,
+                             engine_mod.DEFAULT_STACK_CLEARANCE_MM)
+
+            # _render_drawings only ever reads these attributes off
+            # result.catalogue[i] / result.custom -- SimpleNamespace stands
+            # in for the nesting.Layout/synthesis.BoxDesign dataclasses
+            # without a second engine.solve().
+            catalogue = [
+                SimpleNamespace(asset_name=l["asset_name"],
+                                pose_label=l["pose_label"], count=l["count"],
+                                grid=l["grid"], extent_lbh=l["extent_lbh"],
+                                pitch_lbh=l["pitch_lbh"])
+                for l in (r.get("catalogue") or [])
+            ]
+            custom_dict = r.get("custom")
+            custom = (SimpleNamespace(
+                pose_label=custom_dict["pose_label"], count=custom_dict["count"],
+                grid=custom_dict["grid"], extent_lbh=custom_dict["extent_lbh"],
+                pitch_lbh=custom_dict["pitch_lbh"], inner=custom_dict["inner"],
+            ) if custom_dict is not None else None)
+            result = SimpleNamespace(catalogue=catalogue, custom=custom)
+
+            (drawing_urls, gif_urls, packed_urls, custom_drawing_url,
+             custom_gif_url, custom_packed_url) = _render_drawings(
+                job_id, mesh, candidates, assets, result, clearance_lbh)
+
+            for i, layout in enumerate(r.get("catalogue") or []):
+                layout["drawing_url"] = drawing_urls.get(i)
+                layout["gif_url"] = gif_urls.get(i)
+                layout["packed_url"] = packed_urls.get(i)
+            if r.get("custom") is not None:
+                r["custom"]["drawing_url"] = custom_drawing_url
+                r["custom"]["gif_url"] = custom_gif_url
+                r["custom"]["packed_url"] = custom_packed_url
+            r["render_status"] = "done"
+            r["render_error"] = None
+        except Exception as exc:  # noqa: BLE001 — surface, never fail silently
+            logger.exception("Render failed for job %s", job_id)
+            r["render_status"] = "failed"
+            r["render_error"] = f"{type(exc).__name__}: {exc}"
+        job.result_json = r
+        flag_modified(job, "result_json")
         db.commit()
 
 

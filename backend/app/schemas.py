@@ -301,6 +301,14 @@ class SolveResultOut(BaseModel):
     # The in-plane clearance this result was solved at (hard rule 9: the UI
     # labels the number with the parameter that made it, never assumes 5).
     clearance_mm: float = 5.0
+    # Ticket 2: counts land (status="done") before drawing_url/gif_url/
+    # packed_url do -- render_run fills those in a second pass. "pending"
+    # while it runs, "done" once every url above is final, "failed" with
+    # render_error set (never failing the solve itself) if it blew up.
+    # Declared here or pydantic drops both silently (hard rule 9) -- the
+    # frontend polls render_status to know when the pictures are ready.
+    render_status: Literal["pending", "done", "failed"] = "done"
+    render_error: Optional[str] = None
 
 
 class SolveJobStatusOut(BaseModel):

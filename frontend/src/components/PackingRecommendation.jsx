@@ -155,8 +155,7 @@ export function PackingParams({ params, onChange, vehicles, packaging, onAddBox,
         </label>
       </div>
       <p className="muted" style={{ fontSize: 12, margin: '8px 0 0' }}>
-        A solve takes about a minute (drawings and the packing GIF are rendered with it), so changes here apply on the next Save &amp; calculate
-        or Re-solve — not as you type.
+        Changes here apply on the next Save &amp; calculate or Re-solve — not as you type.
       </p>
 
       <button className="btn-ghost" style={{ marginTop: 14 }}
@@ -251,6 +250,18 @@ export default function PackingResults({ part, params, packaging, vehicles, proj
     setJob({ status: 'pending', kind: 'solve' })
     setStartedAt(Date.now())
     setSelectedAsset(null)
+    // Ticket 2b: the count can land (result.render_status "pending") well
+    // before drawing_url/gif_url/packed_url do. `showCounts` is what flips
+    // the screen to "done" the first time that happens, from whichever of
+    // onCounts (still rendering) / the resolved promise (already done, or
+    // render finished) gets there first — guarded so it only fires once.
+    let countsShown = false
+    function showCounts(result, id) {
+      countsShown = true
+      shownRunId.current = id
+      setJob({ status: 'done', result })
+      onSolved?.(id)
+    }
     runSolve(part.id, {
       tareKg: params.tareKg ? +params.tareKg : null,
       vehicleName: vehicle?.name,
@@ -267,10 +278,16 @@ export default function PackingResults({ part, params, packaging, vehicles, proj
       // same as the `.then` below, so a reload that hands this same run
       // back through `run` is recognised as already in flight, not re-polled.
       onStarted: (id) => { shownRunId.current = id; onSolveStarted?.(id) },
+      // Fires once the counts exist, while runSolve keeps polling the same
+      // job for the pictures — shownRunId is already set by onStarted above.
+      onCounts: (result) => showCounts(result, shownRunId.current),
     }).then(({ result, solveJobId }) => {
-      shownRunId.current = solveJobId
-      setJob({ status: 'done', result })
-      onSolved?.(solveJobId)
+      // Either the first time we hear "done" (render_status was never
+      // "pending" — old runs / a render that beat this poll), or the final
+      // update once render_status leaves "pending" — refresh the drawing
+      // fields without re-triggering onSolved a second time.
+      if (!countsShown) showCounts(result, solveJobId)
+      else setJob((prev) => (prev.status === 'done' ? { ...prev, result } : prev))
     }).catch((err) => { if (err.name !== 'AbortError') setJob({ status: 'failed', error: err.message }) })
   }
 
@@ -296,6 +313,19 @@ export default function PackingResults({ part, params, packaging, vehicles, proj
         if (j.status === 'done') {
           shownRunId.current = run.solve_job_id
           setJob({ status: 'done', result: j.result })
+          // Ticket 2b: counts exist as soon as status is "done", but
+          // drawing_url/gif_url/packed_url can still be on the way —
+          // render_status "pending" means keep polling this same job, same
+          // 3s cadence, instead of returning; the screen already shows the
+          // count from the setJob above, only the image stage is waiting.
+          if ((j.result.render_status ?? 'done') === 'pending') {
+            await new Promise((resolve, reject) => {
+              const t = setTimeout(resolve, 3000)
+              controller.signal.addEventListener('abort',
+                () => { clearTimeout(t); reject(new DOMException('Aborted', 'AbortError')) }, { once: true })
+            })
+            continue
+          }
           return
         }
         if (j.status === 'failed') {
@@ -479,7 +509,8 @@ function ResultView({ result, part, type, packaging, vehicles, params, run, sele
             <HeroSolution layout={heroLayout} box={heroBox} run={run}
               clearanceMm={result.clearance_mm}
               label={heroLayout.asset_name === CUSTOM_KEY ? 'Custom design' : undefined}
-              beatsCatalogue={beatsCatalogue} />
+              beatsCatalogue={beatsCatalogue}
+              renderStatus={result.render_status ?? 'done'} renderError={result.render_error} />
           )}
 
           <h3 className="ranked-heading"><span className="h-icon">▦</span> Ranked box comparison</h3>
@@ -567,7 +598,7 @@ function ImageStage({ views, view, onViewChange }) {
  *  "Packed" tab is shown at all (a fake one, aliasing the exploded drawing,
  *  is worse than none — it tells the reader the box is packed when the only
  *  image on screen is exploded). Stage defaults to Exploded in that case. */
-function SolutionImage({ layout }) {
+function SolutionImage({ layout, renderStatus = 'done', renderError }) {
   const views = useMemo(() => {
     const list = []
     if (hasDrawing(layout.packed_url)) list.push({ key: 'packed', label: 'Packed', url: layout.packed_url })
@@ -579,11 +610,30 @@ function SolutionImage({ layout }) {
   const [view, setView] = useState(defaultView)
   useEffect(() => setView(defaultView), [layout?.asset_name, defaultView])
 
+  // Ticket 2b: the count/certificate render before the pictures do — while
+  // render_status is "pending" there's nothing to gate on but that flag
+  // (rule 9: never infer it from the null urls, which also happen on old
+  // runs with no drawings at all). Same .hero-image box either way so the
+  // layout doesn't jump when the image arrives.
   return (
     <div className="hero-image">
-      {views.length > 0
-        ? <ImageStage views={views} view={view} onViewChange={setView} />
-        : <p className="muted">No solution drawing for this run yet.</p>}
+      {views.length > 0 ? (
+        <ImageStage views={views} view={view} onViewChange={setView} />
+      ) : renderStatus === 'pending' ? (
+        <p className="muted hero-image-wait">Drawing the packed box… (about a minute)</p>
+      ) : renderStatus === 'failed' ? (
+        <div className="muted hero-image-wait" style={{ flexDirection: 'column' }}>
+          <p style={{ margin: 0 }}>Drawings could not be rendered</p>
+          {renderError && (
+            <details style={{ marginTop: 4 }}>
+              <summary>Why ▸</summary>
+              <p style={{ margin: '4px 0 0' }}>{renderError}</p>
+            </details>
+          )}
+        </div>
+      ) : (
+        <p className="muted">No solution drawing for this run yet.</p>
+      )}
     </div>
   )
 }
@@ -632,7 +682,7 @@ function CertificateCard({ layout, box, clearanceMm }) {
  * re-picked here; clicking a different card below only changes LayoutDetail,
  * not this block.
  */
-function HeroSolution({ layout, box, run, label, beatsCatalogue, clearanceMm }) {
+function HeroSolution({ layout, box, run, label, beatsCatalogue, clearanceMm, renderStatus, renderError }) {
   const runLabel = run?.solve_job_id
     ? `Run #${String(run.solve_job_id).slice(0, 8)} · ${fmtRunDate(run.created_at) || 'stored run'}`
     : null
@@ -661,7 +711,7 @@ function HeroSolution({ layout, box, run, label, beatsCatalogue, clearanceMm }) 
       </div>
 
       <div className="hero-grid">
-        <SolutionImage layout={layout} />
+        <SolutionImage layout={layout} renderStatus={renderStatus} renderError={renderError} />
         <CertificateCard layout={layout} box={box} clearanceMm={clearanceMm} />
       </div>
     </div>
