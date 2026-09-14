@@ -11,3 +11,6 @@ backend/venv/
 # Customer CAD and proposals: NDA material, never commit.
 # Both source proposals are marked "strictly confidential" by Yantraksh.
 backend/tests/fixtures/customer/
+
+# Customer CAD Rahul drops in for testing (NDA, 458 MB) -- never commit
+/Rahul/
