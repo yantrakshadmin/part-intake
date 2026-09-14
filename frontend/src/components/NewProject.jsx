@@ -333,7 +333,7 @@ export default function NewProject() {
         {mode === 'stp' && result && (
           <div className="card form-card">
             <div className="confirm-head">
-              <h2>Confirm resting orientation</h2>
+              <h2>How it rests</h2>
               {savedPart && (
                 <button className="btn-ghost" onClick={() => setConfirmOpen((o) => !o)}>
                   {confirmOpen ? 'Collapse ▴' : 'Change ▾'}
@@ -343,6 +343,12 @@ export default function NewProject() {
 
             {confirmOpen || !savedPart ? (
               <>
+                {/* R5: the solver runs every candidate pose regardless of this
+                    pick (SolveIn.confirmed_pose_only defaults false) — this
+                    picks the preview only, never implies it drives the count. */}
+                <p className="muted" style={{ fontSize: 12.5, margin: '0 0 12px' }}>
+                  The solver tries every listed pose; pick the one to preview.
+                </p>
                 <ErrorBoundary>
                   <div className="views-row">
                     <div className="view-card">
@@ -374,6 +380,11 @@ export default function NewProject() {
                       onClick={() => pickCandidate(i)}>
                       <div className="c-label">{c.label}</div>
                       <div className="c-dims">{c.dims_lbh.join(' × ')} mm</div>
+                      {/* geometry agent is adding support_area_ratio concurrently;
+                          render only when present, never re-derive it here. */}
+                      {c.support_area_ratio != null && (
+                        <div className="c-dims">contact {Math.round(c.support_area_ratio * 100)}%</div>
+                      )}
                     </button>
                   ))}
                 </div>

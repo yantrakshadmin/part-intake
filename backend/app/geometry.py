@@ -8,7 +8,9 @@ Pipeline:
   3. Minimum-volume Oriented Bounding Box (OBB) on the convex hull
      → true L/B/H regardless of how the part was oriented in the file
   4. Generate candidate resting orientations (which OBB face is "down"),
-     ranked by packing stability: largest footprint first, then lowest height.
+     ranked by real contact stability: the support polygon (convex hull of the
+     vertices touching the floor) as a fraction of the OBB footprint, then
+     lowest centre of gravity.
 
 The confirmed orientation matrix is stored on the Part Profile so Phase 3
 (insert generation) never has to re-ask the user.
@@ -25,6 +27,7 @@ from pathlib import Path
 import cascadio
 import numpy as np
 import trimesh
+from scipy.spatial import ConvexHull, QhullError
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,15 @@ class OrientationCandidate:
     footprint_area: float           # L * B in mm^2
     height: float                   # H in mm
     rank: int = 0
+    # R6 stability. None, not 0.0: a candidate dict stored by an older worker
+    # (worker.py:279, 609) has no stability in it, and 0.0 there would read as
+    # "measured, no contact" instead of "not measured".
+    support_area_ratio: float | None = None   # contact patch / footprint, 0..1
+    # Area-weighted centroid of the SURFACE above the floor -- these are open
+    # surface models, so this is not a mass centre (hard rule 4).
+    cg_height_mm: float | None = None
+    tip_ratio: float | None = None            # cg_height_mm / min(L, B)
+    support_polygon_mm: list | None = None    # <=32 hull points
 
 
 @dataclass
@@ -61,6 +73,7 @@ class ExtractionResult:
     mesh_volume_mm3: float | None   # None if not watertight
     candidates: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
+    rank_basis: str | None = None   # what candidates[0] is first BY
 
 
 # ---------------------------------------------------------------------------
@@ -231,71 +244,160 @@ def _rotation_axis_to_z(axis_index: int, flip: bool) -> np.ndarray:
     return R
 
 
+_MAX_SUPPORT_POINTS = 32
+
+
+def support_polygon(mesh: trimesh.Trimesh, transform: np.ndarray,
+                    footprint_min_mm: float) -> tuple:
+    """Contact patch of the part in this pose: 2D convex hull of the vertices
+    sitting in a thin band above the lowest z. Returns (area_mm2, points).
+
+    Band = 2 mm, or 0.5% of the SHORT FOOTPRINT SIDE if that is larger. It
+    scales with the face resting on the floor, not with the pose height: the
+    height is the one dimension the contact patch has nothing to do with, and
+    scaling by it made the same part read differently on its side than on its
+    end. Vertices, not faces -- these are open surface models (hard rule 4)
+    and a face-based contact test needs a closed solid to mean anything.
+
+    # ponytail: on a CURVED contact this measures the chord the band cuts, so
+    # a cylinder reads width sqrt(2 * tol * R) -- a thin rod scores higher than
+    # a fat one (0.38 vs 0.12) though both touch on a line. Tessellation
+    # artefact, not stability. Upgrade path when a curved part is ranked
+    # wrongly because of it: classify the contact (face / line / point) from
+    # the band's aspect ratio and score a line contact as zero area.
+    """
+    v = trimesh.transform_points(mesh.vertices, transform)
+    z = v[:, 2]
+    tol = max(2.0, 0.005 * float(footprint_min_mm))
+    band = v[z <= z.min() + tol][:, :2]
+    if len(band) < 3:
+        return 0.0, np.round(band, 2).tolist()
+    try:
+        hull = ConvexHull(band)       # 2D: .volume is the area, .area the perimeter
+    except QhullError:
+        # Collinear contact -- a cone or a cylinder on its side. Zero area is
+        # the right answer; it rocks.
+        return 0.0, np.round(band[:_MAX_SUPPORT_POINTS], 2).tolist()
+    pts = band[hull.vertices]
+    if len(pts) > _MAX_SUPPORT_POINTS:
+        # ponytail: even stride around the hull, not Douglas-Peucker. This is
+        # a drawing aid; the area above is the number anything decides on.
+        pts = pts[np.linspace(0, len(pts) - 1, _MAX_SUPPORT_POINTS).astype(int)]
+    return float(hull.volume), np.round(pts, 2).tolist()
+
+
+def dims_match(a, b, tol: float = 0.01) -> bool:
+    """Same box within `tol` on every side (default 1%)."""
+    return all(abs(x - y) <= tol * max(x, y, 1e-9) for x, y in zip(a, b))
+
+
+def _same_resting_pose(a: dict, b: dict) -> bool:
+    """True when two candidates are one resting pose rotated in plane: the same
+    box within 1% on every side AND the same contact patch within 0.05.
+
+    The ratio half of the test is what keeps the two signs of an axis apart
+    when the face that is down matters -- a cone tip-down and base-down share
+    an OBB exactly and are not the same pose.
+    """
+    return (dims_match(a["dims"], b["dims"])
+            and abs(a["ratio"] - b["ratio"]) <= 0.05)
+
+
+def _keep_every_footprint(ranked: list, max_candidates: int) -> list:
+    """Truncate `ranked` to `max_candidates` without dropping a footprint.
+
+    `max_candidates` is a UI number, but the nester searches whatever it leaves
+    (tests/test_pose_search.py), and R6 put flip twins back in the list -- so a
+    naive `ranked[:max_candidates]` can spend every slot on two boxes and cut a
+    real footprint before the nester ever sees it. Best-ranked pose of each
+    footprint first, then fill by rank; rank order is restored at the end so
+    element 0 is still the most stable.
+
+    `ranked` is the internal dict form used by `generate_orientation_candidates`
+    ("dims" = (L, B, H)); it is returned, not copied.
+    """
+    picked, seen = [], set()
+    for c in ranked:
+        fp = (round(c["dims"][0]), round(c["dims"][1]))
+        if fp not in seen:
+            seen.add(fp)
+            picked.append(c)
+    picked += [c for c in ranked if id(c) not in {id(x) for x in picked}]
+    keep = {id(c) for c in picked[:max_candidates]}
+    return [c for c in ranked if id(c) in keep]
+
+
 def generate_orientation_candidates(
     mesh: trimesh.Trimesh,
     to_obb: np.ndarray,
     extents: np.ndarray,
     max_candidates: int = 4,
 ) -> list:
-    """Resting orientations ranked for packing: largest footprint first,
-    tie-broken by lower center of gravity.
+    """Resting orientations ranked by real stability: support-polygon area as a
+    fraction of the OBB footprint, tie-broken by lower centre of gravity.
 
-    One pose per OBB axis -- three, not six. The two signs of an axis are the
-    same part upside down: identical footprint, identical height, and the same
-    lattice pitch on every axis in exact geometry (A and -A have the same
-    self-collision offsets). On the RASTER they differ by up to one voxel per
-    axis, because `nesting.occupancy` re-voxelises the rotated mesh and the
-    grid origin snaps independently per transform -- measured on the YXA bar
-    at 4mm, the two signs of axis 1 read pitch (69, 144) vs (73, 140) and 60
-    vs 55 over the catalogue. That is quantisation noise, the band
-    `nesting.Layout.count_upper` reports, not geometry; the sign kept is the
-    lower-CG one because that is the only thing the sign physically changes. Keeping both used to spend two of `max_candidates`'s
-    four slots on twins and cut the third real footprint before the nester
-    saw it (ticket G-POSE measured the cap at zero parts lost, but only
-    because the cut pose happened never to win; the area ranking that decided
-    what got cut mis-ranks two of the six real parts we hold).
+    All six OBB faces are tried, not three. The two signs of an axis have the
+    same footprint and height but not the same contact patch -- that is the
+    whole of R6: a conical axle casing tip-down and base-down are the same box
+    and different parts. Where the sign genuinely changes nothing (a plate,
+    a symmetric bar) `_same_resting_pose` collapses the twin, which is the old
+    per-axis dedup expressed as a measurement instead of an assumption.
+
+    On the RASTER two collapsed twins can still differ by up to one voxel per
+    axis, because `nesting.occupancy` re-voxelises per transform and the grid
+    origin snaps independently -- measured on the YXA bar at 4mm, 60 vs 55 over
+    the catalogue. That is the quantisation band `nesting.Layout.count_upper`
+    reports, not geometry.
     """
-    centroid_obb = trimesh.transform_points(
-        mesh.centroid.reshape(1, 3), to_obb
-    )[0]
-
     raw = []
     for axis, flip in _RESTING_POSES:
         R = _rotation_axis_to_z(axis, flip)
-        # extents after rotation: the chosen axis becomes height
-        e = extents.copy()
-        h = e[axis]
-        fp = np.delete(e, axis)               # footprint dims
-        L, B = sorted(fp, reverse=True)
-        # CG height above floor in this pose
-        c = trimesh.transform_points(centroid_obb.reshape(1, 3), R)[0]
-        cg_h = c[2] + h / 2.0
+        h = float(extents[axis])              # the chosen axis becomes height
+        L, B = (float(x) for x in sorted(np.delete(extents, axis), reverse=True))
         # full transform: mesh -> obb -> rotated -> lifted onto floor
         lift = trimesh.transformations.translation_matrix([0, 0, h / 2.0])
         T = lift @ R @ to_obb
+        cg_h = float(trimesh.transform_points(
+            mesh.centroid.reshape(1, 3), T)[0][2])
+        area, poly = support_polygon(mesh, T, B)
+        footprint = L * B
         raw.append({
-            "axis": axis,
-            "dims": (round(float(L), 2), round(float(B), 2), round(float(h), 2)),
-            "footprint": float(L * B),
-            "height": float(h),
-            "cg_h": float(cg_h),
+            "dims": (round(L, 2), round(B, 2), round(h, 2)),
+            "footprint": footprint,
+            "height": h,
+            "cg_h": cg_h,
+            "ratio": min(1.0, area / footprint) if footprint else 0.0,
+            "poly": poly,
             "T": T,
         })
 
-    # One per up-axis, the lower-CG sign of each (the sort puts it first).
+    # Most stable first, then lowest CG. Near-duplicates drop out: the frontend
+    # must never show two cards that look the same (R5, axle casing).
     unique: list = []
-    for cand in sorted(raw, key=lambda c: (-c["footprint"], c["cg_h"])):
-        if not any(u["axis"] == cand["axis"] for u in unique):
+    for cand in sorted(raw, key=lambda c: (-c["ratio"], c["cg_h"])):
+        if not any(_same_resting_pose(cand, u) for u in unique):
             unique.append(cand)
+    unique = _keep_every_footprint(unique, max_candidates)
 
-    out = []
-    for i, c in enumerate(unique[:max_candidates]):
-        if i == 0:
-            label = "Largest face down (most stable)"
-        elif c["height"] == min(u["height"] for u in unique):
-            label = "Lowest profile"
+    max_fp = max(c["footprint"] for c in unique)
+    out, alt, used, named = [], 0, set(), []
+    for i, c in enumerate(unique):
+        # Footprint description first -- it says which way up the part is.
+        # Ranking no longer implies it, so it is assigned independently.
+        twin = next((n for n in named if dims_match(c["dims"], n[0])), None)
+        if twin is not None:
+            # Same box, the other face on the floor -- kept because the
+            # stability differs. Say so, or the card looks like a duplicate.
+            label = f"{twin[1]} (other end down)"
+        elif c["footprint"] == max_fp and "big" not in used:
+            used.add("big")
+            label = "Largest face down"
+        elif c["height"] > c["dims"][0]:
+            label = "Standing upright"
         else:
-            label = f"Alternative {i}"
+            alt += 1
+            label = f"Alternative {alt}"
+        named.append((c["dims"], label))
         out.append(OrientationCandidate(
             label=label,
             rotation_matrix=np.asarray(c["T"]).tolist(),
@@ -303,6 +405,10 @@ def generate_orientation_candidates(
             footprint_area=round(c["footprint"], 2),
             height=round(c["height"], 2),
             rank=i,
+            support_area_ratio=round(c["ratio"], 4),
+            cg_height_mm=round(c["cg_h"], 2),
+            tip_ratio=round(c["cg_h"] / c["dims"][1], 3) if c["dims"][1] else 0.0,
+            support_polygon_mm=c["poly"],
         ))
     return out
 
@@ -382,6 +488,7 @@ def extract_part(step_path: str | Path, glb_out: str | Path | None = None) -> Ex
         mesh_volume_mm3=round(float(mesh.volume), 2) if mesh.is_watertight else None,
         candidates=candidates,
         warnings=warnings,
+        rank_basis="support_area",
     )
 
 

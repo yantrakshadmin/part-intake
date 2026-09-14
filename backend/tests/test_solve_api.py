@@ -311,9 +311,21 @@ def main() -> int:
             except HTTPException as exc:
                 check(exc.status_code == 404, "truck-fit: unknown vehicle -> 404",
                       f": {exc.status_code}")
-            check(len(res.poses_searched) == 3,
-                  "unrestricted solve searched 3 poses (one per OBB axis)",
-                  f": {res.poses_searched}")
+            # R5/R6: candidates are the six OBB faces minus near-duplicates
+            # (same box within 1% AND same support ratio within 0.05), capped
+            # at 4. The wheel keeps 4 -- its two "largest face down" signs rest
+            # on different faces and score 0.33 vs 0.01, so they are two cards,
+            # not one. But they are the same BOX, so the solve voxelises three
+            # times, not four (engine.measure_distinct_poses): four cards,
+            # three distinct footprints. Was 3 cards / 3 before R6.
+            from app.geometry import dims_match
+            dims = [tuple(c["dims_lbh"]) for c in wheel_job_candidates(db, wheel)]
+            distinct = [d for i, d in enumerate(dims)
+                        if not any(dims_match(d, e) for e in dims[:i])]
+            check(len(res.poses_searched) == 4
+                  and len(set(res.poses_searched)) == 4 and len(distinct) == 3,
+                  "wheel solve: 4 pose cards, 3 distinct footprints measured",
+                  f": {res.poses_searched} -> {distinct}")
             check(res.truck is not None and res.truck.by_volume >= res.truck.boxes
                   and res.truck.by_weight >= res.truck.boxes and res.truck.stack >= 1,
                   "truck by_volume/by_weight/stack ship",
@@ -779,6 +791,25 @@ def main_http() -> int:
               f": {j.get('status')} {j.get('error')}")
         if j.get("status") != "done":
             return 1
+
+        # R6 over REAL HTTP: the stability fields must survive the response
+        # model, not just the dataclass (hard rule 9 -- pydantic drops
+        # undeclared fields silently).
+        res_j = j["result"]
+        cands = res_j["candidates"]
+        check(res_j.get("rank_basis") == "support_area"
+              and all(isinstance(c.get("support_area_ratio"), float)
+                      and isinstance(c.get("cg_height_mm"), float)
+                      and isinstance(c.get("tip_ratio"), float)
+                      and len(c.get("support_polygon_mm") or []) <= 32
+                      for c in cands)
+              and [c["support_area_ratio"] for c in cands]
+                  == sorted((c["support_area_ratio"] for c in cands), reverse=True)
+              and not any("most stable" in c["label"] for c in cands),
+              "extraction candidates ship stability fields over HTTP, "
+              "ranked by support_area",
+              f": rank_basis={res_j.get('rank_basis')} "
+              f"{[(c['label'], c.get('support_area_ratio'), c.get('cg_height_mm'), len(c.get('support_polygon_mm') or [])) for c in cands]}")
 
         part = _http_json("POST", f"{base}/api/parts", {
             "part_number": "TRW-WHEEL-HTTP", "part_name": "Steering wheel",

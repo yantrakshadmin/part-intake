@@ -260,6 +260,7 @@ body {
 .field { display: flex; flex-direction: column; gap: 4px; }
 
 .field span { font-size: 12.5px; font-weight: 500; color: var(--text-2); }
+.field span.muted { font-weight: 400; color: var(--text-3); }
 
 .field-note { font-size: 11px !important; font-weight: 400 !important; }
 
@@ -588,6 +589,15 @@ body {
 
 .warnings-disclosure { margin-top: 0; }
 .warnings-disclosure .warning:first-of-type { margin-top: 8px; }
+/* R5: once a warning (e.g. the pose-mismatch note) is tucked behind "N
+   notes ▸" it's already de-emphasised by the disclosure itself — repeating
+   the amber alert colour on top reads as louder than a collapsed note
+   should. Neutral text/border here, same layout as .warning otherwise. */
+.warnings-disclosure .warning {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text-2);
+}
 
 .hero-solution {
   margin-top: 16px;
@@ -859,6 +869,9 @@ body {
   border-radius: 99px;
   padding: 2px 10px;
   white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Tabs: Layers table / Insert design / Truck load are never all expanded at

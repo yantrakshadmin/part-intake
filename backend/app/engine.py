@@ -205,6 +205,43 @@ class ResultSet:
         return self.custom.count > self.catalogue[0].count
 
 
+def measure_distinct_poses(mesh, candidates,
+                           voxel_mm: float = VOXEL_MM,
+                           clearance_mm: float = DEFAULT_CLEARANCE_MM,
+                           stack_clearance_mm: float = DEFAULT_STACK_CLEARANCE_MM
+                           ) -> list:
+    """One `nesting.Pose` per candidate, but voxelise once per distinct box.
+
+    R6 put flip twins back in the candidate list: the same box resting on its
+    other face, kept because the stability differs and the UI must show both.
+    They nest identically -- same extent, same pitch, same count on both
+    ground-truth fixtures (40/40, 48/48) -- and voxelising is the entire cost
+    of a solve (~20s per pose on the 50MB inverter), so measuring a twin again
+    buys nothing and pushes a big part past the worker's soft time limit.
+
+    ponytail: exact reuse, not a tolerance on the measurement. Twins differ by
+    up to one voxel on the raster (`nesting.occupancy` snaps the grid origin
+    per transform) -- that band is what `Layout.count_upper` already reports.
+    Upgrade path if a twin ever needs its own raster: drop this and lift the
+    worker's time limit.
+    """
+    from .geometry import dims_match
+    poses, measured = [], []       # measured: [(dims_lbh, Pose)]
+    for cand in candidates:
+        twin = next((pose for dims, pose in measured
+                     if dims_match(dims, cand.dims_lbh)), None)
+        if twin is None:
+            pose = measure_poses(mesh, [cand], voxel_mm, clearance_mm,
+                                 stack_clearance_mm)[0]
+            measured.append((tuple(cand.dims_lbh), pose))
+        else:
+            pose = replace(twin, label=cand.label)
+        poses.append(pose)
+    logger.info("measured %d distinct footprints for %d candidates",
+                len(measured), len(candidates))
+    return poses
+
+
 def solve(mesh, candidates, part_kg: float = 0.0, assets=None, top_n: int = 2,
           voxel_mm: float = VOXEL_MM,
           clearance_mm: float = DEFAULT_CLEARANCE_MM,
@@ -218,9 +255,10 @@ def solve(mesh, candidates, part_kg: float = 0.0, assets=None, top_n: int = 2,
         assets = containers()
 
     # Measured once, used by both halves. Voxelising is the expensive step
-    # (~2.4s per pose) and neither half needs its own copy.
-    poses = measure_poses(mesh, candidates, voxel_mm, clearance_mm,
-                          stack_clearance_mm)
+    # (~2.4s per pose, ~20s on a 50MB assembly) and neither half needs its own
+    # copy -- nor does a flip twin need its own measurement.
+    poses = measure_distinct_poses(mesh, candidates, voxel_mm, clearance_mm,
+                                   stack_clearance_mm)
 
     ranked = rank_catalogue(mesh, candidates, assets, part_kg, top_n,
                             poses=poses)

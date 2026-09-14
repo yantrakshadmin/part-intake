@@ -15,6 +15,16 @@ class OrientationCandidateOut(BaseModel):
     footprint_area: float
     height: float
     rank: int
+    # R6. None, not 0.0: an extraction job stored before this shipped carries
+    # no stability, and 0.0 would read as "measured, no contact" rather than
+    # "not measured". Defaulted at all because a missing required field is a
+    # 500 on those old jobs (hard rule 9 -- pydantic is silent either way).
+    support_area_ratio: Optional[float] = None   # contact patch / footprint
+    # Area-weighted SURFACE centroid height, not a mass centre: these are open
+    # surface models and mass is meaningless for them (hard rule 4).
+    cg_height_mm: Optional[float] = None
+    tip_ratio: Optional[float] = None            # cg height / footprint min dim
+    support_polygon_mm: Optional[list[list[float]]] = None   # <=32 points, mm
 
 
 class ExtractionResultOut(BaseModel):
@@ -27,6 +37,7 @@ class ExtractionResultOut(BaseModel):
     mesh_volume_mm3: Optional[float]
     candidates: list[OrientationCandidateOut]
     warnings: list[str]
+    rank_basis: Optional[str] = None     # what candidates[0] is first BY
 
 
 class JobStatusOut(BaseModel):

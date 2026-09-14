@@ -158,14 +158,22 @@ def test_cap_costs_no_parts(cap: int = SHIPPED_CAP, reverse: bool = False):
             "asset other than the ground-truth one."
         )
         truncated_any |= r["generated"] > r["searched"]
-        # Since flip twins were dropped (one pose per OBB axis) the generator
-        # yields at most three poses and every distinct footprint is searched.
-        # That is what makes the cap free BY CONSTRUCTION rather than by luck
-        # -- so assert the construction, not just its consequence.
-        assert r["generated"] <= 3, \
-            f"{r['file']}: {r['generated']} poses generated -- flip twins are back"
-        assert r["generated"] == r["footprints"], \
-            f"{r['file']}: {r['generated']} poses but {r['footprints']} footprints"
+        # R6 put flip twins back: the two signs of an OBB axis are the same box
+        # resting on different faces, and stability tells them apart (a conical
+        # part tip-down vs base-down). So the generator can yield up to six and
+        # `generated == footprints` no longer holds. What still makes the cap
+        # free BY CONSTRUCTION rather than by luck is `generate_orientation_
+        # candidates` keeping the best pose of EVERY distinct footprint before
+        # it fills the remaining slots by rank -- assert that construction.
+        assert r["footprints"] == 3, \
+            f"{r['file']}: {r['footprints']} distinct footprints, not 3 -- " \
+            "the three OBB axes should each give one, and both fixtures do"
+        assert r["generated"] >= r["footprints"], \
+            f"{r['file']}: {r['generated']} poses cannot cover " \
+            f"{r['footprints']} footprints"
+        assert r["searched"] >= r["footprints"], \
+            f"{r['file']}: cap searched {r['searched']} of {r['footprints']} " \
+            "footprints -- _keep_every_footprint is not doing its job"
         assert cap < 3 or not r["lost_footprints"], \
             f"{r['file']}: footprints cut by the cap: {r['lost_footprints']}"
 

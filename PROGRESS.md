@@ -2357,3 +2357,47 @@ panel; run-id footer needs worker.py to pass the id; detail inset skipped.
 Next: R5–R7 pose (hide near-duplicate candidates, drop "(most stable)",
 support-polygon stability, 45° ladder); #1 proposal takes run_id; #4/#5
 bounded async, /api/health; per-project custom boxes?
+
+## 2026-09-14 (session close) — R5+R6 stability, #1 proposal run_id: committed locally, NOT pushed
+
+Deployed today (all SUCCESS on packit.trakkia.com): ac925b6 solution-first
+screen + packed_url; baca966 count-before-pictures + worker-render service
++ warnings cut; 79108e4 prose/dead ends; e6d3572 exploded view v2.
+
+Committed locally at session end, awaiting push (push = deploy):
+- R6 real stability: `support_polygon()` = hull area of vertices within
+  max(2 mm, 0.5% of footprint short side) of the floor / OBB footprint;
+  `support_area_ratio`, `cg_height_mm` (surface centroid, rule 4),
+  `tip_ratio`, `support_polygon_mm` on candidates + response model
+  (Optional/None so old jobs read "unknown"); `rank_basis`. Candidates walk
+  all six OBB faces, sort by (-ratio, cg), dedupe within 1% dims and 0.05
+  ratio, `_keep_every_footprint` truncation (tested, bites). Labels: no
+  "(most stable)", no verdict words (calibrated wrong on real parts:
+  rank-0 ratio 0.07–0.57 across 7 files); "(other end down)" for a kept twin.
+  Axle casing now ranks upright (0.565) first; side-lying is 0.020.
+  Ceiling: curved contact reads sqrt(2·tol·R) — comment in geometry.py.
+- Engine `measure_distinct_poses`: flip twins reuse the measurement (wheel
+  4 cards / 3 voxelisations). Inverter worst case ~430 s at 8× VM — near
+  the 570 s soft limit; watch it.
+- R5 frontend: "How it rests" + one-line "solver tries every pose", "Only
+  this pose" checkbox, `contact NN%` tag, notes grey not amber,
+  orient-chip ellipsis.
+- #1 proposal: `POST /api/projects/{id}/proposal?run_id=` (404 other
+  project, 409 not done, 409 render pending, 409 render FAILED naming the
+  error); cover "Run #<8> · date"; dark panel behind exploded PNG;
+  frontend passes the viewed run's id, resets it on project change,
+  shows "Generated from Run #…", grey line for 409.
+Verified on the final tree: 15/15 backend suites exit 0, 7 geometry tests,
+ground truth 40/48 (geometry agent's run on the final geometry state; the
+combined run was killed by low memory after suite 15 — re-run
+`ground_truth.py` once before pushing). Frontend build + 3 checks clean.
+
+Next session: 1) `venv/bin/python tests/ground_truth.py` → push → watch
+Cloud Build → tester on live (needs a Re-solve on prod project 1, which
+the classifier blocks me from triggering — Rahul clicks it). 2) Open:
+`poses_searched` still lists 4 labels (worker.py:502, one line); Packaging
+table has no project scope (draft boxes are global); proposal default path
+409s during the render window instead of falling back to an older rendered
+run; stray `sample.igs` part on prod; R7 45° ladder; #4/#5 bounded async +
+/api/health; contact classification (face/line/point) for the stability
+score. Rahul's "4 console errors" did not reproduce on the new bundle.

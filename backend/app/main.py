@@ -541,21 +541,47 @@ def _proposal_out(p: Proposal) -> ProposalOut:
 
 @app.post("/api/projects/{project_id}/proposal", response_model=ProposalOut,
          status_code=202)
-def create_proposal(project_id: int, db: Session = Depends(get_db)):
+def create_proposal(project_id: int, run_id: str | None = None,
+                    db: Session = Depends(get_db)):
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(404, "Project not found.")
 
-    # recommended_run_id if the project has one and it is still a done run
-    # of this project, else the newest done run -- one helper (app.runs),
-    # shared with `python -m app.proposal`'s CLI, so the two can never pick
-    # different runs for the same project.
-    run = proposal_run_for(project, db)
-    if run is None:
-        raise HTTPException(422, "No finished solve to write a proposal from.")
+    if run_id is not None:
+        # Explicit run (audit #1: the run on screen, not whatever
+        # proposal_run_for would have picked) -- must be THIS project's and
+        # done, or the PDF would be built from a run the caller never saw.
+        run = db.get(SolveJob, run_id)
+        if run is None or run.project_id != project.id:
+            raise HTTPException(404, f"Run {run_id} not found on this project.")
+        if run.status != "done":
+            raise HTTPException(
+                409, f"Run {run_id} is not done yet (status={run.status})."
+            )
+    else:
+        # recommended_run_id if the project has one and it is still a done
+        # run of this project, else the newest done run -- one helper
+        # (app.runs), shared with `python -m app.proposal`'s CLI, so the two
+        # can never pick different runs for the same project.
+        run = proposal_run_for(project, db)
+        if run is None:
+            raise HTTPException(422, "No finished solve to write a proposal from.")
     if not _run_has_content(run):
         raise HTTPException(
             422, "The selected run found no box; nothing to propose."
+        )
+    # Ticket 2: counts land before drawing_url/gif_url/packed_url do --
+    # missing render_status (runs from before that field existed) means
+    # done, same default as SolveResultOut.render_status.
+    rj = run.result_json or {}
+    if rj.get("render_status", "done") == "pending":
+        raise HTTPException(
+            409, "Drawings still rendering; try again in a minute"
+        )
+    if rj.get("render_status") == "failed":
+        # A blank exploded page must never pass as a finished proposal.
+        raise HTTPException(
+            409, f"Drawings failed to render ({rj.get('render_error') or 'unknown error'}); re-solve first"
         )
 
     proposal = Proposal(project_id=project_id, run_id=run.id, status="pending")

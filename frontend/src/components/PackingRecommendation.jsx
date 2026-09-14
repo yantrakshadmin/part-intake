@@ -152,10 +152,15 @@ export function PackingParams({ params, onChange, vehicles, packaging, onAddBox,
           <input type="number" min="0" max="50" value={params.clearanceMm} placeholder="default 5"
             onChange={(e) => onChange({ ...params, clearanceMm: e.target.value })} />
         </label>
-        <label className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          <input type="checkbox" checked={!!params.confirmedPoseOnly}
-            onChange={(e) => onChange({ ...params, confirmedPoseOnly: e.target.checked })} />
-          <span>Search confirmed pose only</span>
+        <label className="field" style={{ gap: 2 }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input type="checkbox" checked={!!params.confirmedPoseOnly}
+              onChange={(e) => onChange({ ...params, confirmedPoseOnly: e.target.checked })} />
+            Only this pose
+          </span>
+          <span className="muted" style={{ fontSize: 11.5 }}>
+            Off = solver picks the best pose (recommended)
+          </span>
         </label>
       </div>
       <p className="muted" style={{ fontSize: 12, margin: '8px 0 0' }}>

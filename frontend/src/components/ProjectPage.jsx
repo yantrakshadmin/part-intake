@@ -64,6 +64,12 @@ export default function ProjectPage({ id, tab, query }) {
   const [error, setError] = useState('')
   const packing = usePackingData()
   const [params, setParams] = useState(defaultPackingParams())
+  // The run id Packaging/Truck currently show, kept alive across the
+  // nav-strip switch to Proposal (which navigates without `?run=`, so
+  // Proposal can't just read it off `query`). Set only while Packaging or
+  // Truck is the active tab — Proposal reads this, never re-picks its own
+  // "newest run" (CLAUDE.md rule 9).
+  const [packagingRunId, setPackagingRunId] = useState(null)
 
   // Returns the fetch promise so an explicit re-run can `await reload()`
   // before navigating to the new run's id — otherwise the navigate would
@@ -75,7 +81,19 @@ export default function ProjectPage({ id, tab, query }) {
       .catch((e) => setError(e.message))
   ), [id])
 
-  useEffect(() => { setProject(null); setError(''); reload() }, [id, reload])
+  useEffect(() => { setProject(null); setError(''); setPackagingRunId(null); reload() }, [id, reload])
+
+  // Guarded for `project` being null (the loading render) — this must run
+  // on every render, same as every other hook above, or React throws
+  // "Rendered more hooks than during the previous render" the moment
+  // `project` lands and a below-the-early-return hook would suddenly
+  // start being called.
+  const activeTab = TABS.some(([k]) => k === tab) ? tab : 'overview'
+  const packagingRun = project && (activeTab === 'packaging' || activeTab === 'truck') && project.part
+    ? pickedRun(project, query) : null
+  useEffect(() => {
+    if (packagingRun) setPackagingRunId(packagingRun.solve_job_id)
+  }, [packagingRun])
 
   async function patch(body) {
     const r = await fetch(`/api/projects/${id}`, {
@@ -91,8 +109,6 @@ export default function ProjectPage({ id, tab, query }) {
 
   if (error) return <div className="warning">⚠ <span>{error}</span></div>
   if (!project) return <p className="muted">Loading…</p>
-
-  const activeTab = TABS.some(([k]) => k === tab) ? tab : 'overview'
 
   // A solve just finished — point the URL at it FIRST (so the very next
   // render already asks for this run — pickedRun's stub covers the gap
@@ -132,12 +148,12 @@ export default function ProjectPage({ id, tab, query }) {
             which of its result tabs (layers/insert/truck) is shown. A
             second mount would mean a second ~40-50s solve. */}
         {(activeTab === 'packaging' || activeTab === 'truck') && (
-          <PackagingTruckTab project={project} query={query} packing={packing} params={params}
+          <PackagingTruckTab project={project} run={packagingRun} packing={packing} params={params}
             onParamsChange={setParams} onSolved={onSolved} onSolveStarted={onSolveStarted}
             resultTab={activeTab === 'truck' ? 'truck' : 'layers'} />
         )}
         {activeTab === 'runs' && <RunsTab project={project} onPatch={patch} />}
-        {activeTab === 'proposal' && <ProposalTab project={project} query={query} />}
+        {activeTab === 'proposal' && <ProposalTab project={project} query={query} runId={packagingRunId} />}
       </div>
     </div>
   )
@@ -378,8 +394,10 @@ function NoPart() {
 /** Packaging and Truck are one PackingResults, not two — a solve is
  *  40-50s, so a tab switch must never re-mount it. `resultTab` is the only
  *  thing that changes between the two project tabs. */
-function PackagingTruckTab({ project, query, packing, params, onParamsChange, onSolved, onSolveStarted, resultTab }) {
-  const run = project.part ? pickedRun(project, query) : null
+function PackagingTruckTab({ project, run, packing, params, onParamsChange, onSolved, onSolveStarted, resultTab }) {
+  // `run` is computed once in ProjectPage (pickedRun(project, query)) and
+  // handed down — Proposal reuses that same value, so the two tabs can
+  // never resolve "the run on screen" differently (CLAUDE.md rule 9).
 
   // The rail must reflect the run on screen, not whatever it was last set
   // to — otherwise "Re-run with these parameters" quietly re-solves with
@@ -487,18 +505,26 @@ function RunsTab({ project, onPatch }) {
 /** The one POST call site (F7: "share one function") — the Proposal tab's
  *  own button and the Overview's both end up here, the Overview's via
  *  `?generate=1` (below), since ProposalTab only exists while its tab is
- *  mounted. */
-async function postProposal(projectId) {
-  const r = await fetch(`/api/projects/${projectId}/proposal`, { method: 'POST' })
+ *  mounted. `runId` is the run Packaging/Truck had on screen — omitted
+ *  when there is none, so the backend falls back to its own default
+ *  (recommended run, else newest done) rather than this guessing one. */
+async function postProposal(projectId, runId) {
+  const qs = runId != null ? `?run_id=${encodeURIComponent(runId)}` : ''
+  const r = await fetch(`/api/projects/${projectId}/proposal${qs}`, { method: 'POST' })
   if (!r.ok) throw new Error(await readError(r, 'Could not start proposal'))
   return r.json() // ProposalOut, status "pending"
 }
 
 const PROPOSAL_POLL_MS = 2000
 
-function ProposalTab({ project, query }) {
+function ProposalTab({ project, query, runId }) {
   const [proposals, setProposals] = useState(null) // null = loading
   const [error, setError] = useState('')
+  // Separate from `error` above (which covers the proposals-list fetch and
+  // renders as the usual yellow warning) — a failed generate (404/409) is
+  // the backend naming a specific, expected condition, not a page-level
+  // failure, so it prints as one grey line instead.
+  const [genError, setGenError] = useState('')
   // The interval reads this, not the `proposals` state directly — keeping
   // the effect keyed on [project.id] means a status update (setProposals)
   // never re-runs the effect, so the interval it set up is never torn down
@@ -524,11 +550,11 @@ function ProposalTab({ project, query }) {
   }, [project.id, reload])
 
   async function generate() {
-    setError('')
+    setGenError('')
     try {
-      const row = await postProposal(project.id)
+      const row = await postProposal(project.id, runId)
       setProposals((list) => [row, ...(list || [])])
-    } catch (e) { setError(e.message) }
+    } catch (e) { setGenError(e.message) }
   }
 
   // One plain interval per project, not one poll loop per row: every 2s,
@@ -566,7 +592,11 @@ function ProposalTab({ project, query }) {
     <div className="card form-card">
       <div className="list-head">
         <p className="muted" style={{ margin: 0 }}>
-          Generated from the {project.recommended_run_id != null ? 'recommended run' : 'newest solve'}
+          {runId != null ? (
+            <>Generated from <span className="mono">Run #{String(runId).slice(0, 8)}</span></>
+          ) : (
+            `Generated from the ${project.recommended_run_id != null ? 'recommended run' : 'newest solve'}`
+          )}
         </p>
         <button className="btn-primary" disabled={anyBusy} onClick={generate}>
           Generate proposal
@@ -574,6 +604,7 @@ function ProposalTab({ project, query }) {
       </div>
 
       {error && <div className="warning">⚠ <span>{error}</span></div>}
+      {genError && <p className="muted" style={{ marginTop: 8 }}>{genError}</p>}
 
       {proposals.length === 0 ? (
         <div className="empty-stage" style={{ padding: '24px 0' }}>
@@ -600,7 +631,10 @@ function ProposalTab({ project, query }) {
                   )}
                   {p.status === 'failed' && <span style={{ color: 'var(--red)' }}>{p.error || 'Proposal failed'}</span>}
                   {p.status === 'done' && p.pdf_url && (
-                    <a className="btn-ghost" href={p.pdf_url} target="_blank" rel="noreferrer">Download PDF</a>
+                    <>
+                      <a className="btn-ghost" href={p.pdf_url} target="_blank" rel="noreferrer">Download PDF</a>
+                      <span className="mono muted" style={{ marginLeft: 8 }}>Run #{String(p.run_id).slice(0, 8)}</span>
+                    </>
                   )}
                 </td>
               </tr>

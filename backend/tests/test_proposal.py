@@ -37,7 +37,7 @@ from app.models import (ExtractionJob, Packaging, PartProfile, Project,  # noqa:
 from app.proposal import build_pdf  # noqa: E402
 from app.runs import _best_object, _run_out, proposal_run_for  # noqa: E402
 from app.schemas import PartProfileIn, ProjectIn, ProjectPatch, SolveIn  # noqa: E402
-from app.worker import run_proposal, run_solve  # noqa: E402
+from app.worker import render_run, run_proposal, run_render, run_solve  # noqa: E402
 
 _ENQUEUED: list[tuple] = []
 
@@ -47,6 +47,12 @@ def _capture_delay(*args, **kwargs):
 
 
 app_main.solve_part.delay = _capture_delay
+# Ticket 2: run_solve() itself enqueues render_run (drawing_url/gif_url/
+# packed_url, and flips render_status pending -> done) once it lands. A
+# render_status="pending" run now 409s the proposal route (ticket #1), so a
+# test run must actually go through render_run, not just run_solve -- same
+# inline-synchronous stand-in test_solve_api.py already uses.
+render_run.delay = lambda *a, **kw: run_render(*a, **kw)
 
 
 def _run_enqueued() -> None:
@@ -306,6 +312,104 @@ def main() -> int:
         check(proposed_b.run_id == posted.solve_job_id,
               "POST proposal picks the SAME run the helper does",
               f": got={proposed_b.run_id} want={posted.solve_job_id}")
+
+        # --- ticket #1 (reconciled audit): explicit run_id -----------------
+        # (a) run_id belonging to a DIFFERENT project -> 404.
+        other_project = app_main.create_project(
+            ProjectIn(customer="Other", part_number="Z", part_name="W"), db=db
+        )
+        other_run = SolveJob(
+            id="00000000-0000-0000-0000-0000000000aa",
+            part_id=run_row.part_id, project_id=other_project.id,
+            status="done", result_json=run_row.result_json,
+        )
+        db.add(other_run)
+        db.commit()
+        try:
+            app_main.create_proposal(project.id, run_id=other_run.id, db=db)
+            check(False, "run_id from another project -> 404",
+                  ": no exception raised")
+        except HTTPException as e:
+            check(e.status_code == 404, "run_id from another project -> 404",
+                  f": got {e.status_code}: {e.detail}")
+
+        # (c) explicit OLDER done run wins over newest-done -- proven by
+        # first showing what IGNORING run_id would have picked (newest),
+        # then showing the explicit call picked the older one instead.
+        app_main.patch_project(project.id, ProjectPatch(recommended_run_id=None),
+                               db=db)
+        project_row3 = db.get(Project, project.id)
+        ignored_choice = proposal_run_for(project_row3, db)
+        check(ignored_choice is not None
+              and ignored_choice.id == posted_b.solve_job_id,
+              "sanity: ignoring run_id would pick the NEWEST run",
+              f": got={getattr(ignored_choice, 'id', None)} "
+              f"want={posted_b.solve_job_id}")
+
+        proposed_c = app_main.create_proposal(project.id,
+                                              run_id=posted.solve_job_id, db=db)
+        check(proposed_c.run_id == posted.solve_job_id != posted_b.solve_job_id,
+              "explicit run_id=<older done run> -> response carries THAT "
+              "run's id, not the newest (proves the parameter -- not "
+              "proposal_run_for -- decided)",
+              f": got={proposed_c.run_id} older={posted.solve_job_id} "
+              f"newer(would-be-ignored-default)={posted_b.solve_job_id}")
+
+        run_proposal(proposed_c.id)
+        done_c = app_main.get_proposal(proposed_c.id, db=db)
+        check(done_c.status == "done" and done_c.run_id == posted.solve_job_id,
+              "rendered proposal (actual PDF built) still carries the "
+              "explicit older run's id", f": status={done_c.status} "
+              f"run_id={done_c.run_id}")
+
+        # (d) default (no run_id, no recommendation) -> response carries the
+        # run it actually used (newest-done, per proposal_run_for above).
+        proposed_d = app_main.create_proposal(project.id, db=db)
+        check(proposed_d.run_id == posted_b.solve_job_id,
+              "default (no run_id) -> response carries the newest-done "
+              "run's id it used",
+              f": got={proposed_d.run_id} want={posted_b.solve_job_id}")
+
+        # (b) run_id whose render_status is still "pending" -> 409, not a
+        # PDF with a blank exploded-drawing page. Inserted AFTER (c)/(d):
+        # it is itself a "done" row and would otherwise become the newest
+        # one, changing what those two checks expect "ignoring run_id"
+        # to resolve to.
+        pending_run = SolveJob(
+            id="00000000-0000-0000-0000-0000000000bb",
+            part_id=run_row.part_id, project_id=project.id, status="done",
+            result_json={**run_row.result_json, "render_status": "pending"},
+        )
+        db.add(pending_run)
+        db.commit()
+        try:
+            app_main.create_proposal(project.id, run_id=pending_run.id, db=db)
+            check(False, "render_status=pending run -> 409",
+                  ": no exception raised")
+        except HTTPException as e:
+            check(e.status_code == 409
+                  and e.detail == "Drawings still rendering; try again in a minute",
+                  "render_status=pending run -> 409",
+                  f": got {e.status_code}: {e.detail}")
+
+        # render_status="failed" -> 409 naming the error, never a "done"
+        # proposal with a blank exploded page (review finding on ticket #1).
+        failed_run = SolveJob(
+            id="00000000-0000-0000-0000-0000000000f1",
+            part_id=run_row.part_id, project_id=project.id, status="done",
+            result_json={**run_row.result_json, "render_status": "failed",
+                         "render_error": "boom"},
+        )
+        db.add(failed_run)
+        db.commit()
+        try:
+            app_main.create_proposal(project.id, run_id=failed_run.id, db=db)
+            check(False, "render_status=failed run -> 409", ": no exception raised")
+        except HTTPException as e:
+            check(e.status_code == 409 and "boom" in e.detail
+                  and "re-solve" in e.detail,
+                  "render_status=failed run -> 409 naming the error",
+                  f": got {e.status_code}: {e.detail}")
 
         # --- review fix 1: an empty-result done run is not proposable ------
         # Worker's own "No layout found" case: still status="done", just
