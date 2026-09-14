@@ -2281,5 +2281,5 @@ Fix `e10abc7`: apt-install `libgl1 libglu1-mesa libxext6 libxrender1 libsm6
 libfontconfig1` + a build-time `RUN python -c "import OCP…"` guard. Cloud
 Build SUCCESS 11:13 IST; tester verified on the VM (import ok, 0 ImportError,
 `sample.igs` upload → done, 916/916 faces). That test upload left one stray
-part on prod — delete it from the UI. Still open: Rahul's 4 console errors,
+part on prod — no DELETE route exists yet — remove via psql or leave it. Still open: Rahul's 4 console errors,
 F10/F8/F9/F11, count-before-drawings on the 2-vCPU VM.
