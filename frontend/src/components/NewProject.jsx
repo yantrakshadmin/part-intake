@@ -1,9 +1,30 @@
-import { useEffect, useState } from 'react'
+import { Component, useEffect, useState } from 'react'
 import OrientationViewer from './OrientationViewer.jsx'
 import Drawing2D from './Drawing2D.jsx'
 import { currentStep } from '../lib/steps.js'
 import { readError } from '../lib/api.js'
 import { navigate } from '../lib/router.js'
+
+/** Catches the WebGLRenderer throw (no WebGL in this browser) so it takes
+ *  down the 3D/2D preview only, not the whole app — React has no hook
+ *  equivalent, hence the one class component. The form, candidates and
+ *  Save & calculate all live outside this boundary and stay usable. */
+class ErrorBoundary extends Component {
+  state = { error: null }
+  static getDerivedStateFromError(error) { return { error } }
+  componentDidCatch(error, info) { console.error('3D preview failed:', error, info) }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="muted" style={{ padding: '32px 12px', textAlign: 'center' }}>
+          3D preview unavailable in this browser (WebGL). Dimensions and the
+          rest of the form still work.
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 const api = {
   async uploadStep(file) {
@@ -320,27 +341,29 @@ export default function NewProject() {
 
             {confirmOpen || !savedPart ? (
               <>
-                <div className="views-row">
-                  <div className="view-card">
-                    <div className="view-title">Isometric</div>
-                    <div style={{ width: 300 }}>
-                      <OrientationViewer
-                        glbUrl={result.glb_url}
-                        candidate={result.candidates[selected]}
-                      />
+                <ErrorBoundary>
+                  <div className="views-row">
+                    <div className="view-card">
+                      <div className="view-title">Isometric</div>
+                      <div style={{ width: 300 }}>
+                        <OrientationViewer
+                          glbUrl={result.glb_url}
+                          candidate={result.candidates[selected]}
+                        />
+                      </div>
+                    </div>
+                    <div className="view-card">
+                      <div className="view-title">Front view</div>
+                      <Drawing2D glbUrl={result.glb_url}
+                        candidate={result.candidates[selected]} view="front" />
+                    </div>
+                    <div className="view-card">
+                      <div className="view-title">Top view</div>
+                      <Drawing2D glbUrl={result.glb_url}
+                        candidate={result.candidates[selected]} view="top" />
                     </div>
                   </div>
-                  <div className="view-card">
-                    <div className="view-title">Front view</div>
-                    <Drawing2D glbUrl={result.glb_url}
-                      candidate={result.candidates[selected]} view="front" />
-                  </div>
-                  <div className="view-card">
-                    <div className="view-title">Top view</div>
-                    <Drawing2D glbUrl={result.glb_url}
-                      candidate={result.candidates[selected]} view="top" />
-                  </div>
-                </div>
+                </ErrorBoundary>
 
                 <div className="candidates">
                   {result.candidates.map((c, i) => (

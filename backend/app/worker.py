@@ -89,9 +89,14 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
     logged and that layout's picture is left absent. The count is the
     valuable output; the picture is not worth losing it over. The PNG and the
     GIF are guarded SEPARATELY -- a GIF failure must not cost the PNG that
-    already rendered fine, and vice versa.
+    already rendered fine, and vice versa. `packed_url` -- the GIF's own
+    final (fully packed) frame, re-encoded as a standalone PNG by
+    `build_gif` itself -- is guarded separately again: a failure writing it
+    to disk must not cost the GIF that already rendered fine.
 
-    Returns ({catalogue index: (png_url, gif_url)}, (custom png_url, gif_url)).
+    Returns (drawing_urls, gif_urls, packed_urls, custom_drawing_url,
+    custom_gif_url, custom_packed_url) -- the first three keyed by catalogue
+    index.
     """
     rotation_by_label = {c.label: c.rotation_matrix for c in candidates}
     inner_by_name = {a.name: a.inner for a in assets}
@@ -125,11 +130,11 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
     render_counts = {"png": 0, "gif": 0}
 
     def render(*, pose_label, extent_lbh, pitch_lbh, grid, inner_lbh,
-               asset_name, count, file_stem,
-               want_gif: bool = True) -> tuple[str | None, str | None]:
+               asset_name, count, file_stem, want_gif: bool = True
+               ) -> tuple[str | None, str | None, str | None]:
         voxels = voxels_for(pose_label)
         if voxels is None:
-            return None, None
+            return None, None, None
         try:
             # Same pure expression engine.solve used to stamp `layout.dunnage`
             # -- recomputed, not a second opinion, so the drawing cannot
@@ -139,7 +144,7 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
         except Exception:
             logger.exception("dunnage.bom failed for %s (%s)",
                              job_id, file_stem)
-            return None, None
+            return None, None, None
 
         png_url = None
         try:
@@ -154,32 +159,44 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
                              job_id, file_stem)
 
         gif_url = None
+        packed_url = None
         if want_gif:
             try:
-                gif = build_gif(voxels=voxels, extent_lbh=extent_lbh,
-                                pitch_lbh=pitch_lbh, grid=grid,
-                                inner_lbh=inner_lbh, bom=bom,
-                                asset_name=asset_name, count=count)
+                gif, packed = build_gif(voxels=voxels, extent_lbh=extent_lbh,
+                                        pitch_lbh=pitch_lbh, grid=grid,
+                                        inner_lbh=inner_lbh, bom=bom,
+                                        asset_name=asset_name, count=count)
                 gif_url = _write(gif, f"{file_stem}.gif")
                 render_counts["gif"] += 1
             except Exception:
                 logger.exception("build sequence gif failed for %s (%s)",
                                  job_id, file_stem)
+            else:
+                # Separately guarded: the GIF above already rendered and
+                # wrote fine, and a failure writing its packed-frame sibling
+                # must not cost it.
+                try:
+                    packed_url = _write(packed, f"{file_stem}_packed.png")
+                except Exception:
+                    logger.exception("packed frame write failed for %s (%s)",
+                                     job_id, file_stem)
 
-        return png_url, gif_url
+        return png_url, gif_url, packed_url
 
     start = time.monotonic()
     drawing_urls: dict = {}
     gif_urls: dict = {}
+    packed_urls: dict = {}
     for i, layout in enumerate(result.catalogue):
         inner_lbh = inner_by_name.get(layout.asset_name)
         if inner_lbh is None:
             continue
         # catalogue[0] is the top-ranked box -- the one the engineer opens
         # first. Everyone else gets its exploded PNG but not the ~40s GIF
-        # (see GIF_FOR_TOP_CATALOGUE_ONLY).
+        # (see GIF_FOR_TOP_CATALOGUE_ONLY) -- and so no packed_url either,
+        # since it is the GIF's own final frame.
         want_gif = (not GIF_FOR_TOP_CATALOGUE_ONLY) or i == 0
-        png_url, gif_url = render(
+        png_url, gif_url, packed_url = render(
             pose_label=layout.pose_label, extent_lbh=layout.extent_lbh,
             pitch_lbh=layout.pitch_lbh, grid=layout.grid,
             inner_lbh=inner_lbh, asset_name=layout.asset_name,
@@ -189,10 +206,12 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
             drawing_urls[i] = png_url
         if gif_url is not None:
             gif_urls[i] = gif_url
+        if packed_url is not None:
+            packed_urls[i] = packed_url
 
-    custom_drawing_url = custom_gif_url = None
+    custom_drawing_url = custom_gif_url = custom_packed_url = None
     if result.custom is not None:
-        custom_drawing_url, custom_gif_url = render(
+        custom_drawing_url, custom_gif_url, custom_packed_url = render(
             pose_label=result.custom.pose_label,
             extent_lbh=result.custom.extent_lbh,
             pitch_lbh=result.custom.pitch_lbh, grid=result.custom.grid,
@@ -203,7 +222,8 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
     logger.info("rendered %d png + %d gif in %.1fs for %s",
                 render_counts["png"], render_counts["gif"],
                 time.monotonic() - start, job_id)
-    return drawing_urls, gif_urls, custom_drawing_url, custom_gif_url
+    return (drawing_urls, gif_urls, packed_urls,
+            custom_drawing_url, custom_gif_url, custom_packed_url)
 
 
 @celery_app.task(name="solve_part", time_limit=600, soft_time_limit=570)
@@ -307,7 +327,8 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
             # this job just solved, so the picture and the counts come from
             # one expression and cannot drift (hard rule 7: heavy geometry
             # stays in the worker, never on request).
-            drawing_urls, gif_urls, custom_drawing_url, custom_gif_url = (
+            (drawing_urls, gif_urls, packed_urls, custom_drawing_url,
+             custom_gif_url, custom_packed_url) = (
                 _render_drawings(job_id, mesh, candidates, assets, result,
                                  clearance_lbh)
             )
@@ -502,7 +523,8 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
                 "catalogue": [
                     {**dataclasses.asdict(l), "interleave": l.interleave,
                      "drawing_url": drawing_urls.get(i),
-                     "gif_url": gif_urls.get(i)}
+                     "gif_url": gif_urls.get(i),
+                     "packed_url": packed_urls.get(i)}
                     for i, l in enumerate(result.catalogue)
                 ],
                 "poses_searched": [c.label for c in candidates],
@@ -511,7 +533,8 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
                     {**dataclasses.asdict(result.custom),
                      "layers": result.custom.layers,
                      "drawing_url": custom_drawing_url,
-                     "gif_url": custom_gif_url}
+                     "gif_url": custom_gif_url,
+                     "packed_url": custom_packed_url}
                     if result.custom is not None else None
                 ),
                 "custom_beats_catalogue": result.custom_beats_catalogue(),

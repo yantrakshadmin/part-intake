@@ -386,7 +386,7 @@ export default function PackingResults({ part, params, packaging, vehicles, proj
 
       {job.status === 'done' && (
         <ResultView result={job.result} part={part} type={type}
-          packaging={packaging} vehicles={vehicles} params={params}
+          packaging={packaging} vehicles={vehicles} params={params} run={run}
           selectedAsset={selectedAsset} onSelectAsset={setSelectedAsset}
           controlledTab={tab} />
       )}
@@ -430,7 +430,7 @@ function boxForTruckAsset(assetName, packaging, custom) {
   return packaging.find((p) => p.item_code === assetName) || null
 }
 
-function ResultView({ result, part, type, packaging, vehicles, params, selectedAsset, onSelectAsset, controlledTab }) {
+function ResultView({ result, part, type, packaging, vehicles, params, run, selectedAsset, onSelectAsset, controlledTab }) {
   const { catalogue, custom, custom_beats_catalogue: beatsCatalogue, truck, warnings } = result
   const empty = catalogue.length === 0 && !custom
   const customLayout = custom ? asCustomLayout(custom) : null
@@ -439,6 +439,17 @@ function ResultView({ result, part, type, packaging, vehicles, params, selectedA
   const selectedBox = selected?.asset_name === CUSTOM_KEY
     ? customBox(custom) : packaging.find((p) => p.item_code === selected?.asset_name)
   const truckBox = truck ? boxForTruckAsset(truck.asset_name, packaging, custom) : null
+  // The hero is the run's BEST layout, not always catalogue[0]: when the
+  // custom design wins (backend's own custom_beats_catalogue flag — never
+  // re-derived client-side, hard rule 9), options[0] is still catalogue[0]
+  // because customLayout is appended at the END of `options`. Rahul's
+  // live-use feedback: this is the first thing the user should see, so it
+  // leads the screen as a hero, independent of whatever card is clicked
+  // below (that click only changes LayoutDetail, never the hero/`selected`).
+  const heroLayout = beatsCatalogue && customLayout ? customLayout : (catalogue[0] || customLayout || null)
+  const heroBox = heroLayout
+    ? (heroLayout.asset_name === CUSTOM_KEY ? customBox(custom) : packaging.find((p) => p.item_code === heroLayout.asset_name))
+    : null
   // One tab set for whichever box is selected — switching boxes keeps the
   // reader on the same question (e.g. still looking at the truck plan).
   const [tab, setTab] = useState(controlledTab || 'layers')
@@ -451,10 +462,10 @@ function ResultView({ result, part, type, packaging, vehicles, params, selectedA
 
   return (
     <>
-      {/* D8: every warning, verbatim, no filter/slice/first-only. */}
-      {warnings.map((w, i) => (
-        <div key={i} className="warning">⚠ <span>{w}</span></div>
-      ))}
+      {/* D8: every warning, verbatim, no filter/slice/first-only — collapsed
+          to one line by default (too many amber labels was the live-use
+          complaint), same .warning class once expanded. */}
+      <WarningsDisclosure warnings={warnings} />
 
       {empty ? (
         <div className="empty-stage" style={{ padding: '24px 0' }}>
@@ -464,6 +475,14 @@ function ResultView({ result, part, type, packaging, vehicles, params, selectedA
         </div>
       ) : (
         <>
+          {heroLayout && (
+            <HeroSolution layout={heroLayout} box={heroBox} run={run}
+              clearanceMm={result.clearance_mm}
+              label={heroLayout.asset_name === CUSTOM_KEY ? 'Custom design' : undefined}
+              beatsCatalogue={beatsCatalogue} />
+          )}
+
+          <h3 className="ranked-heading"><span className="h-icon">▦</span> Ranked box comparison</h3>
           <div className="box-cards">
             {catalogue.map((layout, i) => (
               <LayoutCard key={layout.asset_name} layout={layout} rank={i}
@@ -501,6 +520,151 @@ function ResultView({ result, part, type, packaging, vehicles, params, selectedA
         </>
       )}
     </>
+  )
+}
+
+/** D8's warning list, collapsed to "N notes ▸" — too many amber labels was
+ *  Rahul's live-use complaint. Expands to the exact same .warning rows, one
+ *  per backend warning, verbatim (no filter/slice/first-only). */
+function WarningsDisclosure({ warnings }) {
+  if (!warnings || warnings.length === 0) return null
+  return (
+    <details className="disclosure warnings-disclosure">
+      <summary>{warnings.length} note{warnings.length !== 1 ? 's' : ''} ▸</summary>
+      {warnings.map((w, i) => (
+        <div key={i} className="warning">⚠ <span>{w}</span></div>
+      ))}
+    </details>
+  )
+}
+
+/** Image + its view toggle, shared by the hero solution image and the
+ *  Insert BOM modal (moved out of what used to be ExplodeModal's own
+ *  toggle+img markup — one renderer, not two). `views` is whichever of
+ *  packed/exploded/packing-order actually exist; a single view renders with
+ *  no toggle at all. */
+function ImageStage({ views, view, onViewChange }) {
+  if (views.length === 0) return null
+  const active = views.find((v) => v.key === view) || views[0]
+  return (
+    <>
+      {views.length > 1 && (
+        <div className="view-toggle" role="group" aria-label="View">
+          {views.map((v) => (
+            <button key={v.key} type="button" aria-pressed={active.key === v.key}
+              onClick={() => onViewChange(v.key)}>{v.label}</button>
+          ))}
+        </div>
+      )}
+      <img src={active.url} alt={active.label} className="modal-img" />
+    </>
+  )
+}
+
+/** Packed (default when it exists) / Exploded / Packing order for the hero
+ *  layout. `packed_url` is a backend field (CLAUDE.md hard rule 9 — nothing
+ *  here re-derives it); when it's null there is no packed render yet, so no
+ *  "Packed" tab is shown at all (a fake one, aliasing the exploded drawing,
+ *  is worse than none — it tells the reader the box is packed when the only
+ *  image on screen is exploded). Stage defaults to Exploded in that case. */
+function SolutionImage({ layout }) {
+  const views = useMemo(() => {
+    const list = []
+    if (hasDrawing(layout.packed_url)) list.push({ key: 'packed', label: 'Packed', url: layout.packed_url })
+    if (hasDrawing(layout.drawing_url)) list.push({ key: 'exploded', label: 'Exploded', url: layout.drawing_url })
+    if (hasDrawing(layout.gif_url)) list.push({ key: 'gif', label: 'Packing order', url: layout.gif_url })
+    return list
+  }, [layout])
+  const defaultView = hasDrawing(layout.packed_url) ? 'packed' : 'exploded'
+  const [view, setView] = useState(defaultView)
+  useEffect(() => setView(defaultView), [layout?.asset_name, defaultView])
+
+  return (
+    <div className="hero-image">
+      {views.length > 0
+        ? <ImageStage views={views} view={view} onViewChange={setView} />
+        : <p className="muted">No solution drawing for this run yet.</p>}
+    </div>
+  )
+}
+
+/** Label:value rows for the hero layout, Fira Code / tabular via the
+ *  existing `.mono` + `.result-facts` classes — nothing computed here
+ *  (CLAUDE.md hard rule 9), every value already on `layout`/`box`/`result`. */
+function CertificateCard({ layout, box, clearanceMm }) {
+  const fit = useMemo(() => layoutToFit(layout), [layout])
+  return (
+    <div className="cert-card">
+      <dl className="result-facts">
+        <div><dt>Calculated count</dt><dd className="mono">{layout.count}</dd></div>
+        <div><dt>Geometric upper bound</dt><dd className="mono">{layout.count_upper}</dd></div>
+        <div><dt>Pattern / grid</dt><dd className="mono">
+          {layout.grid.join(' × ')} · {fit.fill.desc}</dd></div>
+        <div><dt>Layers</dt><dd className="mono">{fit.layers}</dd></div>
+        <div><dt>Pitch</dt><dd className="mono">
+          {fmtMm(layout.pitch_lbh[0])} × {fmtMm(layout.pitch_lbh[1])} × {fmtMm(layout.pitch_lbh[2])} mm</dd></div>
+        {clearanceMm != null && (
+          <div><dt>Clearance</dt><dd className="mono">{clearanceMm} mm</dd></div>
+        )}
+        {layout.limited_by && (
+          <div><dt>Limited by</dt><dd className="mono">{layout.limited_by}</dd></div>
+        )}
+        {box?.max_weight_kg > 0 && (
+          <div><dt>Weight cap</dt><dd className="mono">{box.max_weight_kg} kg</dd></div>
+        )}
+      </dl>
+      {layout.reasons?.length > 0 && (
+        <details className="disclosure">
+          <summary>Why ▸</summary>
+          <ul className="reasons-list">
+            {layout.reasons.map((r, i) => <li key={i}>{r}</li>)}
+          </ul>
+        </details>
+      )}
+    </div>
+  )
+}
+
+/**
+ * First-viewport hero for the top-ranked solution — Rahul's live-use
+ * feedback: "the user's first screen should be the solution, not what boxes
+ * have what configuration". `layout` is options[0] (ResultView), never
+ * re-picked here; clicking a different card below only changes LayoutDetail,
+ * not this block.
+ */
+function HeroSolution({ layout, box, run, label, beatsCatalogue, clearanceMm }) {
+  const runLabel = run?.solve_job_id
+    ? `Run #${String(run.solve_job_id).slice(0, 8)} · ${fmtRunDate(run.created_at) || 'stored run'}`
+    : null
+  const cuboidLine = run?.cuboid_count != null
+    ? `${layout.count} vs ${run.cuboid_count} cuboid${run.gain_vs_cuboid != null ? ` (${run.gain_vs_cuboid}×)` : ''}`
+    : null
+  const customerLine = run?.customer_count != null
+    ? `${layout.count} vs ${run.customer_count} today${run.gain_vs_customer_pct != null
+      ? ` (${run.gain_vs_customer_pct >= 0 ? '+' : ''}${run.gain_vs_customer_pct}%)` : ''}`
+    : null
+
+  return (
+    <div className="hero-solution">
+      <div className="hero-headline">
+        <span className="hero-count">{layout.count}</span>
+        <div className="hero-headline-text">
+          <div className="hero-asset">
+            {label ?? layout.asset_name}
+            {beatsCatalogue && label && <span className="badge stp">beats catalogue</span>}
+            <span className="muted hero-pose"> · {layout.pose_label}</span>
+          </div>
+          <div className="muted hero-meta">
+            {[runLabel, cuboidLine, customerLine].filter(Boolean).join(' · ')}
+          </div>
+        </div>
+      </div>
+
+      <div className="hero-grid">
+        <SolutionImage layout={layout} />
+        <CertificateCard layout={layout} box={box} clearanceMm={clearanceMm} />
+      </div>
+    </div>
   )
 }
 
@@ -888,7 +1052,12 @@ function DunnageBom({ dunnage, drawingUrl, gifUrl }) {
  *  only appears when both exist — one image never needs a choice. */
 function ExplodeModal({ drawingUrl, gifUrl, initial, onClose }) {
   const closeRef = useRef(null)
-  const hasBoth = hasDrawing(drawingUrl) && hasDrawing(gifUrl)
+  const views = useMemo(() => {
+    const list = []
+    if (hasDrawing(gifUrl)) list.push({ key: 'gif', label: 'Packing sequence', url: gifUrl })
+    if (hasDrawing(drawingUrl)) list.push({ key: 'png', label: 'Exploded view', url: drawingUrl })
+    return list
+  }, [drawingUrl, gifUrl])
   const [view, setView] = useState(initial)
 
   useEffect(() => {
@@ -898,31 +1067,17 @@ function ExplodeModal({ drawingUrl, gifUrl, initial, onClose }) {
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  const showGif = view === 'gif'
-  const label = showGif ? 'Packing sequence' : 'Exploded view'
-
   return (
     <div className="modal-backdrop"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
       <div className="modal-card" role="dialog" aria-modal="true" aria-label="Insert view">
         <div className="modal-head">
-          {hasBoth ? (
-            <div className="view-toggle" role="group" aria-label="View">
-              <button type="button" aria-pressed={showGif} onClick={() => setView('gif')}>
-                Packing sequence
-              </button>
-              <button type="button" aria-pressed={!showGif} onClick={() => setView('png')}>
-                Exploded view
-              </button>
-            </div>
-          ) : (
-            <span>{label}</span>
-          )}
+          <span>Insert view</span>
           <button ref={closeRef} className="btn-ghost" onClick={onClose} aria-label="Close">✕</button>
         </div>
-        <img src={showGif ? gifUrl : drawingUrl}
-          alt={showGif ? 'Packing sequence' : 'Exploded insert drawing'}
-          className="modal-img" />
+        {/* Toggle + image are the same ImageStage the hero solution image
+            uses (moved, not duplicated — see SolutionImage above). */}
+        <ImageStage views={views} view={view} onViewChange={setView} />
       </div>
     </div>
   )

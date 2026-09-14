@@ -2283,3 +2283,28 @@ Build SUCCESS 11:13 IST; tester verified on the VM (import ok, 0 ImportError,
 `sample.igs` upload → done, 916/916 faces). That test upload left one stray
 part on prod — no DELETE route exists yet — remove via psql or leave it. Still open: Rahul's 4 console errors,
 F10/F8/F9/F11, count-before-drawings on the 2-vCPU VM.
+
+## 2026-09-14 — Ticket 1: solution-first Packaging screen + `packed_url`
+
+Rahul's live-use feedback (docs/AUDIT_RECONCILED.md R1–R3): the first screen
+after a solve must be the answer, not the box list; fewer yellow warnings,
+less text; the GIF/exploded view were buried. Now the Packaging tab leads
+with a hero — count, box, pose, a Packed / Exploded / Packing-order image
+stage and a certificate card of the backend's own numbers — then the ranked
+list. Warnings collapse to one "N notes ▸" line. Hero = the run's best
+layout via `custom_beats_catalogue` (rule 9), never `options[0]`.
+
+Backend: `build_gif` also returns the hold frame as PNG; worker writes
+`<stem>_packed.png` and stamps `packed_url` on catalogue/custom dicts;
+`LayoutOut`/`BoxDesignOut` declare it. The `_selfcheck` now asserts the
+packed PNG is pixel-identical to the GIF's last frame (the first version of
+that check could not fail — reviewer caught it). No fake "Packed" tab when
+`packed_url` is null. ErrorBoundary around the 3D preview: WebGL failure
+shows a notice, the form and Save & calculate stay live. ≤1180 px stacks
+results above parameters. `test_solve_api.py` covers packed_url over real
+HTTP (57 PASS); ground truth 40/48 holds; headless-Chrome shots at 1440×900
+and 1100×800 in the session scratchpad.
+
+Next in build order: #2 count before pictures (split render task), ticket 3
+warnings/text ("not watertight" fires on 16/16 customer files — drop it from
+the UI), R4 exploded view v2, R5–R7 pose honesty/stability/angle ladder.

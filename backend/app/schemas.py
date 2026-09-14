@@ -230,6 +230,11 @@ class LayoutOut(BaseModel):
     drawing_url: Optional[str] = None
     # The packing-sequence GIF, same file/failure discipline as drawing_url.
     gif_url: Optional[str] = None
+    # The complete, fully packed box -- the GIF's own final frame, so it can
+    # never disagree with the animation. The first image the engineer should
+    # see after a solve; null wherever no GIF was built (same discipline as
+    # gif_url -- declare it here or pydantic drops it, hard rule 9).
+    packed_url: Optional[str] = None
 
 
 class BoxDesignOut(BaseModel):
@@ -251,6 +256,7 @@ class BoxDesignOut(BaseModel):
     dunnage: Optional[DunnageOut] = None
     drawing_url: Optional[str] = None
     gif_url: Optional[str] = None
+    packed_url: Optional[str] = None
     # Same as LayoutOut.cuboid_count / reasons (F3/F4), against this box's own
     # inner.
     cuboid_count: int = 0

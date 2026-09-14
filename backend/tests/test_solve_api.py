@@ -209,6 +209,40 @@ def main() -> int:
                   "custom.gif_url ships and opens with PIL",
                   f": {status.result.custom.gif_url if status.result.custom else None}")
 
+            # Ticket 1a: packed_url is the GIF's own final frame -- present
+            # exactly where gif_url is present (top-ranked + custom), null
+            # everywhere else, opens with PIL, same size as the GIF frames,
+            # and not a blank/solid image.
+            def _packed_ok(layout) -> bool:
+                if not (layout.gif_url and layout.packed_url):
+                    return False
+                from PIL import Image
+                gpath = (Path(settings.local_storage_dir)
+                        / layout.gif_url.rsplit("/", 1)[-1])
+                ppath = (Path(settings.local_storage_dir)
+                        / layout.packed_url.rsplit("/", 1)[-1])
+                with Image.open(gpath) as gim, Image.open(ppath) as pim:
+                    gim.seek(gim.n_frames - 1)
+                    same_size = pim.size == gim.size
+                    colours = pim.convert("RGB").getcolors(maxcolors=256 * 256)
+                    non_blank = colours is None or len(colours) > 1
+                return ppath.is_file() and same_size and non_blank
+
+            check(_packed_ok(top),
+                  "catalogue[0] ships a packed_url matching its GIF's final frame",
+                  f": {top.packed_url}")
+            others_have_packed = [
+                l.asset_name for l in status.result.catalogue[1:]
+                if l.packed_url is not None
+            ]
+            check(not others_have_packed,
+                  "other ranked layouts ship packed_url=None (no GIF built)",
+                  f": unexpected packed_url on {others_have_packed}")
+            check(status.result.custom is not None
+                  and _packed_ok(status.result.custom),
+                  "custom.packed_url ships and matches its GIF's final frame",
+                  f": {status.result.custom.packed_url if status.result.custom else None}")
+
             # The synthesised custom design has no catalogue tare and no
             # override was given, so IT (only) gets the "no tare" warning.
             check(any("no tare weight for custom" in w.lower()

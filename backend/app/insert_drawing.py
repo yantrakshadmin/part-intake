@@ -859,10 +859,16 @@ def _step_masks(dun: np.ndarray, dun_step: np.ndarray, prt: np.ndarray,
 def build_gif(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
              bom: dunnage.Bom, asset_name: str, count: int,
              cell_mm: float = CELL_MM, dunnage_ms: int = 600,
-             parts_ms: int = 1500, hold_ms: int = 3000) -> bytes:
+             parts_ms: int = 1500, hold_ms: int = 3000
+             ) -> tuple[bytes, bytes]:
     """The packing sequence as an animated GIF: the empty asset, then per
     layer the dunnage that goes in before it and that layer's parts, then the
     top dunnage, then a hold on the finished box before it loops.
+
+    Returns `(gif_bytes, packed_png_bytes)` -- the second is the GIF's own
+    hold frame (the fully packed box, `frame(None, ...)`) re-encoded as a
+    standalone PNG, so the complete-solution image is never a second
+    rendering pass that could disagree with the GIF (hard rule 9).
 
     Off the SAME placement `explode_png` draws (`_place`): the geometry is
     never re-derived, only replayed cumulatively by the per-cell step index
@@ -974,17 +980,20 @@ def build_gif(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
         return img
 
     frames = [frame(s, idx) for idx, s in enumerate(non_empty)]
-    frames.append(frame(None, len(non_empty) - 1))       # the hold frame
+    packed_frame = frame(None, len(non_empty) - 1)        # the hold frame:
+    frames.append(packed_frame)                           # complete, packed box
     durations = [(parts_ms if s % 2 else dunnage_ms) for s in non_empty]
     durations.append(hold_ms)
 
     buf = BytesIO()
     frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:],
                    optimize=True, duration=durations, loop=0)
+    packed_buf = BytesIO()
+    packed_frame.save(packed_buf, format="PNG")
     logger.info("built %s %s gif: %d frames (%d content + hold), %d bytes",
                 asset_name, bom.archetype, len(frames), len(non_empty),
                 buf.tell())
-    return buf.getvalue()
+    return buf.getvalue(), packed_buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -1299,10 +1308,10 @@ def _selfcheck(outdir) -> int:
         expected = 1 + len(non_empty)
 
         t0 = time.perf_counter()
-        gif = build_gif(voxels=_demo_voxels(extent, CELL_MM, kind),
-                        extent_lbh=extent, pitch_lbh=pitch, grid=grid,
-                        inner_lbh=inner, bom=bom, asset_name=asset,
-                        count=count)
+        gif, packed = build_gif(voxels=_demo_voxels(extent, CELL_MM, kind),
+                                extent_lbh=extent, pitch_lbh=pitch, grid=grid,
+                                inner_lbh=inner, bom=bom, asset_name=asset,
+                                count=count)
         gdt = time.perf_counter() - t0
         gimg = Image.open(BytesIO(gif))
         assert gimg.n_frames == expected, \
@@ -1339,6 +1348,13 @@ def _selfcheck(outdir) -> int:
         last = np.asarray(gimg.convert("RGB"))
         assert not np.array_equal(first, last), \
             "%s: first and last gif frame are identical" % ref
+        # The packed-box PNG must BE the finished box, not merely some frame
+        # of the right size: compare against `last` (gimg is already seeked
+        # there). Size/flat-colour checks alone passed when the PNG was the
+        # empty-box FIRST frame.
+        pimg = Image.open(BytesIO(packed))
+        assert np.array_equal(np.asarray(pimg.convert("RGB")), last), \
+            "%s: packed PNG is not the gif's final frame" % ref
         gpath = outdir / ("build_%s_%s.gif"
                           % (bom.archetype, ref.replace("/", "_").replace(" ", "_")))
         gpath.write_bytes(gif)
