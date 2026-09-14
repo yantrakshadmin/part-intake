@@ -125,6 +125,32 @@ SHADE = {"z": 1.0, "x": 0.80, "y": 0.62}    # brightness per face normal
 TAG = {"derived": ("#166534", "DERIVED"), "measured": ("#1E40AF", "MEASURED"),
        "pattern": ("#B45309", "PATTERN"), "unknown": ("#B91C1C", "UNKNOWN")}
 
+# ---------------------------------------------------------------------------
+# Dark ground, for `explode_png` ONLY (R4). The constants above are shared
+# with `build_gif`, whose frames stay on the light card the GIF has always
+# used -- recolouring them would change the packed PNG the hero image shows.
+# Every colour below is a LIGHT counterpart of one above: the same palette
+# lifted for contrast, not a second palette.
+# ---------------------------------------------------------------------------
+D_BG = "#0F172A"            # slate-900 ground
+D_INK, D_MUTE = "#E2E8F0", "#94A3B8"
+D_NAME, D_ACCENT = "#93C5FD", "#FBBF24"
+D_BASE, D_WIRE = "#334155", "#64748B"      # pallet base; box wireframe
+D_EDGE = (0.50, 0.57, 0.67)                # silhouette line, RGB 0-1
+D_TAG = {"derived": "#4ADE80", "measured": "#60A5FA",
+         "pattern": "#FBBF24", "unknown": "#F87171"}
+# Dunnage alpha is tuned for a white ground; over slate-900 the same value
+# reads as a hole. The explosion also separates the layers, so less needs to
+# be seen THROUGH.
+D_ALPHA = 1.35
+# Lift per layer in the exploded view: half a layer pitch, per the ticket --
+# capped so the whole explosion never adds more than 60% of the box height.
+# ponytail: at half a pitch an interleaving pose (the Mubea bar nests 123mm
+# into the layer below) still overlaps; separating those fully needs
+# gap >= nest depth, which is a 1900mm-tall figure. Raise EXPLODE_FRAC if a
+# reviewer needs full separation more than a readable aspect ratio.
+EXPLODE_FRAC, EXPLODE_CAP = 0.5, 0.6
+
 
 # ---------------------------------------------------------------------------
 # Voxels
@@ -232,7 +258,8 @@ def _exposed(vol: np.ndarray, cell_mm: float) -> tuple:
     return tuple(np.concatenate(a) for a in (quads, depth, label, shade, edge))
 
 
-def _paint(ax, vols: list, rgba_for, cell_mm: float, lw: float = 0.35) -> int:
+def _paint(ax, vols: list, rgba_for, cell_mm: float, lw: float = 0.35,
+           edge_rgb: tuple | None = None) -> int:
     """ONE far->near ordering across ALL volumes. Returns the quad count.
 
     Alpha compositing needs strictly back-to-front, and the depth key is per
@@ -258,14 +285,17 @@ def _paint(ax, vols: list, rgba_for, cell_mm: float, lw: float = 0.35) -> int:
     # seam error is ~0.02 and invisible, a doubled stroke is not.
     ec[~eg & (fc[:, 3] < 1.0), 3] = 0.0
     # Silhouettes and creases: the deck's black line-work at every boundary.
-    ec[eg, :3] = fc[eg, :3] * 0.38
+    # On a dark ground a darkened edge IS the ground, so the caller passes the
+    # light line colour instead.
+    ec[eg, :3] = fc[eg, :3] * 0.38 if edge_rgb is None else edge_rgb
     ec[eg, 3] = np.clip(fc[eg, 3] * 2.4, 0.5, 1.0)
     ax.add_collection(PolyCollection(q, facecolors=fc, edgecolors=ec,
                                      linewidths=lw, zorder=2))
     return len(q)
 
 
-def _draw_asset(ax, inner, mark_z: float | None) -> None:
+def _draw_asset(ax, inner, mark_z: float | None, base_c: str = C_BASE,
+                wire_c: str = C_INK, accent_c: str = C_ACCENT) -> None:
     """The asset itself: a base slab plus the inner box as a wireframe.
 
     "Does the stack fit inside the box" is a question the drawing cannot
@@ -278,7 +308,7 @@ def _draw_asset(ax, inner, mark_z: float | None) -> None:
     slab = [[(0, 0, 0), (l, 0, 0), (l, b, 0), (0, b, 0)],               # +z
             [(l, 0, -BASE_MM), (l, b, -BASE_MM), (l, b, 0), (l, 0, 0)],  # +x
             [(0, b, -BASE_MM), (l, b, -BASE_MM), (l, b, 0), (0, b, 0)]]  # +y
-    base = np.array([matplotlib.colors.to_rgba(C_BASE)] * 3)
+    base = np.array([matplotlib.colors.to_rgba(base_c)] * 3)
     base[:, :3] *= np.array([SHADE["z"], SHADE["x"], SHADE["y"]])[:, None]
     ax.add_collection(PolyCollection([_proj(np.array(f, float)) for f in slab],
                                      facecolors=base, edgecolors=base,
@@ -290,16 +320,17 @@ def _draw_asset(ax, inner, mark_z: float | None) -> None:
     wire = [(0, 1), (2, 3), (4, 5), (6, 7),             # verticals
             (0, 2), (2, 6), (6, 4), (4, 0),             # at the base
             (1, 3), (3, 7), (7, 5), (5, 1)]             # at the lid
-    ax.add_collection(LineCollection([p[list(e)] for e in wire], colors=C_INK,
-                                     linewidths=0.9, alpha=0.5, zorder=3))
+    ax.add_collection(LineCollection([p[list(e)] for e in wire],
+                                     colors=wire_c, linewidths=0.9, alpha=0.5,
+                                     zorder=3))
     if mark_z is not None:
         off = np.array([-40.0, 0.0])   # just outside the (0,0) corner edge
         p0, p1 = (_proj(np.array([0.0, 0.0, z])) + off for z in (0.0, h))
-        ax.plot([p0[0], p1[0]], [p0[1], p1[1]], color=C_ACCENT, lw=1.0,
+        ax.plot([p0[0], p1[0]], [p0[1], p1[1]], color=accent_c, lw=1.0,
                 zorder=4)
         for z in (0.0, mark_z, h):
             t = _proj(np.array([0.0, 0.0, z])) + off
-            ax.plot([t[0], t[0] + 18], [t[1], t[1]], color=C_ACCENT, lw=1.0,
+            ax.plot([t[0], t[0] + 18], [t[1], t[1]], color=accent_c, lw=1.0,
                     zorder=4)
 
 
@@ -456,37 +487,89 @@ def _pocket_tray_rows(el: dict, extent, pitch, grid, inner, cell_mm) -> list:
     ]
 
 
+@dataclass
+class _Label:
+    """One spec-column entry: short label, qty, ONE dimension line, and
+    whatever the BOM element says about itself that is not a number.
+
+    Every number in `qty`, `dim` and `extras` is formatted from a BOM element
+    or a layout field -- `_check_spec_column` asserts exactly that, so nothing
+    here may be built from a constant of this module.
+    """
+    title: str
+    basis: str
+    qty: str
+    dim: str
+    extras: list
+
+
 def _labels(rows: list, el: dict, extent, pitch, grid, count: int) -> list:
-    """(title, lines, basis) per row, straight off the BOM. Nothing retyped."""
+    """One `_Label` per row, straight off the BOM. Nothing retyped."""
     out = []
     for row in rows:
         if row.name is None:
-            span_b = extent[1] + (grid[1] - 1) * pitch[1]
-            lines = ["%g x %g x %g mm in this pose" % tuple(extent),
-                     "%d x %d per layer at %g / %g mm pitch  (span %g mm)"
-                     % (grid[0], grid[1], pitch[0], pitch[1], span_b),
-                     "%d layers at %g mm pitch  =  %d parts"
-                     % (grid[2], pitch[2], count)]
-            lines.append(
-                "pitch %g < width %g, so layers interleave"
-                % (pitch[1], extent[1]) if pitch[1] < extent[1] else
-                "pitch %g > width %g: clearance / pocket wall"
-                % (pitch[1], extent[1]))
-            out.append(("Part  (the thing being packed)", lines, "measured"))
+            out.append(_Label(
+                title="Part",
+                basis="measured",
+                qty="qty %d" % count,
+                dim="%g x %g x %g mm" % tuple(extent),
+                extras=["%d x %d per layer, pitch %g / %g mm"
+                        % (grid[0], grid[1], pitch[0], pitch[1]),
+                        "%d layers at %g mm pitch" % (grid[2], pitch[2]),
+                        "pitch %g < width %g: layers interleave"
+                        % (pitch[1], extent[1]) if pitch[1] < extent[1] else
+                        "pitch %g > width %g: clearance / pocket wall"
+                        % (pitch[1], extent[1])]))
             continue
         e = el[row.name]
-        lines = ["%s mm" % e.size if e.size else "size: not derivable",
-                 "qty %s" % (e.qty if e.qty is not None else "?")]
+        extras = []
         if e.matrix:
-            lines.append("%d x %d pockets, %g x %g x %g mm each"
-                         % (*e.matrix, *e.cell_mm))
+            extras.append("%d x %d pockets, %g x %g x %g mm each"
+                          % (*e.matrix, *e.cell_mm))
         if row.geo is None:
-            lines.append(LABEL_ONLY.get(e.name, "not drawn: nothing to draw"))
+            extras.append(LABEL_ONLY.get(e.name, "not drawn: nothing to draw"))
         if e.spec:
-            lines.append(e.spec)
+            extras.append(e.spec)
         if e.unknown:
-            lines.append("needs deck: " + ", ".join(e.unknown))
-        out.append((e.name, lines, e.basis))
+            extras.append("needs deck: " + ", ".join(e.unknown))
+        out.append(_Label(
+            title=e.name, basis=e.basis,
+            qty="qty %s" % (e.qty if e.qty is not None else "?"),
+            dim="%s mm" % e.size if e.size else "size: not derivable",
+            extras=extras))
+    return out
+
+
+def _explode_gap(pitch_h: float, inner_h: float, layers: int) -> float:
+    """How far each layer rises above the one below it in the exploded PNG."""
+    return min(EXPLODE_FRAC * pitch_h, EXPLODE_CAP * inner_h / max(1, layers))
+
+
+def _explode(vol: np.ndarray, step_vol: np.ndarray, gap_cells: int) -> np.ndarray:
+    """`vol` with every cell lifted by `(step // 2) * gap_cells` along z.
+
+    Grouped by the per-cell BUILD STEP `_place` already stamped, never by z
+    index: a TRW wheel is 135mm tall in a 120mm pitch, so a z-slice rule cuts
+    the gap through the middle of a part and shears it in half. One layer
+    assembly (separator sheet, tray and the parts nested in it) shares one
+    step pair, so it travels as one object -- which is what makes the layer,
+    not the slab, the thing that reads as distinct.
+
+    A pure translation along +z, so `_exposed`'s depth key (x+y+z, recomputed
+    from the new indices) stays a correct far->near order for the alpha
+    compositing. The groups only ever move further apart, so no cell lands on
+    another.
+    """
+    if gap_cells <= 0:
+        return vol
+    steps = np.unique(step_vol[vol != 0])
+    lift = (steps.astype(int) // 2) * gap_cells
+    out = np.zeros(vol.shape[:2] + (vol.shape[2] + int(lift.max()) + 1,),
+                   dtype=vol.dtype)
+    for s, dz in zip(steps, lift):
+        m = (step_vol == s) & (vol != 0)
+        x, y, z = np.nonzero(m)
+        out[x, y, z + int(dz)] = vol[m]
     return out
 
 
@@ -682,10 +765,14 @@ def _place(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
 def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
                 bom: dunnage.Bom, asset_name: str, count: int,
                 cell_mm: float = CELL_MM) -> bytes:
-    """The insert component breakdown as PNG bytes.
+    """The insert component breakdown as PNG bytes: an EXPLODED view on a dark
+    ground, leaders out to a right-hand spec column.
 
     `bom` is a `dunnage.Bom`; every dimension, qty, spec and basis in the
     drawing comes off it. Never retype a dimension the BOM already carries.
+    The explosion is a pure draw-time translation of `_place`'s volumes
+    (`_explode`) -- the placement itself, and so every number, is the one
+    `build_gif` replays.
 
     Takes voxels, not a mesh, deliberately: several ranked layouts share one
     pose, so the caller voxelises once per distinct pose (`pose_voxels`).
@@ -695,41 +782,60 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
               cell_mm=cell_mm)
     rows, el, extent, pitch, inner, grid = (p.rows, p.el, p.extent, p.pitch,
                                             p.inner, p.grid)
-    dun, prt, top, alt = p.dun, p.prt, p.top, p.alt
+    layers, alt = p.layers, p.alt
 
-    # Leaders out to a label column, poster-style. Every component now lives in
-    # the SAME stack, so anchoring each label at its own component's mid-height
-    # would pile them all at mid-box: each label points instead at ONE REAL
-    # drawn instance -- the one nearest the camera (largest x+y+z, `_proj`'s
-    # own depth convention), projected with `_proj` so the dot lands where the
-    # component actually is, not at a fixed column edge with nothing under it.
-    # A row with no drawn geometry (MS Rod, an undrawn BOM element) gets no
-    # leader at all -- pointing at empty space is worse than not pointing.
-    def _row_anchor(i: int, row: _Row):
+    # Lift the stack apart along z. In cells, and the leaders use the SAME
+    # rounded gap, so a label's dot lands on the instance where it actually
+    # got drawn rather than where an unrounded gap would have put it.
+    gap_cells = max(1, int(round(_explode_gap(pitch[2], inner[2], layers)
+                                 / cell_mm)))
+    gap = gap_cells * cell_mm
+    dun = _explode(p.dun, p.dun_step, gap_cells)
+    prt = _explode(p.prt, p.prt_step, gap_cells)
+    z_top = max(dun.shape[2], prt.shape[2]) * cell_mm
+    parts_z0 = next(r.z0 for r in rows if r.is_parts)
+
+    def _lift(z0: float) -> float:
+        """Rise of a dunnage cuboid sitting at `z0` -- `_explode`'s own rule
+        (step // 2 gaps), read off the same `_dun_step`."""
+        return (_dun_step(z0, parts_z0, pitch[2], layers) // 2) * gap
+
+    # Leaders out to a label column, poster-style. Every component lives in
+    # the same stack, so anchoring each label at its own component's
+    # mid-height would pile them all at mid-box: each label points instead at
+    # ONE REAL DRAWN instance -- the one nearest the camera (largest x+y+z,
+    # `_proj`'s own depth convention), projected with `_proj` so the dot lands
+    # where the component actually is, not at a fixed column edge with nothing
+    # under it. A row with no drawn geometry (MS Rod, an undrawn BOM element)
+    # gets no leader at all -- pointing at empty space is worse than not
+    # pointing.
+    def _row_anchor(row: _Row):
         if row.is_parts:
             ox, oy = _origins(extent, pitch, grid, inner)
             k = grid[2] - 1                          # the topmost layer
             centres = [(ox + a * pitch[0] + extent[0] / 2,
                        oy + b * pitch[1] + extent[1] / 2,
-                       row.z0 + k * pitch[2] + extent[2] / 2)
+                       row.z0 + k * pitch[2] + extent[2] / 2 + k * gap)
                       for a in range(grid[0]) for b in range(grid[1])]
         elif row.geo is not None:
             solids, _voids = row.geo()
-            centres = [(o[0] + s[0] / 2, o[1] + s[1] / 2, o[2] + s[2] / 2)
-                      for o, s in solids]
+            centres = [(o[0] + s[0] / 2, o[1] + s[1] / 2,
+                       o[2] + s[2] / 2 + _lift(o[2])) for o, s in solids]
         else:
             return None
         return _proj(np.array(max(centres, key=sum), float)) if centres else None
 
     labels = _labels(rows, el, extent, pitch, grid, count)
-    anchors = [_row_anchor(i, r) for i, r in enumerate(rows)]
-    y_top = top + 140
-    y_bot = -(inner[0] + inner[1]) * SIN30 - BASE_MM - 140
+    anchors = [_row_anchor(r) for r in rows]
+    y_top = z_top + 120
+    y_bot = -(inner[0] + inner[1]) * SIN30 - BASE_MM - 100
     lx, tx = inner[0] + 10.0, inner[0] + 150.0
     x_lo, x_hi = -inner[1] * COS30 - 300, tx + 820
-    y_lo, y_hi = y_bot - 380, y_top
+    y_lo, y_hi = y_bot - 300, y_top + 210      # band for the header block
 
-    # Equal aspect, so let the figure follow the drawing.
+    # Equal aspect, so let the figure follow the drawing. 14in at 110dpi is
+    # the width the hero image (`.hero-image .modal-img`, 480px tall,
+    # object-fit: contain) has always been scaled from -- unchanged here.
     fig_h_in = float(np.clip(14.0 * (y_hi - y_lo) / (x_hi - x_lo), 10.0, 22.0))
     fig, ax = plt.subplots(figsize=(14.0, fig_h_in), dpi=110)
     # Axis off, no title/colourbar, nothing outside the axes data area for
@@ -747,21 +853,34 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
 
     palette = np.zeros((alt + 1, 4))
     for i, row in enumerate(rows):
-        palette[LABEL0 + i] = matplotlib.colors.to_rgba(row.colour, row.alpha)
+        # Dunnage alphas are tuned against a white ground; over slate-900 the
+        # same value reads as a hole punched in the stack.
+        palette[LABEL0 + i] = matplotlib.colors.to_rgba(
+            row.colour, min(1.0, row.alpha * D_ALPHA))
         if row.is_parts:
             palette[alt] = matplotlib.colors.to_rgba(PART_ALT, row.alpha)
-    _draw_asset(ax, inner, bom.build_height_mm)
+    _draw_asset(ax, inner, bom.build_height_mm, base_c=D_BASE, wire_c=D_WIRE,
+                accent_c=D_ACCENT)
+    # One faint guide up the middle of the stack, base to top: the lifted
+    # layers otherwise float with nothing saying they are one assembly.
+    g0, g1 = (_proj(np.array([inner[0] / 2, inner[1] / 2, z], float))
+              for z in (-BASE_MM, z_top))
+    ax.plot([g0[0], g1[0]], [g0[1], g1[1]], lw=0.8, color=D_BASE, zorder=1)
     # Parts FIRST: on a depth tie the later volume wins, and the tint belongs
     # over the part, not the part over the tray it sits in.
-    _paint(ax, [prt, dun], lambda lab: palette[lab], cell_mm, lw=0.35)
+    _paint(ax, [prt, dun], lambda lab: palette[lab], cell_mm, lw=0.3,
+           edge_rgb=D_EDGE)
 
-    # Every block (tag, name, qty, dims/spec) gets its OWN line -- stacked by
-    # its own measured height (`_lineh`), not a fraction of a shared row
-    # budget guessed to be big enough. That guess is what put "qty N" and the
-    # dims line on one baseline, and the basis tag on top of the name.
-    gap, row_gap = 5.0 * data_per_pt, 16.0 * data_per_pt
+    # Spec column. Every block (tag, name, qty+dims, notes) gets its OWN line
+    # -- stacked by its own measured height (`_lineh`), not a fraction of a
+    # shared row budget guessed to be big enough. That guess is what put
+    # "qty N" and the dims line on one baseline, and the basis tag on top of
+    # the name. qty and dimension share one baseline at two FIXED x offsets,
+    # so the numbers column up across rows (mono, ~0.6em per character).
+    gap_y, row_gap = 5.0 * data_per_pt, 16.0 * data_per_pt
+    dim_x = tx + 10 * 0.6 * 9.0 * data_per_pt   # 10 mono chars at 9pt
     row_y = y_top - 20.0
-    for (title, lines, basis), a in zip(labels, anchors):
+    for lb, a in zip(labels, anchors):
         y = row_y
         if a is not None:
             # Solid dog-leg, not a straight diagonal: a horizontal run off the
@@ -771,55 +890,73 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
             elbow = lx + 0.12 * (tx - lx)
             ax.plot([tx - 20, elbow], [y, y], lw=0.5, color=C_LEADER, zorder=4)
             ax.plot([elbow, ax_x], [y, ax_y], lw=0.5, color=C_LEADER, zorder=4)
-            ax.plot([ax_x], [ax_y], marker="o", ms=2.6, color=C_LEADER, zorder=4)
-        col, txt = TAG[basis]
-        ax.text(tx, y, txt, fontsize=7.5, weight="bold", color=col, va="top")
-        y -= _lineh(7.5) + gap
-        ax.text(tx, y, title.upper(), fontsize=10.5, weight="bold", va="top",
-                color=C_NAME)
-        y -= _lineh(10.5) + gap
-        qty = next((l for l in lines if l.startswith("qty ")), None)
-        body = [l for l in lines if l is not qty]
-        if qty is not None:
-            ax.text(tx, y, qty, fontsize=9, va="top", weight="bold",
-                    color=C_ACCENT, family="DejaVu Sans Mono")
-            y -= _lineh(9) + gap
-        ax.text(tx, y, "\n".join(body), fontsize=9, va="top",
-                color=C_MUTE, linespacing=1.55, family="DejaVu Sans Mono")
-        y -= _lineh(9, n=len(body), spacing=1.55)
+            ax.plot([ax_x], [ax_y], marker="o", ms=2.6, color=C_LEADER,
+                    zorder=4)
+        ax.text(tx, y, TAG[lb.basis][1], fontsize=7.5, weight="bold",
+                color=D_TAG[lb.basis], va="top")
+        y -= _lineh(7.5) + gap_y
+        ax.text(tx, y, lb.title.upper(), fontsize=10.5, weight="bold",
+                va="top", color=D_NAME)
+        y -= _lineh(10.5) + gap_y
+        ax.text(tx, y, lb.qty, fontsize=9, va="top", weight="bold",
+                color=D_ACCENT, family="DejaVu Sans Mono")
+        ax.text(dim_x, y, lb.dim, fontsize=9, va="top", color=D_INK,
+                family="DejaVu Sans Mono")
+        y -= _lineh(9) + gap_y
+        if lb.extras:
+            ax.text(tx, y, "\n".join(lb.extras), fontsize=8.5, va="top",
+                    color=D_MUTE, linespacing=1.5,
+                    family="DejaVu Sans Mono")
+            y -= _lineh(8.5, n=len(lb.extras), spacing=1.5)
         row_y = y - row_gap
 
     # The build height against the inner height, called out on the box itself:
-    # the drawing exists to answer "does the stack fit". The two ticks are
+    # the drawing exists to answer "does the stack fit". Measured on the
+    # UNEXPLODED box, which is where those two numbers live. The two ticks are
     # only the headroom apart -- 22mm on the TRW box -- so they share one
     # text block rather than overprinting each other.
     ticks = [_proj(np.array([0.0, inner[1], z], float))
              for z in (inner[2], bom.build_height_mm)]
     for t in ticks:
-        ax.plot([t[0] - 90, t[0]], [t[1], t[1]], lw=1.0, color=C_INK,
-                alpha=0.6, zorder=4)
+        ax.plot([t[0] - 90, t[0]], [t[1], t[1]], lw=1.0, color=D_MUTE,
+                alpha=0.8, zorder=4)
     ax.text(ticks[0][0] - 100, (ticks[0][1] + ticks[1][1]) / 2,
             "inner H %g mm\nbuild %g mm  %s"
             % (inner[2], round(bom.build_height_mm, 1),
                "FITS" if bom.fits else "DOES NOT FIT"),
             fontsize=9, ha="right", va="center", weight="bold",
             linespacing=1.5, family="DejaVu Sans Mono",
-            color=C_ACCENT if bom.fits else "#B91C1C")
+            color=D_ACCENT if bom.fits else "#F87171")
 
-    head = ("%s  -  %s insert, %d layers assembled\n"
-            "%d parts  =  %d layers x %d per layer, grid %dx%dx%d, "
-            "pitch %g/%g/%g mm"
-            % (asset_name, bom.archetype.replace("_", "-"), grid[2], count,
-               grid[2], grid[0] * grid[1], *grid, *pitch))
-    ax.text(0.0, 1.0, head, transform=ax.transAxes, fontsize=13, weight="bold",
-            va="top", color=C_INK)
+    # Header: box code, the count in large type, the pose. Offsets in POINTS
+    # off the axes corner -- the figure's aspect follows the drawing, so a
+    # transAxes fraction would slide the block around between cases.
+    def head(dx: float, dy: float, txt: str, **kw) -> None:
+        ax.annotate(txt, xy=(0.0, 1.0), xycoords=ax.transAxes,
+                    xytext=(dx, dy), textcoords="offset points", va="top",
+                    annotation_clip=False, **kw)
+
+    head(0, -2, asset_name, fontsize=12, weight="bold", color=D_MUTE,
+         family="DejaVu Sans Mono")
+    head(0, -22, "%d" % count, fontsize=40, weight="bold", color=D_INK)
+    head(86, -28, "parts per box", fontsize=11, color=D_MUTE)
+    head(86, -46, "%d layers x %d per layer  -  %s insert"
+         % (grid[2], grid[0] * grid[1], bom.archetype.replace("_", "-")),
+         fontsize=9, color=D_MUTE, family="DejaVu Sans Mono")
+    head(0, -82, "pose %g x %g x %g mm  -  pitch %g / %g / %g mm"
+         % (*extent, *pitch), fontsize=9.5, color=D_ACCENT,
+         family="DejaVu Sans Mono")
+
+    # ponytail: the ticket's "Generated from layout <run id>" footer is left
+    # out -- no run id reaches this renderer and threading one through
+    # worker.py is out of scope. The fit/caveat line below is the footer.
     foot = ("build %g of %g mm inner  -  %s        nest depth %g mm "
             "(extent H %g - pitch H %g): dunnage inside that depth is free\n%s"
             % (round(bom.build_height_mm, 1), bom.inner_h_mm,
                "fits" if bom.fits else "DOES NOT FIT",
                round(bom.nest_depth_mm, 1), extent[2], pitch[2], bom.caveat))
     ax.text(0.0, 0.0, foot, transform=ax.transAxes, fontsize=8.5, va="bottom",
-            color=C_MUTE, wrap=True, linespacing=1.6)
+            color=D_MUTE, wrap=True, linespacing=1.6)
 
     ax.set_aspect("equal")
     ax.set_axis_off()
@@ -827,11 +964,11 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     ax.set_ylim(y_lo, y_hi)             # room under the last block for the caveat
     fig.tight_layout()
     buf = BytesIO()
-    fig.savefig(buf, format="png", facecolor="white")
+    fig.savefig(buf, format="png", facecolor=D_BG)
     plt.close(fig)
-    logger.info("drew %s %s: %d components, build %g of %g mm inner",
-                asset_name, bom.archetype, len(rows),
-                round(bom.build_height_mm, 1), bom.inner_h_mm)
+    logger.info("drew %s %s: %d components, build %g of %g mm inner, "
+                "exploded %g mm per layer", asset_name, bom.archetype,
+                len(rows), round(bom.build_height_mm, 1), bom.inner_h_mm, gap)
     return buf.getvalue()
 
 
@@ -1181,6 +1318,83 @@ def _check_bar_width_follows_bom(case) -> None:
           % (got[0][0], got[0][1], got[1][0], got[1][1], W_CENTRE_BAR))
 
 
+def _check_spec_column(case) -> None:
+    """R4 item 3: every number the spec column prints IS a BOM or layout field.
+
+    The column is the drawing's contract with the BOM (hard rule 9). A
+    dimension formatted from one of this module's DRAW-ONLY constants, or a
+    qty counted off the lattice instead of read off the element, reads as
+    entirely plausible on the picture -- W_CENTRE_BAR labelled over a BOM bar
+    of another width is exactly the bug `_check_bar_width_follows_bom`
+    exists for, one level down. So the numbers are pulled back OUT of the
+    strings `explode_png` draws (`_labels`, its only text source for the
+    column) and matched against the fields they claim to come from.
+    """
+    import dataclasses
+    import re
+
+    _ref, _asset, extent, pitch, grid, inner, count, kind = case
+    bom = dunnage.bom(extent, pitch, grid, inner)
+    el = {e.name: e for e in bom.elements}
+    rows = _place(voxels=_demo_voxels(extent, CELL_MM, kind),
+                  extent_lbh=extent, pitch_lbh=pitch, grid=grid,
+                  inner_lbh=inner, bom=bom, count=count, cell_mm=CELL_MM).rows
+
+    def nums(text: str) -> list:
+        return [float(t) for t in re.findall(r"\d+(?:\.\d+)?", text)]
+
+    def fields(title: str) -> set:
+        """Every number this label is ALLOWED to print, off the BOM element or
+        the layout -- nothing else."""
+        if title == "Part":
+            return ({float(v) for v in extent} | {float(v) for v in pitch}
+                    | {float(v) for v in grid} | {float(count)})
+        e = el[title]
+        vals = {float(e.qty)} if e.qty is not None else set()
+        for seq in (e.dims_mm, e.cell_mm or (), e.matrix or ()):
+            vals |= {float(v) for v in seq if v is not None}
+        # Free text the BOM wrote itself (spec, unknown): its numbers are the
+        # element's own statement, not the drawing's.
+        for t in (e.spec or "",) + tuple(e.unknown or ()):
+            vals |= set(nums(t))
+        return vals
+
+    def stray(lb, allowed: set) -> list:
+        out = []
+        for line in [lb.qty, lb.dim] + list(lb.extras):
+            for v in nums(line):
+                if not any(abs(v - a) <= 1e-3 * max(1.0, abs(v))
+                           for a in allowed):
+                    out.append((line, v))
+        return out
+
+    labels = _labels(rows, el, extent, pitch, grid, count)
+    assert len(labels) == len(rows), (len(labels), len(rows))
+    seen = 0
+    for lb in labels:
+        assert lb.title == "Part" or lb.title in el, lb.title
+        bad = stray(lb, fields(lb.title))
+        assert not bad, ("%s: the spec column prints %s, which is no field of "
+                         "the BOM element or the layout" % (lb.title, bad))
+        seen += len(nums(lb.qty)) + len(nums(lb.dim))
+    assert seen >= 2 * len(labels), seen        # every row printed qty + dims
+
+    # Non-vacuity: move a qty in the BOM and the SAME predicate, against the
+    # original fields, has to reject the label it produces. Without this the
+    # loop above passes on a set that swallows everything.
+    bit = False
+    for name, e in el.items():
+        if e.qty is None:
+            continue
+        moved = dict(el, **{name: dataclasses.replace(e, qty=e.qty + 2)})
+        lb = next(l for l in _labels(rows, moved, extent, pitch, grid, count)
+                  if l.title == name)
+        bit = bit or bool(stray(lb, fields(name)))
+    assert bit, "a moved qty still matched: the spec-column check is decoration"
+    print("PASS  spec column is the BOM: %d labels, %d numbers, all off a BOM "
+          "element or the layout" % (len(labels), seen))
+
+
 def _check_undrawn_warns(case, catch) -> None:
     """The label-only exemption must stay NARROW: a NEW element the drawing
     has no geometry for still has to warn.
@@ -1377,6 +1591,8 @@ def _selfcheck(outdir) -> int:
     _check_count_bites(cases[0])
     _check_parts_bite(cases[0])
     _check_bar_width_follows_bom(cases[0])
+    _check_spec_column(cases[0])
+    _check_spec_column(cases[1])
     _check_undrawn_warns(cases[0], catch)
     assert not catch.msgs, catch.msgs
     logger.removeHandler(catch)

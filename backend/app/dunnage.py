@@ -83,13 +83,8 @@ MS_ROD_D_MM, MS_ROD_L_MM, MS_ROD_QTY = 8.0, 805.0, 6
 NEEDS_DECK = "needs deck"
 
 CAVEAT = (
-    "Starting design derived from the measured lattice. This is not a final "
-    "BOM: PLANNING §7 -- the tool produces the starting design, physical "
-    "trials still decide. One shipped design was revised after its second "
-    "trial: side separator 15mm -> 35mm, a slot provision replacing the "
-    "earlier hole in the top separator, no window cut in the box, and foam "
-    "densities re-specified. Elements marked 'unknown' need the proposal "
-    "deck; no number has been guessed for them."
+    "Starting design, not a final BOM: physical trials decide (PLANNING §7). "
+    "'unknown' = needs the proposal deck; nothing has been guessed."
 )
 
 

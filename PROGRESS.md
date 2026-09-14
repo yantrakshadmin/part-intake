@@ -2336,3 +2336,24 @@ Deploy note: `up -d` creates `worker-render` on the next deploy; check
 Re-solve on prod project 1 to see the Packed tab on a fresh run; ticket 3b
 (frontend text cuts, hide Manual entry, route_km), R4 exploded view v2,
 R5–R7 pose.
+
+## 2026-09-14 — Ticket 3b prose cuts (79108e4); R4 exploded view v2
+
+3b: manual entry behind a text link; draft-box message says what draft
+means (global catalogue, excluded from default rankings — Packaging has no
+project scope, flag if per-project boxes are wanted); Route (km) input
+removed (backend only echoes it); long helpers cut to one line.
+
+R4 (`insert_drawing.py` only): dark slate ground, count at 40 pt, layers
+exploded along Z by build step (half a pitch, capped at +60% box height),
+faint centre guide, leader lines to a tabular spec column. New
+`_check_spec_column` pulls every number back out of the column strings and
+asserts it is a BOM/layout field; shown to bite. GIF + packed PNG
+byte-identical to HEAD. `dunnage.CAVEAT` cut from 7 lines to one sentence
+(shared by the drawing footer, API and proposal PDF). Height now varies
+(wheel 1642 px, bar 1474 px); the hero letterboxes at 480 px.
+Follow-ups: proposal PDF pastes the dark PNG on a white page — needs a
+panel; run-id footer needs worker.py to pass the id; detail inset skipped.
+Next: R5–R7 pose (hide near-duplicate candidates, drop "(most stable)",
+support-polygon stability, 45° ladder); #1 proposal takes run_id; #4/#5
+bounded async, /api/health; per-project custom boxes?
