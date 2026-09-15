@@ -282,3 +282,126 @@ PNG background is `#FFFFFF`/`#F8FAFC`, `_check_spec_column` still passes,
 GIF + packed PNG byte-identical to HEAD, proposal PDF page has no dark
 panel. Design note: dark was our taste, not the users' — light ground is
 the rule from here for every rendered drawing.
+
+**F4 — Packing order as a live 3D animation, not (only) a GIF.** Rahul saw
+the sample (real TRW wheel GLB in its resting pose, 48 parts dropping in
+layer by layer, seekable) next to the fixed GIF and picked the animation.
+Two tickets, one JSON contract between them:
+
+- *Backend (geometry).* `insert_drawing` emits a `sequence` off the SAME
+  `_place` call `build_gif` replays — never a second placement expression
+  (hard rule 9). Shape, all mm, Z-up, box inner corner at (0,0,0):
+  `{inner:[L,B,H], pose_matrix:4x4 (the layout's candidate rotation_matrix),
+  part_extent:[l,b,h], steps:[{i, kind:"dunnage"|"parts", title, text, meta,
+  cuboids:[{name, colour, alpha, origin:[x,y,z], size:[l,b,h]}],
+  parts:[{origin:[x,y,z]}]}]}`. Step index, order and caption strings are
+  the GIF's own (`_dun_caption`), so the two can never disagree. A part
+  `origin` is the min corner of the posed part's AABB — the convention
+  `_place` already uses for `ox + a*pitch`. Declared on `LayoutOut` and
+  `BoxDesignOut` as `sequence: Optional[BuildSequenceOut]`, filled in
+  `worker._render_drawings` next to `gif_url`, stored in the job result
+  (no new column). Acceptance: `_selfcheck` asserts per-element cuboid
+  count == BOM qty, parts == `count`, and the set of step indices equals the
+  GIF's; TRW over real HTTP shows 8 parts steps × 6 origins and a 4×4
+  `pose_matrix`; ground truth 40/48.
+- *Frontend.* `PackAnimation.jsx` (Three.js, already a dep): loads
+  `part.glb_url` through `glbModel` (`MM_PER_M`, `candidateMatrix` — the
+  scale check must still pass), one `InstancedMesh` per GLB primitive,
+  aligns the posed model's AABB min corner to each `origin`, replays
+  `sequence.steps` on a deterministic time-driven timeline (Play/Pause,
+  seek, 0.5/1/2×), caption card with the step's `title`/`text`/`meta`.
+  Shown as an "Animation" view in the same `views` list the hero and
+  Insert BOM use, so it opens in the F2 modal too; only offered when
+  `layout.sequence && part.glb_url`. GIF stays as the fallback and the
+  proposal PDF's still. Acceptance (tester, headless Chrome): view tab
+  present on a done TRW run; canvas mounted; seeking to the end reads
+  "48 of 48 parts placed"; 0 console errors; `node frontend/src/lib/scale.check.mjs` passes.
+  Known gap (geometry review 2026-09-15): the sequence ships dunnage
+  *solids* only; the pocket-tray GIF also punches the pocket *voids*
+  through the tray so parts show. The animation relies on the shipped
+  `alpha` (tray 0.30) instead. Add a `voids` list per cuboid if a tray ever
+  needs to read as pockets rather than a translucent slab.
+
+**F5 — Solve feels slow.** Measured 2026-09-15 (backend agent, cProfile +
+real HTTP on 127.0.0.1, TRW wheel): upload→extraction done 6.4 s; solve
+POST→`status=done` (count on screen) 6.2 s; →`render_status=done` 32 s.
+The number is fast; the ~26 s tail is pictures. Function-level breakdown:
+
+| stage | Mubea | TRW | note |
+|---|---|---|---|
+| engine.solve | 8.0 s | 2.4 s | 95–98 % is `nesting.occupancy` voxelisation (trimesh `subdivide_to_size` → `unique_rows`/argsort); already deduped per distinct pose |
+| explode_png × 6 | 6.1 s | 6.8 s | top-5 catalogue (frontend hardcodes `topN: 5`) + custom |
+| build_gif × 2 | 18.6 s | 18.5 s | catalogue[0] + custom, 0.33–0.51 s per matplotlib frame |
+| truck fit, ranking | <0.05 s | <0.05 s | never the bottleneck |
+
+Levers, in order (none touches a count; ground truth 40/48 must hold):
+- *S1 — GIF only when it is the only moving picture.* Once F4 ships, a
+  part with a GLB gets the live animation; the GIF is then a fallback for
+  manual-source parts (no GLB) and nothing else. Render `packed_url`
+  straight from the hold frame (`frame(None)`, one matplotlib pass) and
+  build the GIF only when `part.glb_url` is null. Saves ~18 s per solve on
+  every CAD part. Acceptance: TRW `render_status=done` in <14 s over HTTP;
+  packed PNG byte-identical to before; Mubea/TRW self-check still builds
+  and asserts the GIF (the GIF code path stays tested).
+- *S2 — Hero first, the rest progressively.* `_render_drawings` renders
+  6 layouts serially and publishes all at once. Render catalogue[0] +
+  packed first and write the result so the hero appears, then the rest;
+  ranks 3–5 PNGs are for cards nobody opens — render on demand when the
+  card is opened, or last. Acceptance: hero drawing visible within ~3 s of
+  `status=done`; no count changes.
+- *S3 — Parallel renders.* The 6 `render()` calls are pure per-layout
+  functions; a small process pool (or `worker-render` concurrency >1 in
+  compose) runs them together. Acceptance: total render wall clock ≤ the
+  slowest single layout + 1 s.
+- *Deferred (geometry ticket, needs a failing test first):* 46 % of
+  Mubea's solve is `numpy.argsort` inside trimesh's voxeliser; a faster
+  occupancy backend is real but touches `nesting.occupancy`. `VOXEL_MM`
+  and `max_candidates` are NOT knobs — the 40/48 depend on them.
+- *Comments to correct while there:* `nesting.py` attributes the ~2.4 s
+  per pose to `min_pitch`; the profile says it is `occupancy`.
+  `catalogue.py` says 15 seeded rows; `seed_data.PACKAGING` has 17.
+
+**Gemini UX audit, 2026-09-15** (`tools/ux_audit.py`, gemini-pro-latest, 10
+screens of the non-NDA sample part; report `docs/ux-audit-2026-09-15.md`).
+Triage — accepted where the screenshot backs it, rejected where it does not:
+
+- *Accepted → F1 (shape).* The first viewport at 1440×900 is the hero and
+  its right-hand details grid (calculated count, upper bound, pattern,
+  layers, pitch, clearance, limited-by, weight cap, WHY); the ranked cards
+  start below the fold. F1's concrete shape is now: hero = count + box +
+  pose + viewer only; the grid's rows move into Box Packing Analysis (they
+  are already there, minus "geometric upper bound" — add it, drop the
+  grid); ranked cards sit directly under the hero. Acceptance unchanged.
+- *Accepted → F1.* "↻ Re-run with these parameters" sits at the very
+  bottom of the Packaging scroll, ~1500 px from the inputs it applies.
+  Move it into the left rail under "+ Custom box"; the rail's helper text
+  then says what the button does. S.
+- *Accepted → F1.* "Boxes to rank" collapses to "N selected", hiding which.
+  Show the codes joined with ", " up to four, "N selected" beyond. S.
+- *Accepted, done.* Load calculator said "1 boxes". Fixed in
+  `LoadCalculator.jsx`.
+- *Accepted → F6 (below).* Top-level Truck tab shows the Packaging hero.
+- *Rejected: "inputs are massive textareas" (03-overview).* They are
+  40 px single-line inputs; wide because the card is a two-column grid.
+- *Rejected: "recommended run lacks a badge" (07-runs).* The badge exists
+  (`ProjectPage.jsx` renders `recommended` in place of the button) — the
+  audit run simply had not marked one.
+- *Rejected: "remove the Truck load sub-tab".* The sub-tab is per selected
+  box card, so a user can compare truck fit across boxes without leaving
+  the card; the top-level tab is the hero box only. Keep both, make the
+  top-level one correct (F6).
+- *Rejected: duplicate "Generate proposal" inside the empty state.* The
+  button is on the same screen, top right, 130 px away.
+
+**F6 — Truck tab renders the Packaging screen.** `ProjectPage.jsx`
+renders the same `PackagingTruckTab` for both tabs and only steers the
+sub-tab (`resultTab='truck'`) inside `LayoutDetail`, which is below the
+fold — so the Truck tab's first viewport is byte-identical to Packaging's
+(screenshot 06-truck). Ticket: when the project tab is Truck, the stage
+opens with the truck plan: `TruckLoadIso` of the hero box + chips (boxes
+loaded, parts per truck, vehicle, tare), the hero packing image is not
+shown, ranked cards stay below (they carry truck_boxes already). No
+re-solve, no re-mount of `PackingResults` (the F4 animation lives there).
+Acceptance: at 1440×900 the Truck tab's first viewport shows the truck
+drawing and no "PACKAGING FIT" heading; switching Packaging ↔ Truck does
+not refetch `/solve-jobs`. S.

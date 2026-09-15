@@ -2436,3 +2436,59 @@ Follow-ups: GIF is rendered at 736×528 (80 dpi) and is upscaled 1.5× in
 the modal — raise dpi if it reads blurry (size gate is 1.5 MB, bar is at
 1.17). Modal does not return focus to the trigger on close (pre-existing).
 Next: F1 one-question-per-screen (ticket per section); then yesterday's list.
+
+## 2026-09-15 — F4 live packing animation, F5 profile, Gemini UX audit
+
+Rahul picked the live Three.js animation over the GIF from a side-by-side
+sample ("animation looks sexy"), so F4 shipped this session; he also said
+solving "takes too long" (→ F5, measured, not yet built) and asked for a
+Gemini-driven UI/UX audit with honest triage.
+
+- **F4 backend** (`insert_drawing.py`, `schemas.py`, `worker.py`): `_place`
+  records the per-step dunnage solids and part origins it draws, so the JSON
+  `sequence` and the GIF come off ONE placement call (hard rule 9). Captions
+  moved into `_captions()`, shared by `build_gif.frame` and `_sequence`;
+  GIF/PNG bytes are hash-identical to HEAD (geometry reviewer, three
+  fixtures + both explodes). `build_gif` returns `(gif, packed, sequence)`
+  and takes the pose 4×4; `run_render` stamps `layout["sequence"]` and
+  `custom["sequence"]`; response models declare every field. Self-check
+  `_check_sequence` now asserts the origins ARE the engine lattice (a
+  cell-index or metre implementation fails — proven), parts per step ==
+  grid, and round-trips the dict through `BuildSequenceOut` (dropping a
+  schema field fails — proven).
+- **F4 frontend** (`PackAnimation.jsx`, `PackingRecommendation.jsx`,
+  `index.css`): GLTFLoader + `MM_PER_M` (scale.check now expects exactly 3
+  sites), pose matrix applied alone inside one Z-up→Y-up `world` group,
+  InstancedMesh per GLB primitive, seekable timeline, caption card,
+  Play/Pause/speed. Default hero view when `sequence && glb_url`; "▶
+  Animate" in the Insert BOM; opens in the F2 modal. Tester (real TRW run
+  over HTTP, CDP): 17 steps / 48 origins / 4×4 pose on the wire, canvas
+  mounted, "48 of 48 parts placed" at seek end, 0 console errors. Tester
+  bugs fixed: camera aimed at +By/2 but the world flip puts the box at
+  −By/2 (a third of the box was off-frame — re-shot centred), and the
+  animation view had no click-to-zoom. Reviewer fixes: no render while
+  paused, pose_matrix guard, modal sizes the canvas.
+- **F5 — solve speed, measured** (PLANNING §10): count in ~6 s; the ~26 s
+  tail is 2 GIFs (18.5 s) + 6 explode PNGs (6–7 s), rendered serially.
+  Ticket lists S1 (GIF only when no GLB), S2 (hero first), S3 (parallel
+  renders). Not started — same files as F4, do next.
+- **`tools/ux_audit.py`**: headless Chrome captures 10 routes, sends them
+  with the brief to `gemini-pro-latest`, writes `docs/ux-audit-<date>.md`.
+  Run only on the non-NDA sample part. Triage in PLANNING §10: accepted
+  hero hierarchy / Re-run placement / multi-select label (→ F1 shape),
+  "1 boxes" (fixed), Truck tab shows the Packaging hero (→ F6, confirmed
+  from the screenshot); rejected textarea, badge, sub-tab-removal and
+  duplicate-button claims with reasons.
+- **Dev landmine fixed**: `render_run` is routed to the `render` queue, and
+  the documented `celery -A app.worker worker` command only consumed
+  `celery`, so dev renders sat at `render_status=pending` forever. Worker
+  now declares both queues; prod's `-Q render` still narrows.
+- **Process**: five agents ran in parallel (tester ×2, reviewer ×3). Two
+  early agents collided on redis db 9 / port 8010 — every parallel agent
+  now gets its own port, redis db, celery `-n` and sqlite (memory note).
+- Ground truth on the final tree: Mubea 40 / PLS12801, TRW 48 / PLS1280,
+  `test_solve_api` all checks passed, insert-drawing self-check passed.
+
+Open: F5 S1–S3; F1 (shaped); F6; GIF caption card overlaps the box top
+edge in frame 1; `voids` not in the sequence (tray reads as a translucent
+slab, alpha 0.30).
