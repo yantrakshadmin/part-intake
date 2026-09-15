@@ -249,5 +249,36 @@ already exists and stays usable throughout.
 
 ## 10. Still open
 
-- Nothing blocking. DOMAIN.md (clearances, wall thicknesses, foam selection rules)
-  still needs to be written by the packaging engineers — no agent can invent it.
+- DOMAIN.md (clearances, wall thicknesses, foam selection rules) still needs
+  to be written by the packaging engineers — no agent can invent it.
+
+### User feedback, 2026-09-15 (three tickets — all frontend/drawing, none engine)
+
+**F1 — Too much on one screen; the user loses track of what they are doing.**
+The Packaging screen stacks hero + ranked cards + layout detail (layers,
+box packing analysis, insert BOM, dunnage) + truck + "Why this design" in one
+scroll. Ticket: one primary question per screen. Hero + ranked comparison is
+the screen; everything below the cards moves behind a tab or a click on a
+card ("Details"), collapsed by default. Acceptance: on a done run at
+1440×900 the first viewport shows hero image, count, box name and the ranked
+cards, and nothing else; nothing the backend computed is removed, only
+hidden until asked for.
+
+**F2 — Exploded view / GIF cannot be zoomed; not readable at hero size.**
+Hero `.modal-img` is capped at 480 px and only the Insert BOM button opens
+the modal. Ticket: clicking any drawing image (hero, packed, exploded,
+packing-order GIF, insert drawing) opens the existing `ImageStage` modal;
+the modal fits the image to the viewport (≥90vh) and lets the user zoom
+(native `<img>` in an `overflow:auto` card with a fit/1:1 toggle — no
+pan-zoom library). Acceptance: click hero → modal → image is at least
+viewport height; Esc closes; GIF keeps animating in the modal.
+
+**F3 — Dark ground on the exploded view makes users uncomfortable.**
+the R4 dark ground (slate-900). Ticket: revert the exploded PNG to
+the light card the GIF and packed PNG use (`D_*` palette collapses back to
+the shared constants; dunnage alpha back to the white-ground value), and
+drop the dark panel `proposal.py` pastes behind it. Acceptance: exploded
+PNG background is `#FFFFFF`/`#F8FAFC`, `_check_spec_column` still passes,
+GIF + packed PNG byte-identical to HEAD, proposal PDF page has no dark
+panel. Design note: dark was our taste, not the users' — light ground is
+the rule from here for every rendered drawing.

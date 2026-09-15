@@ -2401,3 +2401,38 @@ table has no project scope (draft boxes are global); proposal default path
 run; stray `sample.igs` part on prod; R7 45° ladder; #4/#5 bounded async +
 /api/health; contact classification (face/line/point) for the stability
 score. Rahul's "4 console errors" did not reproduce on the new bundle.
+
+## 2026-09-15 — user feedback logged (no code)
+
+Rahul brought three pieces of user feedback; written up as tickets F1–F3 in
+PLANNING.md §10: (F1) too much on one screen, (F2) exploded view / GIF not
+zoomable and unreadable at hero size — open the existing ImageStage modal on
+click, fit to viewport, (F3) dark ground on the exploded view is
+uncomfortable — revert to the light card (undoes the R4 dark ground and the
+proposal.py dark panel). F3 is the smallest and should go first; F2 next;
+F1 is the redesign and wants a ticket per section.
+
+Later the same day: ground_truth.py 40/48 exit 0 → pushed 4297c92.
+Then shipped F3 + F2 + a GIF bug Rahul spotted:
+- GIF drift: `build_gif` used `fig.tight_layout()`, which sized the axes to
+  each frame's caption, so the box slid ~30 px between a dunnage step and a
+  parts step. Now `subplots_adjust(0,0,1,1)`; `_selfcheck` asserts the box's
+  leftmost/topmost dark pixel is identical across frames (proved to bite on
+  X by reintroducing tight_layout; Y added after review showed an X-only
+  check passed a 16 px ylim jitter). Side effect: GIF/packed PNG bytes
+  changed vs HEAD, so F3's "byte-identical" clause was checked against the
+  post-fix render, not HEAD.
+- F3: `D_*` dark palette deleted, explode_png back on white; `_paint`/
+  `_draw_asset` lost their R4 colour params; proposal.py dark panel gone.
+  Centre guide on C_LEADER (C_BASE is near-black on white). All corners of
+  all four demo PNGs (255,255,255). Ground truth 40/48 on the final tree.
+- F2: hero image is role=button/zoom-in, opens the existing ExplodeModal on
+  the clicked view; modal generalised to `views`; Fit / 1:1 toggle; card
+  96vw×96vh. Two CSS layers bit: the modal is nested in `.hero-image`, so
+  the 480 px thumbnail cap won by specificity (now `.hero-image >`), and
+  max-* never grows a 736×528 packed PNG/GIF (now `height: 88vh` in Fit).
+  Tester in headless Chrome at 1440×900: all 7 checks PASS, 0 console errors.
+Follow-ups: GIF is rendered at 736×528 (80 dpi) and is upscaled 1.5× in
+the modal — raise dpi if it reads blurry (size gate is 1.5 MB, bar is at
+1.17). Modal does not return focus to the trigger on close (pre-existing).
+Next: F1 one-question-per-screen (ticket per section); then yesterday's list.
