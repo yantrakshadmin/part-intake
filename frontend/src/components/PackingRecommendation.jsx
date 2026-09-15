@@ -419,7 +419,11 @@ export default function PackingResults({ part, params, packaging, vehicles, proj
   return (
     <div className="card form-card result-card">
       <h2>
-        Packaging fit — {part.part_number}
+        {/* F6: the top-level Truck project tab reuses this same mounted
+            PackingResults (never a second one — 40-50s solve) with `tab`
+            steered to 'truck'; only the heading and the stage body below
+            change for it. */}
+        {tab === 'truck' ? 'Truck load' : 'Packaging fit'} — {part.part_number}
         <span className="muted" style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>
           {' '}({part.length_mm} × {part.breadth_mm} × {part.height_mm} mm, {part.weight_kg} kg
           {' '}· insert: {type})
@@ -517,6 +521,11 @@ function ResultView({ result, part, type, packaging, vehicles, params, run, sele
   // manual click on Layers/Insert/Truck inside LayoutDetail below isn't
   // fought back to controlledTab on every render.
   useEffect(() => { if (controlledTab) setTab(controlledTab) }, [controlledTab])
+  // F6: the Truck project tab opens on the truck plan for the hero box
+  // instead of the packing hero — same `truck`/`truckBox` LayoutDetail's own
+  // "Truck load" sub-tab renders below, reused via <TruckSection>, never a
+  // second truck-fit expression (hard rule 9).
+  const isTruckTab = controlledTab === 'truck'
 
   return (
     <>
@@ -528,11 +537,30 @@ function ResultView({ result, part, type, packaging, vehicles, params, run, sele
         </div>
       ) : (
         <>
-          {heroLayout && (
-            <HeroSolution layout={heroLayout} part={part} run={run}
-              label={heroLayout.asset_name === CUSTOM_KEY ? 'Custom design' : undefined}
-              beatsCatalogue={beatsCatalogue}
-              renderStatus={result.render_status ?? 'done'} renderError={result.render_error} />
+          {/* HeroSolution (and the PackAnimation it may mount) stays in the
+              tree even while the Truck tab hides it — display:none, never a
+              conditional unmount — so switching Packaging <-> Truck never
+              remounts the animation or restarts its timeline. */}
+          <div style={isTruckTab ? { display: 'none' } : undefined}>
+            {heroLayout && (
+              <HeroSolution layout={heroLayout} part={part} run={run}
+                label={heroLayout.asset_name === CUSTOM_KEY ? 'Custom design' : undefined}
+                beatsCatalogue={beatsCatalogue}
+                renderStatus={result.render_status ?? 'done'} renderError={result.render_error} />
+            )}
+          </div>
+
+          {isTruckTab && (
+            truck ? (
+              <TruckSection truck={truck} vehicles={vehicles} box={truckBox}
+                dropdownVehicleId={params.vehicleId} />
+            ) : (
+              <div className="empty-stage" style={{ padding: '24px 0' }}>
+                <div className="es-icon">▣</div>
+                <h2>No truck fit for this run</h2>
+                <p>See the note above for why, or add a tare weight and re-run.</p>
+              </div>
+            )
           )}
 
           <h3 className="ranked-heading"><span className="h-icon">▦</span> Ranked box comparison</h3>
@@ -555,7 +583,8 @@ function ResultView({ result, part, type, packaging, vehicles, params, run, sele
             <LayoutDetail layout={selected} box={selectedBox}
               part={part} type={type} tab={tab} onTabChange={setTab}
               truck={truck} truckBox={truckBox} vehicles={vehicles}
-              dropdownVehicleId={params.vehicleId} />
+              dropdownVehicleId={params.vehicleId}
+              hideTruckTab={isTruckTab} />
           )}
 
           {(result.poses_searched?.length > 0 || result.clearance_mm != null) && (
@@ -839,7 +868,8 @@ function LayoutCard({ layout, rank, box, selected, onClick, label, beats }) {
  * tabbed — chips (the selected box's headline numbers) stay visible across
  * every tab so switching tabs never loses the "what am I looking at" answer.
  */
-function LayoutDetail({ layout, box, part, type, tab, onTabChange, truck, truckBox, vehicles, dropdownVehicleId }) {
+function LayoutDetail({ layout, box, part, type, tab, onTabChange, truck, truckBox, vehicles, dropdownVehicleId,
+  hideTruckTab }) {
   const fit = useMemo(() => layoutToFit(layout), [layout])
   // Clearance/wall/foam are drawing-only (D4): they size the insert tray and
   // never change a count, so they live here — next to the drawing they
@@ -859,10 +889,15 @@ function LayoutDetail({ layout, box, part, type, tab, onTabChange, truck, truckB
   const stackHeight = layout.extent_lbh[2] + (layout.grid[2] - 1) * layout.pitch_lbh[2]
   const dummies = fit.layerConfig.reduce((s, l) => s + (l.count - l.filled), 0)
 
+  // F6: while the top-level Truck project tab is open, the hero above
+  // already shows this same truck plan — the sub-tab would only repeat it
+  // for the same box, so it's dropped here rather than shown twice; picking
+  // any other card still doesn't get its own per-box "Truck load" (truck is
+  // one whole-run plan, not per-selected-box — see boxForTruckAsset above).
   const tabs = [
     ['layers', 'Layers'],
     ['insert', 'Insert design'],
-    ...(truck ? [['truck', 'Truck load']] : []),
+    ...(truck && !hideTruckTab ? [['truck', 'Truck load']] : []),
   ]
   const activeTab = tabs.some(([k]) => k === tab) ? tab : 'layers'
 

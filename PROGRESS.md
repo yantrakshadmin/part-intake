@@ -2489,6 +2489,25 @@ Gemini-driven UI/UX audit with honest triage.
 - Ground truth on the final tree: Mubea 40 / PLS12801, TRW 48 / PLS1280,
   `test_solve_api` all checks passed, insert-drawing self-check passed.
 
-Open: F5 S1–S3; F1 (shaped); F6; GIF caption card overlaps the box top
-edge in frame 1; `voids` not in the sequence (tray reads as a translucent
-slab, alpha 0.30).
+- **F5 S1 shipped** (commit "backend: worker skips the animated GIF
+  frames"): render tail 26 s → ~1 s on TRW over HTTP (tester: POST →
+  render_status=done 9–12 s including the solve). Simpler than ticketed:
+  the "GIF for no-GLB parts" branch was unreachable — `run_render` loads
+  the mesh FROM the GLB, so a part without one cannot render at all (a
+  test that nulled `glb_path` proved it). The worker always passes
+  `frames=False`; the GIF path lives on in the self-check. S2/S3 are
+  moot at a 1 s tail — leave them unless prod says otherwise.
+- **F1 shipped** (commit "ui: one question per screen on Packaging"):
+  hero grid gone (rows live in Box Packing Analysis, which now follows
+  the hero box until a card is clicked — reviewer caught the
+  custom-beats-catalogue mismatch), inline `why` / `N notes`
+  disclosures, Re-run in the rail, codes in the boxes-to-rank summary,
+  ranked heading at the 1440×900 fold with the viewer at 320 px. Lesson:
+  the first pass hit the fold by shrinking the animation to 200 px — the
+  hero viewer is the product, reclaim space from chrome, never from it.
+- F6 (Truck tab shows the truck plan first) in progress at session end.
+
+Open: F6 (running); GIF caption card overlaps the box top edge in frame 1
+(GIF now only in the self-check, so low priority); `voids` not in the
+sequence (tray reads as a translucent slab, alpha 0.30); the animation's
+"Empty box" caption card touches the box top edge at t=0 (cosmetic).

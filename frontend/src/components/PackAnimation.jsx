@@ -232,6 +232,7 @@ export default function PackAnimation({ sequence, glbUrl, height = 420, onStageC
       } else if (!dirty) {
         return // paused: render only when something changed (GLB arrived, resize)
       }
+      if (!mount.offsetParent) { dirty = true; return } // hidden (Truck tab): keep time, skip GPU work
       dirty = false
       render(tCur)
       setSeekPct(clamp01(tCur / total) * 1000)
