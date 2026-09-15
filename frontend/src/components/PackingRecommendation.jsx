@@ -581,10 +581,14 @@ function WarningsDisclosure({ warnings }) {
  *  Insert BOM modal (moved out of what used to be ExplodeModal's own
  *  toggle+img markup — one renderer, not two). `views` is whichever of
  *  packed/exploded/packing-order actually exist; a single view renders with
- *  no toggle at all. */
-function ImageStage({ views, view, onViewChange }) {
+ *  no toggle at all. `onImageClick`, when given, makes the image itself a
+ *  zoom-in trigger (F2: click any drawing to open it full-size) — the modal
+ *  reuses this same component without it, since its image is already the
+ *  full-size view. */
+function ImageStage({ views, view, onViewChange, onImageClick, imgClassName = '' }) {
   if (views.length === 0) return null
   const active = views.find((v) => v.key === view) || views[0]
+  const cls = `modal-img${onImageClick ? ' zoomable' : ''}${imgClassName ? ` ${imgClassName}` : ''}`
   return (
     <>
       {views.length > 1 && (
@@ -595,7 +599,16 @@ function ImageStage({ views, view, onViewChange }) {
           ))}
         </div>
       )}
-      <img src={active.url} alt={active.label} className="modal-img" />
+      {onImageClick ? (
+        <img src={active.url} alt={active.label} className={cls}
+          role="button" tabIndex={0}
+          onClick={() => onImageClick(active.key)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onImageClick(active.key) }
+          }} />
+      ) : (
+        <img src={active.url} alt={active.label} className={cls} />
+      )}
     </>
   )
 }
@@ -617,6 +630,10 @@ function SolutionImage({ layout, renderStatus = 'done', renderError }) {
   const defaultView = hasDrawing(layout.packed_url) ? 'packed' : 'exploded'
   const [view, setView] = useState(defaultView)
   useEffect(() => setView(defaultView), [layout?.asset_name, defaultView])
+  // F2: at hero size the drawing/GIF is unreadable — click it to reopen the
+  // same modal used elsewhere (below), starting on whichever view was
+  // showing when clicked.
+  const [zoomOpen, setZoomOpen] = useState(false)
 
   // Ticket 2b: the count/certificate render before the pictures do — while
   // render_status is "pending" there's nothing to gate on but that flag
@@ -626,7 +643,13 @@ function SolutionImage({ layout, renderStatus = 'done', renderError }) {
   return (
     <div className="hero-image">
       {views.length > 0 ? (
-        <ImageStage views={views} view={view} onViewChange={setView} />
+        <>
+          <ImageStage views={views} view={view} onViewChange={setView}
+            onImageClick={() => setZoomOpen(true)} />
+          {zoomOpen && (
+            <ExplodeModal views={views} initial={view} onClose={() => setZoomOpen(false)} />
+          )}
+        </>
       ) : renderStatus === 'pending' ? (
         <p className="muted hero-image-wait">Drawing the packed box… (about a minute)</p>
       ) : renderStatus === 'failed' ? (
@@ -1041,6 +1064,13 @@ function DunnageBom({ dunnage, drawingUrl, gifUrl }) {
   const budget = heightBudget(dunnage)
   const showExplode = hasDrawing(drawingUrl)
   const showPack = hasDrawing(gifUrl)
+  // Same order as before this ticket (gif first) — only the modal's own
+  // views list moved up here so ExplodeModal can be shared with the hero
+  // image below without knowing about drawingUrl/gifUrl at all.
+  const views = [
+    ...(showPack ? [{ key: 'gif', label: 'Packing sequence', url: gifUrl }] : []),
+    ...(showExplode ? [{ key: 'png', label: 'Exploded view', url: drawingUrl }] : []),
+  ]
 
   return (
     <div className="detail-block dunnage-block">
@@ -1097,7 +1127,7 @@ function DunnageBom({ dunnage, drawingUrl, gifUrl }) {
       {dunnage.caveat && <p className="muted" style={{ marginTop: 10 }}>{dunnage.caveat}</p>}
 
       {modalView && (
-        <ExplodeModal drawingUrl={drawingUrl} gifUrl={gifUrl} initial={modalView}
+        <ExplodeModal views={views} initial={modalView}
           onClose={() => setModalView(null)} />
       )}
     </div>
@@ -1105,18 +1135,15 @@ function DunnageBom({ dunnage, drawingUrl, gifUrl }) {
 }
 
 /** Click-outside and Esc close, focus starts on the close button. No new
- *  dependency — CLAUDE.md keeps frontend deps at react + three. `initial`
- *  picks which image opens (the button clicked, 'png' or 'gif'); the toggle
- *  only appears when both exist — one image never needs a choice. */
-function ExplodeModal({ drawingUrl, gifUrl, initial, onClose }) {
+ *  dependency — CLAUDE.md keeps frontend deps at react + three; no pan-zoom
+ *  library, just a Fit/1:1 plain-state toggle (F2). `views` is whatever list
+ *  the caller already built (hero packed/exploded/gif, or the insert BOM's
+ *  gif/png) — this modal is the one shared popup for every drawing image,
+ *  not a second one. `initial` opens on the view that was clicked. */
+function ExplodeModal({ views, initial, onClose }) {
   const closeRef = useRef(null)
-  const views = useMemo(() => {
-    const list = []
-    if (hasDrawing(gifUrl)) list.push({ key: 'gif', label: 'Packing sequence', url: gifUrl })
-    if (hasDrawing(drawingUrl)) list.push({ key: 'png', label: 'Exploded view', url: drawingUrl })
-    return list
-  }, [drawingUrl, gifUrl])
   const [view, setView] = useState(initial)
+  const [zoom, setZoom] = useState('fit') // 'fit' | 'actual' — plain state, no pan-zoom lib
 
   useEffect(() => {
     closeRef.current?.focus()
@@ -1131,11 +1158,19 @@ function ExplodeModal({ drawingUrl, gifUrl, initial, onClose }) {
       <div className="modal-card" role="dialog" aria-modal="true" aria-label="Insert view">
         <div className="modal-head">
           <span>Insert view</span>
-          <button ref={closeRef} className="btn-ghost" onClick={onClose} aria-label="Close">✕</button>
+          <div className="modal-head-actions">
+            <button className="btn-ghost" onClick={() => setZoom((z) => (z === 'fit' ? 'actual' : 'fit'))}>
+              {zoom === 'fit' ? '1:1' : 'Fit'}
+            </button>
+            <button ref={closeRef} className="btn-ghost" onClick={onClose} aria-label="Close">✕</button>
+          </div>
         </div>
         {/* Toggle + image are the same ImageStage the hero solution image
-            uses (moved, not duplicated — see SolutionImage above). */}
-        <ImageStage views={views} view={view} onViewChange={setView} />
+            uses (moved, not duplicated — see SolutionImage above). At 1:1
+            the card itself scrolls (overflow: auto, index.css) instead of
+            the image shrinking to fit. */}
+        <ImageStage views={views} view={view} onViewChange={setView}
+          imgClassName={zoom === 'actual' ? 'actual' : ''} />
       </div>
     </div>
   )

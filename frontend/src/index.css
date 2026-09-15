@@ -657,7 +657,7 @@ body {
   gap: 10px;
 }
 
-.hero-image .modal-img { max-height: 480px; width: 100%; object-fit: contain; }
+.hero-image > .modal-img { max-height: 480px; width: 100%; object-fit: contain; }
 
 /* Ticket 2b: the "drawing the packed box" / "could not be rendered" text
    sits where the .modal-img above lands once it arrives — a fixed height
@@ -1066,8 +1066,8 @@ body {
   background: var(--surface);
   border-radius: var(--radius);
   box-shadow: var(--shadow-md);
-  max-width: min(90vw, 1100px);
-  max-height: 90vh;
+  max-width: 96vw;
+  max-height: 96vh;
   overflow: auto;
   padding: 16px;
 }
@@ -1079,7 +1079,17 @@ body {
   margin-bottom: 10px;
   font-weight: 600;
 }
-.modal-img { display: block; max-width: 100%; height: auto; }
+.modal-head-actions { display: flex; align-items: center; gap: 8px; }
+.modal-img { display: block; max-width: 100%; height: auto; max-height: 88vh; object-fit: contain; margin: 0 auto; }
+/* Fit mode fills the viewport height even for images smaller than it (the
+   packed PNG / GIF are 736x528 natively; max-* only ever shrinks). Scoped
+   to the modal so the hero thumbnail keeps its 480 px cap. */
+.modal-card .modal-img:not(.actual) { height: 88vh; width: auto; }
+/* 1:1 (F2 Fit/1:1 toggle) — natural pixel size, .modal-card's own
+   overflow: auto scrolls to it instead of the image shrinking to fit. */
+.modal-img.actual { max-width: none; max-height: none; width: auto; }
+.modal-img.zoomable { cursor: zoom-in; }
+.modal-img.zoomable:hover { opacity: 0.92; }
 
 /* packing-sequence / exploded-view toggle inside the modal head (F-GIF) */
 .view-toggle {
