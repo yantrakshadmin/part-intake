@@ -133,7 +133,11 @@ cd backend && python tests/test_geometry.py path/to/part.stp
 
 ## UI direction
 
-Data-Dense Dashboard. Fira Sans body / Fira Code for numbers and IDs.
+One picture, one list, no prose (benchmark: Pack Studio, PLANNING §10
+F13–F16). A large 3D view of the packed box from the real mesh, cardboard on
+white; a two-column key/value list beside it; candidate cards with three
+numbers; the binding constraint as one sentence. No chips, badges, captions
+or footnotes. Fira Sans body / Fira Code for numbers and IDs.
 `#1E40AF` primary, `#D97706` accent, `#F8FAFC` ground. 8px spacing rhythm,
 tabular figures in every data column. The ranked-solution comparison is the
 core screen — this is an engineering instrument, not a generic admin panel.

@@ -230,9 +230,14 @@ box → pallet → truck.
 
 **Phase 4 — Proposal export.** BOM + drawings + load plan.
 
-**Phase 5 — UI.** Evolve the existing shell. Design system: Data-Dense Dashboard,
-Fira Sans / Fira Code, `#1E40AF` primary with `#D97706` accent, dense 8px rhythm.
-Ranked-solution comparison is the core screen. Not a generic dashboard.
+**Phase 5 — UI.** Evolve the existing shell. Direction (revised 2026-09-15
+after the Pack Studio benchmark, §10 F13–F16): **one picture, one list, no
+prose.** A large 3D view of the packed box rendered from the real mesh in
+cardboard on white; beside it a two-column key/value list; the ranked
+candidates as cards with three numbers each; the binding constraint as one
+sentence. No stat chips, badges, captions or footnotes. Fira Sans / Fira
+Code, `#1E40AF` primary with `#D97706` accent, 8px rhythm stay. The earlier
+"Data-Dense Dashboard" wording is withdrawn — density was the complaint.
 
 Phase 5 is last only because the engine defines what there is to show. The shell
 already exists and stays usable throughout.
