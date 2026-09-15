@@ -482,6 +482,52 @@ picked this and see the bug" — the sweep exists so he never has to. Follow-
 up: `worker.rotation_for` and the sweep both compose `IN_PLANE_TURN @
 rotation`; lift it into `nesting` so there is one expression.
 
+### UI benchmark, 2026-09-15 — Pack Studio demo (Rahul: "very good and understandable unlike ours")
+
+Twenty-four stills in `~/Downloads/Pack_Studio_UI_UX_Workflow_Analysis.docx`
+(memory `pack-studio-competitor-analysis`). Side by side with our results
+page the gap is not features, it is how little they put on screen and how
+real the picture looks. Four tickets, in the order they pay back:
+
+**F13 — Results page = one 3D picture + a key/value list.** Their result
+panel is ~15 rows, label left, value right, nothing else: outer/inner dims,
+fluting, tare, capacity, crush strength, box cost, dunnage cost, num parts,
+vertical clearance, pack density. Ours has stat chips, MEASURED/DERIVED
+badges, "needs deck: spec_density", a "Starting design, not a final BOM"
+paragraph, a "Poses searched: …" footnote and three sub-tabs. Delete the
+chips, badges, captions and footnote; render `layout` + `dunnage` as one
+two-column list next to the 3D view; the constraint, when there is one, is a
+single info line ("Weight limit cuts this box from 70 to 65 parts"), not a
+WHY disclosure. Acceptance: at 1440×900 the Packaging screen shows the 3D
+view, the list and the ranked candidates with no paragraph of prose
+anywhere. Candidate cards show three numbers: box, parts/box, parts/truck.
+
+**F14 — Packed view drawn from the real mesh in cardboard, on white.** Their
+viewport shows shaded solid parts sitting in thin brown partitions and
+layer sheets on a white ground; you can count parts per row. Ours shows
+voxel blobs in translucent blue slabs on dark blue. We already have the GLB
+and the composed `pose_matrix` (F7) in `PackAnimation`: render the packed
+box there at t = end as the hero (white ground, cardboard-coloured dunnage
+as thin boxes from the BOM, parts from the GLB), with a layer slider that
+scrubs the stack and a Hide-dunnage toggle. The matplotlib voxel PNGs stay
+for the PDF only. Acceptance: SX4 cover hero shows 5 distinct parts per
+layer and 13 countable layers; TRW/Mubea still correct.
+
+**F15 — Report drawings are orthographic Front / Side / Top, not iso.** Their
+pack report shows the packed box as three flat views with parts as
+silhouettes, then the pallet the same way, then the truck. That is the
+legible version of what F9 is trying to fix in iso. Replace the exploded iso
+in the proposal PDF with three orthographic views from the placed
+silhouettes (`silhouette_runs` already carries the plan view; the side views
+are the pitch lattice × part extent). F9 closes into this.
+
+**F16 — Cost and pallet layer (functional gap, after F13–F15).** They rank by
+landed cost: box unit cost + dunnage cost + delivery (fixed + per km) →
+cost per part / box / pallet / shipment; and a pallet unit load sits
+between box and truck. We have neither. Needs box and dunnage prices in the
+catalogue (proposal decks have them) and a pallet asset type. Not before the
+drawings are right — a cost column on an unreadable picture helps nobody.
+
 **E1 — Engine cannot see shell spooning.** Same cover standing on edge
 ("Alternative 1", extent 876 x 76 x 332) measures pitch 77 along the 76-mm
 axis: zero nesting. Real trim panels are packed on edge, face-to-face,
