@@ -324,18 +324,6 @@ def _exploded_page(best_obj: dict | None, run_out: RunOut):
     png = _local_path((best_obj or {}).get("drawing_url"))
     if png is not None:
         img_rect = (0.06, 0.06, 0.88, 0.76)
-        # R4: the PNG itself now renders on a dark slate ground -- pasted
-        # straight onto this page's light one it reads as a hole in the
-        # page. An 8 px dark panel behind it (image rect padding for
-        # figure.dpi=100, matplotlib's default when PdfPages saves a figure
-        # with no dpi override) makes the dark ground read as a deliberate
-        # inset instead.
-        pad_x, pad_y = 8 / 100 / PAGE_SIZE[0], 8 / 100 / PAGE_SIZE[1]
-        ax.add_patch(Rectangle(
-            (img_rect[0] - pad_x, img_rect[1] - pad_y),
-            img_rect[2] + 2 * pad_x, img_rect[3] + 2 * pad_y,
-            facecolor=C_INK, edgecolor="none", zorder=1,
-        ))
         img = Image.open(png)
         iax = fig.add_axes(img_rect)
         iax.imshow(img)

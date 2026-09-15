@@ -126,23 +126,6 @@ TAG = {"derived": ("#166534", "DERIVED"), "measured": ("#1E40AF", "MEASURED"),
        "pattern": ("#B45309", "PATTERN"), "unknown": ("#B91C1C", "UNKNOWN")}
 
 # ---------------------------------------------------------------------------
-# Dark ground, for `explode_png` ONLY (R4). The constants above are shared
-# with `build_gif`, whose frames stay on the light card the GIF has always
-# used -- recolouring them would change the packed PNG the hero image shows.
-# Every colour below is a LIGHT counterpart of one above: the same palette
-# lifted for contrast, not a second palette.
-# ---------------------------------------------------------------------------
-D_BG = "#0F172A"            # slate-900 ground
-D_INK, D_MUTE = "#E2E8F0", "#94A3B8"
-D_NAME, D_ACCENT = "#93C5FD", "#FBBF24"
-D_BASE, D_WIRE = "#334155", "#64748B"      # pallet base; box wireframe
-D_EDGE = (0.50, 0.57, 0.67)                # silhouette line, RGB 0-1
-D_TAG = {"derived": "#4ADE80", "measured": "#60A5FA",
-         "pattern": "#FBBF24", "unknown": "#F87171"}
-# Dunnage alpha is tuned for a white ground; over slate-900 the same value
-# reads as a hole. The explosion also separates the layers, so less needs to
-# be seen THROUGH.
-D_ALPHA = 1.35
 # Lift per layer in the exploded view: half a layer pitch, per the ticket --
 # capped so the whole explosion never adds more than 60% of the box height.
 # ponytail: at half a pitch an interleaving pose (the Mubea bar nests 123mm
@@ -258,8 +241,7 @@ def _exposed(vol: np.ndarray, cell_mm: float) -> tuple:
     return tuple(np.concatenate(a) for a in (quads, depth, label, shade, edge))
 
 
-def _paint(ax, vols: list, rgba_for, cell_mm: float, lw: float = 0.35,
-           edge_rgb: tuple | None = None) -> int:
+def _paint(ax, vols: list, rgba_for, cell_mm: float, lw: float = 0.35) -> int:
     """ONE far->near ordering across ALL volumes. Returns the quad count.
 
     Alpha compositing needs strictly back-to-front, and the depth key is per
@@ -285,17 +267,16 @@ def _paint(ax, vols: list, rgba_for, cell_mm: float, lw: float = 0.35,
     # seam error is ~0.02 and invisible, a doubled stroke is not.
     ec[~eg & (fc[:, 3] < 1.0), 3] = 0.0
     # Silhouettes and creases: the deck's black line-work at every boundary.
-    # On a dark ground a darkened edge IS the ground, so the caller passes the
-    # light line colour instead.
-    ec[eg, :3] = fc[eg, :3] * 0.38 if edge_rgb is None else edge_rgb
+    # A darkened face colour, which reads as line-work on the light card both
+    # drawings sit on.
+    ec[eg, :3] = fc[eg, :3] * 0.38
     ec[eg, 3] = np.clip(fc[eg, 3] * 2.4, 0.5, 1.0)
     ax.add_collection(PolyCollection(q, facecolors=fc, edgecolors=ec,
                                      linewidths=lw, zorder=2))
     return len(q)
 
 
-def _draw_asset(ax, inner, mark_z: float | None, base_c: str = C_BASE,
-                wire_c: str = C_INK, accent_c: str = C_ACCENT) -> None:
+def _draw_asset(ax, inner, mark_z: float | None) -> None:
     """The asset itself: a base slab plus the inner box as a wireframe.
 
     "Does the stack fit inside the box" is a question the drawing cannot
@@ -308,7 +289,7 @@ def _draw_asset(ax, inner, mark_z: float | None, base_c: str = C_BASE,
     slab = [[(0, 0, 0), (l, 0, 0), (l, b, 0), (0, b, 0)],               # +z
             [(l, 0, -BASE_MM), (l, b, -BASE_MM), (l, b, 0), (l, 0, 0)],  # +x
             [(0, b, -BASE_MM), (l, b, -BASE_MM), (l, b, 0), (0, b, 0)]]  # +y
-    base = np.array([matplotlib.colors.to_rgba(base_c)] * 3)
+    base = np.array([matplotlib.colors.to_rgba(C_BASE)] * 3)
     base[:, :3] *= np.array([SHADE["z"], SHADE["x"], SHADE["y"]])[:, None]
     ax.add_collection(PolyCollection([_proj(np.array(f, float)) for f in slab],
                                      facecolors=base, edgecolors=base,
@@ -321,16 +302,16 @@ def _draw_asset(ax, inner, mark_z: float | None, base_c: str = C_BASE,
             (0, 2), (2, 6), (6, 4), (4, 0),             # at the base
             (1, 3), (3, 7), (7, 5), (5, 1)]             # at the lid
     ax.add_collection(LineCollection([p[list(e)] for e in wire],
-                                     colors=wire_c, linewidths=0.9, alpha=0.5,
+                                     colors=C_INK, linewidths=0.9, alpha=0.5,
                                      zorder=3))
     if mark_z is not None:
         off = np.array([-40.0, 0.0])   # just outside the (0,0) corner edge
         p0, p1 = (_proj(np.array([0.0, 0.0, z])) + off for z in (0.0, h))
-        ax.plot([p0[0], p1[0]], [p0[1], p1[1]], color=accent_c, lw=1.0,
+        ax.plot([p0[0], p1[0]], [p0[1], p1[1]], color=C_ACCENT, lw=1.0,
                 zorder=4)
         for z in (0.0, mark_z, h):
             t = _proj(np.array([0.0, 0.0, z])) + off
-            ax.plot([t[0], t[0] + 18], [t[1], t[1]], color=accent_c, lw=1.0,
+            ax.plot([t[0], t[0] + 18], [t[1], t[1]], color=C_ACCENT, lw=1.0,
                     zorder=4)
 
 
@@ -765,8 +746,8 @@ def _place(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
 def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
                 bom: dunnage.Bom, asset_name: str, count: int,
                 cell_mm: float = CELL_MM) -> bytes:
-    """The insert component breakdown as PNG bytes: an EXPLODED view on a dark
-    ground, leaders out to a right-hand spec column.
+    """The insert component breakdown as PNG bytes: an EXPLODED view on the
+    same light card as `build_gif`, leaders out to a right-hand spec column.
 
     `bom` is a `dunnage.Bom`; every dimension, qty, spec and basis in the
     drawing comes off it. Never retype a dimension the BOM already carries.
@@ -853,23 +834,18 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
 
     palette = np.zeros((alt + 1, 4))
     for i, row in enumerate(rows):
-        # Dunnage alphas are tuned against a white ground; over slate-900 the
-        # same value reads as a hole punched in the stack.
-        palette[LABEL0 + i] = matplotlib.colors.to_rgba(
-            row.colour, min(1.0, row.alpha * D_ALPHA))
+        palette[LABEL0 + i] = matplotlib.colors.to_rgba(row.colour, row.alpha)
         if row.is_parts:
             palette[alt] = matplotlib.colors.to_rgba(PART_ALT, row.alpha)
-    _draw_asset(ax, inner, bom.build_height_mm, base_c=D_BASE, wire_c=D_WIRE,
-                accent_c=D_ACCENT)
+    _draw_asset(ax, inner, bom.build_height_mm)
     # One faint guide up the middle of the stack, base to top: the lifted
     # layers otherwise float with nothing saying they are one assembly.
     g0, g1 = (_proj(np.array([inner[0] / 2, inner[1] / 2, z], float))
               for z in (-BASE_MM, z_top))
-    ax.plot([g0[0], g1[0]], [g0[1], g1[1]], lw=0.8, color=D_BASE, zorder=1)
+    ax.plot([g0[0], g1[0]], [g0[1], g1[1]], lw=0.8, color=C_LEADER, zorder=1)
     # Parts FIRST: on a depth tie the later volume wins, and the tint belongs
     # over the part, not the part over the tray it sits in.
-    _paint(ax, [prt, dun], lambda lab: palette[lab], cell_mm, lw=0.3,
-           edge_rgb=D_EDGE)
+    _paint(ax, [prt, dun], lambda lab: palette[lab], cell_mm, lw=0.3)
 
     # Spec column. Every block (tag, name, qty+dims, notes) gets its OWN line
     # -- stacked by its own measured height (`_lineh`), not a fraction of a
@@ -893,19 +869,19 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
             ax.plot([ax_x], [ax_y], marker="o", ms=2.6, color=C_LEADER,
                     zorder=4)
         ax.text(tx, y, TAG[lb.basis][1], fontsize=7.5, weight="bold",
-                color=D_TAG[lb.basis], va="top")
+                color=TAG[lb.basis][0], va="top")
         y -= _lineh(7.5) + gap_y
         ax.text(tx, y, lb.title.upper(), fontsize=10.5, weight="bold",
-                va="top", color=D_NAME)
+                va="top", color=C_NAME)
         y -= _lineh(10.5) + gap_y
         ax.text(tx, y, lb.qty, fontsize=9, va="top", weight="bold",
-                color=D_ACCENT, family="DejaVu Sans Mono")
-        ax.text(dim_x, y, lb.dim, fontsize=9, va="top", color=D_INK,
+                color=C_ACCENT, family="DejaVu Sans Mono")
+        ax.text(dim_x, y, lb.dim, fontsize=9, va="top", color=C_INK,
                 family="DejaVu Sans Mono")
         y -= _lineh(9) + gap_y
         if lb.extras:
             ax.text(tx, y, "\n".join(lb.extras), fontsize=8.5, va="top",
-                    color=D_MUTE, linespacing=1.5,
+                    color=C_MUTE, linespacing=1.5,
                     family="DejaVu Sans Mono")
             y -= _lineh(8.5, n=len(lb.extras), spacing=1.5)
         row_y = y - row_gap
@@ -918,7 +894,7 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     ticks = [_proj(np.array([0.0, inner[1], z], float))
              for z in (inner[2], bom.build_height_mm)]
     for t in ticks:
-        ax.plot([t[0] - 90, t[0]], [t[1], t[1]], lw=1.0, color=D_MUTE,
+        ax.plot([t[0] - 90, t[0]], [t[1], t[1]], lw=1.0, color=C_INK,
                 alpha=0.8, zorder=4)
     ax.text(ticks[0][0] - 100, (ticks[0][1] + ticks[1][1]) / 2,
             "inner H %g mm\nbuild %g mm  %s"
@@ -926,7 +902,7 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
                "FITS" if bom.fits else "DOES NOT FIT"),
             fontsize=9, ha="right", va="center", weight="bold",
             linespacing=1.5, family="DejaVu Sans Mono",
-            color=D_ACCENT if bom.fits else "#F87171")
+            color=C_ACCENT if bom.fits else "#B91C1C")
 
     # Header: box code, the count in large type, the pose. Offsets in POINTS
     # off the axes corner -- the figure's aspect follows the drawing, so a
@@ -936,15 +912,15 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
                     xytext=(dx, dy), textcoords="offset points", va="top",
                     annotation_clip=False, **kw)
 
-    head(0, -2, asset_name, fontsize=12, weight="bold", color=D_MUTE,
+    head(0, -2, asset_name, fontsize=12, weight="bold", color=C_MUTE,
          family="DejaVu Sans Mono")
-    head(0, -22, "%d" % count, fontsize=40, weight="bold", color=D_INK)
-    head(86, -28, "parts per box", fontsize=11, color=D_MUTE)
+    head(0, -22, "%d" % count, fontsize=40, weight="bold", color=C_INK)
+    head(86, -28, "parts per box", fontsize=11, color=C_MUTE)
     head(86, -46, "%d layers x %d per layer  -  %s insert"
          % (grid[2], grid[0] * grid[1], bom.archetype.replace("_", "-")),
-         fontsize=9, color=D_MUTE, family="DejaVu Sans Mono")
+         fontsize=9, color=C_MUTE, family="DejaVu Sans Mono")
     head(0, -82, "pose %g x %g x %g mm  -  pitch %g / %g / %g mm"
-         % (*extent, *pitch), fontsize=9.5, color=D_ACCENT,
+         % (*extent, *pitch), fontsize=9.5, color=C_ACCENT,
          family="DejaVu Sans Mono")
 
     # ponytail: the ticket's "Generated from layout <run id>" footer is left
@@ -956,7 +932,7 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
                "fits" if bom.fits else "DOES NOT FIT",
                round(bom.nest_depth_mm, 1), extent[2], pitch[2], bom.caveat))
     ax.text(0.0, 0.0, foot, transform=ax.transAxes, fontsize=8.5, va="bottom",
-            color=D_MUTE, wrap=True, linespacing=1.6)
+            color=C_MUTE, wrap=True, linespacing=1.6)
 
     ax.set_aspect("equal")
     ax.set_axis_off()
@@ -964,7 +940,7 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     ax.set_ylim(y_lo, y_hi)             # room under the last block for the caveat
     fig.tight_layout()
     buf = BytesIO()
-    fig.savefig(buf, format="png", facecolor=D_BG)
+    fig.savefig(buf, format="png", facecolor="white")
     plt.close(fig)
     logger.info("drew %s %s: %d components, build %g of %g mm inner, "
                 "exploded %g mm per layer", asset_name, bom.archetype,
@@ -1107,7 +1083,11 @@ def build_gif(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
         ax.set_axis_off()
         ax.set_xlim(x_lo, x_hi)
         ax.set_ylim(y_lo, y_hi)
-        fig.tight_layout()
+        # Fixed axes box, NOT tight_layout: tight_layout resizes the axes to
+        # the caption text of THAT frame, so the box slid ~30 px sideways
+        # between a dunnage step and a parts step. Same limits + same axes
+        # rectangle = the box sits on the same pixels in every frame.
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
         fig.canvas.draw()
         img = Image.frombytes(
             "RGBA", fig.canvas.get_width_height(),
@@ -1569,6 +1549,19 @@ def _selfcheck(outdir) -> int:
         pimg = Image.open(BytesIO(packed))
         assert np.array_equal(np.asarray(pimg.convert("RGB")), last), \
             "%s: packed PNG is not the gif's final frame" % ref
+        # The box must not move between frames (it did: tight_layout tracked
+        # the caption width). The asset wireframe is the leftmost dark pixel
+        # below the caption card; its column must be the same in every frame.
+        # Both axes: a ylim jitter slid the box 16 px vertically and passed
+        # an X-only version of this check.
+        edges = []
+        for fi in range(gimg.n_frames):
+            gimg.seek(fi)
+            a = np.asarray(gimg.convert("RGB"))[200:-20].sum(2) < 600
+            edges.append((int(np.nonzero(a.any(0))[0].min()),
+                          int(np.nonzero(a.any(1))[0].min())))
+        assert len(set(edges)) == 1, \
+            "%s: box edge moves between gif frames (x, y): %s" % (ref, edges)
         gpath = outdir / ("build_%s_%s.gif"
                           % (bom.archetype, ref.replace("/", "_").replace(" ", "_")))
         gpath.write_bytes(gif)
