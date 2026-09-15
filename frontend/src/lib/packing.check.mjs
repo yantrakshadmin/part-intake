@@ -8,6 +8,7 @@
  */
 import assert from 'node:assert/strict'
 import { layoutToFit, runSolve, errorDetail, floorPlanFromTruck } from './solve.js'
+import { resultRows } from './packing.js'
 
 // Copied verbatim from a real backend /api/parts/{id}/solve run.
 const layout = {
@@ -214,3 +215,57 @@ assert.equal(
 assert.equal(layoutToFit(barLayoutNoInterleave).interleaved, true) // pitch[1] 140 < extent[1] 300
 
 console.log('packing.check.mjs: interleaved-from-interleave-ratios passed')
+
+// --- F13: resultRows -- the results-panel key/value row builder -----------
+// (a) a row is omitted (not NaN/undefined/"—") whenever its field is absent.
+const rowLabels = (rows) => rows.map((r) => r.label)
+const bareLayout = { asset_name: 'PLS12801', pose_label: 'Largest face down (most stable)',
+  count: 40, grid: [1, 4, 10], extent_lbh: [1092.0, 300.0, 148.0], pitch_lbh: [1092.0, 140.0, 68.0] }
+
+const noBoxNoDunnageNoTruck = resultRows({ layout: bareLayout })
+assert.ok(!rowLabels(noBoxNoDunnageNoTruck).some((l) =>
+  ['Outer L×B×H', 'Inner L×B×H', 'Insert type', 'Build height / inner height',
+    'Vertical slack', 'Parts per truck', 'Cuboid baseline'].includes(l)),
+  'a row for an absent field must not appear at all')
+for (const r of noBoxNoDunnageNoTruck) {
+  assert.ok(!String(r.value).includes('NaN'), `NaN rendered in row ${r.label}`)
+  assert.ok(!String(r.value).includes('undefined'), `undefined rendered in row ${r.label}`)
+}
+
+const rowsBox = { outer_l_mm: 1200, outer_b_mm: 800, outer_h_mm: 1196,
+  inner_l_mm: 1150, inner_b_mm: 750, inner_h_mm: 1000 }
+const rowsDunnage = { archetype: 'bar_and_rod', build_height_mm: 987, inner_h_mm: 1000,
+  slack_lbh: [12, 8, 13] }
+const rowsTruck = { asset_name: 'PLS12801', parts: 1600 }
+const full = resultRows({ layout: { ...bareLayout, cuboid_count: 8, dunnage: rowsDunnage }, box: rowsBox, truck: rowsTruck })
+assert.deepEqual(rowLabels(full),
+  ['Box', 'Outer L×B×H', 'Inner L×B×H', 'Parts per box', 'Layers', 'Grid', 'Pose',
+    'Part extent L×B×H', 'Pitch L×B×H', 'Cuboid baseline', 'Insert type',
+    'Build height / inner height', 'Vertical slack', 'Parts per truck'])
+
+// (b) no row value is computed from two other fields -- each value must be
+// traceable to ONE field (or a plain join of one field's own components),
+// never an arithmetic combination of two separate backend fields.
+const find = (label) => full.find((r) => r.label === label).value
+assert.equal(find('Parts per box'), bareLayout.count) // identity, not e.g. count * weight
+assert.equal(find('Grid'), bareLayout.grid.join(' × ')) // raw join, not grid[0]*grid[1]*grid[2]
+assert.equal(find('Build height / inner height'), '987 / 1000 mm') // two fields shown side by side, not subtracted
+assert.equal(find('Cuboid baseline'), 8) // the value passed in, not layout.count or any other field
+assert.equal(find('Parts per truck'), rowsTruck.parts)
+
+// F13 round 2: extent is 0 dp (pitch stays 1 dp) -- a fractional extent (as
+// extracted from real CAD, e.g. 137.71mm) must round to the nearest mm here,
+// not carry decimals into the kv list.
+const fractional = resultRows({
+  layout: { ...bareLayout, extent_lbh: [371.4, 353.86, 137.71], pitch_lbh: [377.2, 361.0, 116.4] },
+})
+assert.equal(fractional.find((r) => r.label === 'Part extent L×B×H').value, '371 × 354 × 138 mm')
+assert.equal(fractional.find((r) => r.label === 'Pitch L×B×H').value, '377.2 × 361 × 116.4 mm')
+
+// cuboid_count === 0 (the stored-run default, LayoutOut.cuboid_count) reads
+// as absent, not a real tie with the cuboid baseline.
+assert.ok(!rowLabels(resultRows({ layout: { ...bareLayout, cuboid_count: 0 } }))
+  .includes('Cuboid baseline'))
+
+console.log('packing.check.mjs: resultRows passed —',
+  full.length, 'rows full,', noBoxNoDunnageNoTruck.length, 'rows bare')

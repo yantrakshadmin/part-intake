@@ -587,32 +587,6 @@ body {
 
 /* ---- hero solution (leads the Packaging tab, F1b) -------------------------- */
 
-/* F1 follow-up: the run caption + D8's warnings, folded into one line
-   (RunCaptionRow) — was `.warnings-disclosure`, same de-emphasis rationale
-   (R5): once a warning is tucked behind "N notes ▸" it's already
-   de-emphasised, so repeating the amber alert colour on top reads louder
-   than a collapsed note should. Neutral text/border, same layout as
-   .warning otherwise. */
-.run-caption-row .warning {
-  background: var(--surface-2);
-  border-color: var(--border);
-  color: var(--text-2);
-}
-
-/* Inline disclosure triggers (F1 follow-up: WHY / N notes moved off their
-   own bordered bars, onto the end of an existing text line) — plain text
-   button, not .btn-ghost (that has its own border/padding, wrong here). */
-.inline-disclosure {
-  font: inherit;
-  font-weight: 600;
-  color: var(--accent);
-  background: none;
-  border: 0;
-  padding: 0;
-  cursor: pointer;
-}
-.inline-disclosure:hover { text-decoration: underline; }
-
 .hero-solution {
   margin-top: 16px;
   padding: 16px;
@@ -622,84 +596,65 @@ body {
   box-shadow: var(--shadow-sm);
 }
 
-.hero-headline {
-  display: flex;
-  align-items: baseline;
+/* F13: one 3D picture (left) + one key/value list (right) — the results
+   panel's only layout. Stacks to one column with no horizontal scroll below
+   the two-column floor (400px acceptance width included). */
+.results-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
   gap: 16px;
-  flex-wrap: wrap;
+  align-items: start;
+}
+@media (max-width: 860px) {
+  /* minmax(0, 1fr), not a bare 1fr — a plain 1fr track's automatic minimum
+     is its content's max-content width, which pushed this (and everything
+     above it up to .shell) wider than the viewport at 400px (canvas/table
+     children are wide) instead of actually stacking. */
+  .results-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
-.hero-count {
-  font-family: var(--font-mono);
-  font-size: 56px;
-  font-weight: 700;
-  line-height: 1;
-  letter-spacing: -0.02em;
-  color: var(--accent);
-  font-variant-numeric: tabular-nums;
-}
-
-.hero-headline-text { min-width: 0; }
-
-.hero-asset {
-  font-family: var(--font-mono);
-  font-size: 16px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.hero-pose { font-family: 'Fira Sans', system-ui, sans-serif; font-weight: 400; }
-.hero-meta { font-size: 12.5px; margin-top: 4px; }
-
-/* F1: the hero used to be a two-column grid (image | CertificateCard); the
-   grid is gone (the cert card's rows moved to Box Packing Analysis / the
-   detail chips), so .hero-image is now the whole width of the hero. Its cap
-   is lower than before (was 480px) so the ranked cards clear the fold at
-   1440x900 — see .ranked-heading below. */
 .hero-image {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface-2);
   padding: 12px;
-  margin-top: 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
-/* F1 follow-up: 320px (the floor Rahul set), not 200 — a thumbnail-sized
-   animation defeats the point of F4 (the live packing animation IS the
-   deliverable). The fold budget comes back from RunCaptionRow/hero-meta
-   folding their triggers inline instead of their own bars, not from
-   shrinking this further. */
-.hero-image > .modal-img { max-height: 320px; width: 100%; object-fit: contain; }
-
-/* Ticket 2b: the "drawing the packed box" / "could not be rendered" text
-   sits where the .modal-img above lands once it arrives — a fixed height
-   close to the image's own max-height keeps the hero from jumping when the
-   picture shows up mid-poll. */
 .hero-image-wait { min-height: 240px; display: flex; align-items: center; justify-content: center; text-align: center; }
 
-.hero-why { margin-top: 10px; }
+/* The ortho (Front/Side/Top, F15) thumbnail strip under the 3D view —
+   zoomable in the same modal as everything else (F2). */
+.ortho-strip {
+  display: block;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: zoom-in;
+  overflow: hidden;
+}
+.ortho-strip img { display: block; width: 100%; max-height: 120px; object-fit: contain; }
+.ortho-strip:hover { border-color: var(--accent-border); }
 
-/* F4: live packing-order animation (PackAnimation) — same caption-card look
-   as the GIF's own overlay, reusing .btn-ghost for the transport controls. */
+.results-kv { margin-top: 0; }
+
+/* F4: live packing-order animation (PackAnimation), reusing .btn-ghost for
+   the transport controls. F13 round 2: the step-caption overlay ("Top
+   dunnage / Place 1 x ... / 48 of 48 parts placed · ...") is gone — three
+   lines of prose on top of the picture; the layer-slider readout (N/M)
+   already says where the build is. */
 .pack-anim { display: flex; flex-direction: column; gap: 8px; width: 100%; }
 .pack-anim-stage { width: 100%; border-radius: 8px; overflow: hidden; background: var(--surface-2); }
 .pack-anim-stage canvas { display: block; width: 100%; height: 100%; }
-.pack-anim-caption {
-  position: absolute; left: 12px; top: 12px; right: 12px;
-  background: rgba(248, 250, 252, 0.95); border: 1px solid var(--border);
-  border-radius: 6px; padding: 8px 12px; pointer-events: none;
-}
-.pack-anim-caption .l1 { color: var(--accent); font-weight: 600; font-size: 14px; }
-.pack-anim-caption .l2 { font-size: 12px; color: var(--text-2); margin-top: 2px; min-height: 15px; }
-.pack-anim-caption .l3 { font-size: 11px; color: var(--text-3); margin-top: 5px; }
-.pack-anim-controls { display: flex; align-items: center; gap: 10px; font-size: 13px; }
-.pack-anim-controls input[type=range] { flex: 1; accent-color: var(--accent2); }
+/* flex-wrap, not nowrap: at narrow widths (F13's 400px stack check) this
+   row's fixed-width children (button/select/layer-slider) no longer force
+   the whole page wider than the viewport — they wrap to a second line
+   instead. */
+.pack-anim-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 13px; }
+.pack-anim-controls input[type=range] { flex: 1; min-width: 80px; accent-color: var(--accent2); }
 .pack-anim-controls .t { font-family: var(--font-mono); color: var(--text-3); font-variant-numeric: tabular-nums; min-width: 56px; text-align: right; }
 .pack-anim-controls select { font: inherit; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 
@@ -1034,6 +989,10 @@ body {
 .height-budget.fail strong { color: var(--red); }
 
 .bom-table td, .bom-table th { vertical-align: top; }
+/* F13: at the 400px stack floor the BOM table's own columns are wider than
+   the viewport — scope the scroll to the table only (display:block lets
+   overflow-x apply to a <table>), never the whole page. */
+.bom-table { display: block; overflow-x: auto; max-width: 100%; }
 
 /* click-outside-to-close modal, no dependency (F-BOM Explode view) */
 .modal-backdrop {

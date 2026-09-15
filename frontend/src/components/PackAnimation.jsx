@@ -62,15 +62,8 @@ function buildTimeline(steps) {
   return { events, tEnd: t, total: t + HOLD }
 }
 
-function currentStep(events, t) {
-  let cur = null
-  for (const ev of events) { if (ev.start <= t) cur = ev.step }
-  return cur
-}
-
 export default function PackAnimation({ sequence, glbUrl, dunnage, height = 420, onStageClick }) {
   const mountRef = useRef(null)
-  const [caption, setCaption] = useState({ title: 'Empty box', text: '', meta: '' })
   // F14: default state is the finished, packed box, not a running loop from
   // empty — Play still starts the build from t=0 (see initial tCur below).
   const [playing, setPlaying] = useState(false)
@@ -346,13 +339,6 @@ export default function PackAnimation({ sequence, glbUrl, dunnage, height = 420,
       render(tCur)
       setSeekPct(clamp01(tCur / total) * 1000)
       setTimeLabel(tCur.toFixed(1) + ' s')
-      const step = currentStep(events, tCur)
-      setCaption((prev) => {
-        if (prev._step === step) return prev
-        return step
-          ? { title: step.title, text: step.text, meta: step.meta, _step: step }
-          : { title: 'Empty box', text: '', meta: '', _step: null }
-      })
     }
     raf = requestAnimationFrame(tick)
 
@@ -387,13 +373,7 @@ export default function PackAnimation({ sequence, glbUrl, dunnage, height = 420,
   return (
     <div className="pack-anim">
       <div className={`pack-anim-stage${onStageClick ? ' zoomable' : ''}`} ref={mountRef}
-        onClick={onStageClick} style={{ position: 'relative', height }}>
-        <div className="pack-anim-caption">
-          <div className="l1">{caption.title}</div>
-          <div className="l2">{caption.text}</div>
-          <div className="l3 mono pack-anim-meta">{caption.meta}</div>
-        </div>
-      </div>
+        onClick={onStageClick} style={{ position: 'relative', height }} />
       <div className="pack-anim-controls">
         <button type="button" className="btn-ghost" onClick={() => {
           if (!playing) ctrlRef.current.restartIfHeld = true
