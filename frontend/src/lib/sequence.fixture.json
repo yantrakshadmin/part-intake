@@ -1,0 +1,784 @@
+{
+  "inner": [
+    1150,
+    750,
+    1000
+  ],
+  "pose_matrix": [
+    [
+      1,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      1,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      1,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      1
+    ]
+  ],
+  "part_extent": [
+    371,
+    353.9,
+    137.7
+  ],
+  "steps": [
+    {
+      "i": 0,
+      "kind": "dunnage",
+      "title": "Base dunnage",
+      "text": "Place 1 × Separator sheet (PP Bubble Guard + EVA, 3mm) 1150×750×3",
+      "meta": "0 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "cuboids": [
+        {
+          "name": "Base sheet",
+          "colour": "#1E40AF",
+          "alpha": 0.35,
+          "origin": [
+            0,
+            0,
+            0
+          ],
+          "size": [
+            1150,
+            750,
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "i": 1,
+      "kind": "dunnage",
+      "title": "Layer 1 of 8",
+      "text": "Place 1 × PP Bubble Guard insert (1200 GSM, 5mm) 1150×750×113 + 1 × Separator sheet (PP Bubble Guard + EVA, 3mm) 1150×750×3",
+      "meta": "0 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "cuboids": [
+        {
+          "name": "Pocket tray",
+          "colour": "#60A5FA",
+          "alpha": 0.22,
+          "origin": [
+            0,
+            0,
+            3
+          ],
+          "size": [
+            1150,
+            750,
+            113
+          ]
+        },
+        {
+          "name": "Separator sheet",
+          "colour": "#1E40AF",
+          "alpha": 0.35,
+          "origin": [
+            0,
+            0,
+            116
+          ],
+          "size": [
+            1150,
+            750,
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "i": 2,
+      "kind": "parts",
+      "title": "Layer 1 of 8",
+      "text": "Place 6 × Part",
+      "meta": "6 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "parts": [
+        {
+          "origin": [
+            9.5,
+            14,
+            3
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            14,
+            3
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            14,
+            3
+          ]
+        },
+        {
+          "origin": [
+            9.5,
+            375,
+            3
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            375,
+            3
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            375,
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "i": 3,
+      "kind": "dunnage",
+      "title": "Layer 2 of 8",
+      "text": "Place 1 × PP Bubble Guard insert (1200 GSM, 5mm) 1150×750×113 + 1 × Separator sheet (PP Bubble Guard + EVA, 3mm) 1150×750×3",
+      "meta": "6 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "cuboids": [
+        {
+          "name": "Pocket tray",
+          "colour": "#60A5FA",
+          "alpha": 0.22,
+          "origin": [
+            0,
+            0,
+            119
+          ],
+          "size": [
+            1150,
+            750,
+            113
+          ]
+        },
+        {
+          "name": "Separator sheet",
+          "colour": "#1E40AF",
+          "alpha": 0.35,
+          "origin": [
+            0,
+            0,
+            232
+          ],
+          "size": [
+            1150,
+            750,
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "i": 4,
+      "kind": "parts",
+      "title": "Layer 2 of 8",
+      "text": "Place 6 × Part",
+      "meta": "12 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "parts": [
+        {
+          "origin": [
+            9.5,
+            14,
+            119
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            14,
+            119
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            14,
+            119
+          ]
+        },
+        {
+          "origin": [
+            9.5,
+            375,
+            119
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            375,
+            119
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            375,
+            119
+          ]
+        }
+      ]
+    },
+    {
+      "i": 5,
+      "kind": "dunnage",
+      "title": "Layer 3 of 8",
+      "text": "Place 1 × PP Bubble Guard insert (1200 GSM, 5mm) 1150×750×113 + 1 × Separator sheet (PP Bubble Guard + EVA, 3mm) 1150×750×3",
+      "meta": "12 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "cuboids": [
+        {
+          "name": "Pocket tray",
+          "colour": "#60A5FA",
+          "alpha": 0.22,
+          "origin": [
+            0,
+            0,
+            235
+          ],
+          "size": [
+            1150,
+            750,
+            113
+          ]
+        },
+        {
+          "name": "Separator sheet",
+          "colour": "#1E40AF",
+          "alpha": 0.35,
+          "origin": [
+            0,
+            0,
+            348
+          ],
+          "size": [
+            1150,
+            750,
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "i": 6,
+      "kind": "parts",
+      "title": "Layer 3 of 8",
+      "text": "Place 6 × Part",
+      "meta": "18 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "parts": [
+        {
+          "origin": [
+            9.5,
+            14,
+            235
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            14,
+            235
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            14,
+            235
+          ]
+        },
+        {
+          "origin": [
+            9.5,
+            375,
+            235
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            375,
+            235
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            375,
+            235
+          ]
+        }
+      ]
+    },
+    {
+      "i": 7,
+      "kind": "dunnage",
+      "title": "Layer 4 of 8",
+      "text": "Place 1 × PP Bubble Guard insert (1200 GSM, 5mm) 1150×750×113 + 1 × Separator sheet (PP Bubble Guard + EVA, 3mm) 1150×750×3",
+      "meta": "18 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "cuboids": [
+        {
+          "name": "Pocket tray",
+          "colour": "#60A5FA",
+          "alpha": 0.22,
+          "origin": [
+            0,
+            0,
+            351
+          ],
+          "size": [
+            1150,
+            750,
+            113
+          ]
+        },
+        {
+          "name": "Separator sheet",
+          "colour": "#1E40AF",
+          "alpha": 0.35,
+          "origin": [
+            0,
+            0,
+            464
+          ],
+          "size": [
+            1150,
+            750,
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "i": 8,
+      "kind": "parts",
+      "title": "Layer 4 of 8",
+      "text": "Place 6 × Part",
+      "meta": "24 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "parts": [
+        {
+          "origin": [
+            9.5,
+            14,
+            351
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            14,
+            351
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            14,
+            351
+          ]
+        },
+        {
+          "origin": [
+            9.5,
+            375,
+            351
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            375,
+            351
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            375,
+            351
+          ]
+        }
+      ]
+    },
+    {
+      "i": 9,
+      "kind": "dunnage",
+      "title": "Layer 5 of 8",
+      "text": "Place 1 × PP Bubble Guard insert (1200 GSM, 5mm) 1150×750×113 + 1 × Separator sheet (PP Bubble Guard + EVA, 3mm) 1150×750×3",
+      "meta": "24 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "cuboids": [
+        {
+          "name": "Pocket tray",
+          "colour": "#60A5FA",
+          "alpha": 0.22,
+          "origin": [
+            0,
+            0,
+            467
+          ],
+          "size": [
+            1150,
+            750,
+            113
+          ]
+        },
+        {
+          "name": "Separator sheet",
+          "colour": "#1E40AF",
+          "alpha": 0.35,
+          "origin": [
+            0,
+            0,
+            580
+          ],
+          "size": [
+            1150,
+            750,
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "i": 10,
+      "kind": "parts",
+      "title": "Layer 5 of 8",
+      "text": "Place 6 × Part",
+      "meta": "30 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "parts": [
+        {
+          "origin": [
+            9.5,
+            14,
+            467
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            14,
+            467
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            14,
+            467
+          ]
+        },
+        {
+          "origin": [
+            9.5,
+            375,
+            467
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            375,
+            467
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            375,
+            467
+          ]
+        }
+      ]
+    },
+    {
+      "i": 11,
+      "kind": "dunnage",
+      "title": "Layer 6 of 8",
+      "text": "Place 1 × PP Bubble Guard insert (1200 GSM, 5mm) 1150×750×113 + 1 × Separator sheet (PP Bubble Guard + EVA, 3mm) 1150×750×3",
+      "meta": "30 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "cuboids": [
+        {
+          "name": "Pocket tray",
+          "colour": "#60A5FA",
+          "alpha": 0.22,
+          "origin": [
+            0,
+            0,
+            583
+          ],
+          "size": [
+            1150,
+            750,
+            113
+          ]
+        },
+        {
+          "name": "Separator sheet",
+          "colour": "#1E40AF",
+          "alpha": 0.35,
+          "origin": [
+            0,
+            0,
+            696
+          ],
+          "size": [
+            1150,
+            750,
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "i": 12,
+      "kind": "parts",
+      "title": "Layer 6 of 8",
+      "text": "Place 6 × Part",
+      "meta": "36 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "parts": [
+        {
+          "origin": [
+            9.5,
+            14,
+            583
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            14,
+            583
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            14,
+            583
+          ]
+        },
+        {
+          "origin": [
+            9.5,
+            375,
+            583
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            375,
+            583
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            375,
+            583
+          ]
+        }
+      ]
+    },
+    {
+      "i": 13,
+      "kind": "dunnage",
+      "title": "Layer 7 of 8",
+      "text": "Place 1 × PP Bubble Guard insert (1200 GSM, 5mm) 1150×750×113 + 1 × Separator sheet (PP Bubble Guard + EVA, 3mm) 1150×750×3",
+      "meta": "36 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "cuboids": [
+        {
+          "name": "Pocket tray",
+          "colour": "#60A5FA",
+          "alpha": 0.22,
+          "origin": [
+            0,
+            0,
+            699
+          ],
+          "size": [
+            1150,
+            750,
+            113
+          ]
+        },
+        {
+          "name": "Separator sheet",
+          "colour": "#1E40AF",
+          "alpha": 0.35,
+          "origin": [
+            0,
+            0,
+            812
+          ],
+          "size": [
+            1150,
+            750,
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "i": 14,
+      "kind": "parts",
+      "title": "Layer 7 of 8",
+      "text": "Place 6 × Part",
+      "meta": "42 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "parts": [
+        {
+          "origin": [
+            9.5,
+            14,
+            699
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            14,
+            699
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            14,
+            699
+          ]
+        },
+        {
+          "origin": [
+            9.5,
+            375,
+            699
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            375,
+            699
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            375,
+            699
+          ]
+        }
+      ]
+    },
+    {
+      "i": 15,
+      "kind": "dunnage",
+      "title": "Layer 8 of 8",
+      "text": "Place 1 × PP Bubble Guard insert (1200 GSM, 5mm) 1150×750×113 + 1 × Separator sheet (PP Bubble Guard + EVA, 3mm) 1150×750×3",
+      "meta": "42 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "cuboids": [
+        {
+          "name": "Pocket tray",
+          "colour": "#60A5FA",
+          "alpha": 0.22,
+          "origin": [
+            0,
+            0,
+            815
+          ],
+          "size": [
+            1150,
+            750,
+            113
+          ]
+        },
+        {
+          "name": "Separator sheet",
+          "colour": "#1E40AF",
+          "alpha": 0.35,
+          "origin": [
+            0,
+            0,
+            928
+          ],
+          "size": [
+            1150,
+            750,
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "i": 16,
+      "kind": "parts",
+      "title": "Layer 8 of 8",
+      "text": "Place 6 × Part",
+      "meta": "48 of 48 parts placed · PLS1280 · pocket-tray insert",
+      "parts": [
+        {
+          "origin": [
+            9.5,
+            14,
+            815
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            14,
+            815
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            14,
+            815
+          ]
+        },
+        {
+          "origin": [
+            9.5,
+            375,
+            815
+          ]
+        },
+        {
+          "origin": [
+            386.5,
+            375,
+            815
+          ]
+        },
+        {
+          "origin": [
+            763.5,
+            375,
+            815
+          ]
+        }
+      ]
+    }
+  ]
+}

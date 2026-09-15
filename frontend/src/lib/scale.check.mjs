@@ -30,8 +30,8 @@ function* sources(dir) {
 const offenders = []
 for (const f of sources(ROOT)) {
   const src = readFileSync(f, 'utf8')
-  for (const m of src.matchAll(/scale\.setScalar\(\s*([^)]*?)\s*\)/g)) {
-    if (/^\d/.test(m[1])) offenders.push(`${f.replace(ROOT, '')}: setScalar(${m[1]})`)
+  for (const m of src.matchAll(/scale\.set(?:Scalar)?\(\s*([^)]*?)\s*\)/g)) {
+    if (/^\d/.test(m[1])) offenders.push(`${f.replace(ROOT, '')}: scale.set(${m[1]})`)
   }
 }
 assert.deepEqual(offenders, [],
@@ -39,9 +39,11 @@ assert.deepEqual(offenders, [],
 
 // And it must still be applied on BOTH load paths -- deleting a setScalar
 // would satisfy the check above while breaking the render.
+// Three paths: glbModel.loadOrientedModel, OrientationViewer, PackAnimation
+// (which passes MM_PER_M three times to `.scale.set`, same constant).
 const scaled = [...sources(ROOT)].filter((f) =>
-  /scale\.setScalar\(\s*MM_PER_M\s*\)/.test(readFileSync(f, 'utf8')))
-assert.equal(scaled.length, 2,
-  `expected both GLTF load paths to scale by MM_PER_M, found ${scaled.length}: ${scaled}`)
+  /scale\.set(?:Scalar)?\(\s*MM_PER_M\b/.test(readFileSync(f, 'utf8')))
+assert.equal(scaled.length, 3,
+  `expected all three GLTF load paths to scale by MM_PER_M, found ${scaled.length}: ${scaled}`)
 
-console.log('scale.check: MM_PER_M is the single definition, applied on both load paths')
+console.log('scale.check: MM_PER_M is the single definition, applied on all three load paths')

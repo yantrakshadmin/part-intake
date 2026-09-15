@@ -6,6 +6,7 @@ import { downloadFigure } from '../lib/download.js'
 import InsertTray3D from './InsertTray3D.jsx'
 import InsertIso from './InsertIso.jsx'
 import TruckLoadIso from './TruckLoadIso.jsx'
+import PackAnimation from './PackAnimation.jsx'
 
 const fmtMm = (v) => {
   const r = Math.round(v * 10) / 10
@@ -514,7 +515,7 @@ function ResultView({ result, part, type, packaging, vehicles, params, run, sele
       ) : (
         <>
           {heroLayout && (
-            <HeroSolution layout={heroLayout} box={heroBox} run={run}
+            <HeroSolution layout={heroLayout} box={heroBox} part={part} run={run}
               clearanceMm={result.clearance_mm}
               label={heroLayout.asset_name === CUSTOM_KEY ? 'Custom design' : undefined}
               beatsCatalogue={beatsCatalogue}
@@ -584,8 +585,10 @@ function WarningsDisclosure({ warnings }) {
  *  no toggle at all. `onImageClick`, when given, makes the image itself a
  *  zoom-in trigger (F2: click any drawing to open it full-size) — the modal
  *  reuses this same component without it, since its image is already the
- *  full-size view. */
-function ImageStage({ views, view, onViewChange, onImageClick, imgClassName = '' }) {
+ *  full-size view. F4: an 'anim' entry carries `sequence`/`glbUrl` instead
+ *  of `url` and renders the live PackAnimation — same toggle, same modal,
+ *  so it opens large for free rather than needing its own zoom plumbing. */
+function ImageStage({ views, view, onViewChange, onImageClick, imgClassName = '', animHeight = 420 }) {
   if (views.length === 0) return null
   const active = views.find((v) => v.key === view) || views[0]
   const cls = `modal-img${onImageClick ? ' zoomable' : ''}${imgClassName ? ` ${imgClassName}` : ''}`
@@ -599,7 +602,10 @@ function ImageStage({ views, view, onViewChange, onImageClick, imgClassName = ''
           ))}
         </div>
       )}
-      {onImageClick ? (
+      {active.kind === 'anim' ? (
+        <PackAnimation sequence={active.sequence} glbUrl={active.glbUrl} height={animHeight}
+          onStageClick={onImageClick ? () => onImageClick(active.key) : undefined} />
+      ) : onImageClick ? (
         <img src={active.url} alt={active.label} className={cls}
           role="button" tabIndex={0}
           onClick={() => onImageClick(active.key)}
@@ -618,16 +624,21 @@ function ImageStage({ views, view, onViewChange, onImageClick, imgClassName = ''
  *  here re-derives it); when it's null there is no packed render yet, so no
  *  "Packed" tab is shown at all (a fake one, aliasing the exploded drawing,
  *  is worse than none — it tells the reader the box is packed when the only
- *  image on screen is exploded). Stage defaults to Exploded in that case. */
-function SolutionImage({ layout, renderStatus = 'done', renderError }) {
+ *  image on screen is exploded). Stage defaults to Exploded in that case.
+ *  F4: an Animation view (live, seekable) is added — and becomes the
+ *  default — whenever the run has a `sequence` and the part has a GLB; the
+ *  GIF stays as the fallback for runs/browsers without it. */
+function SolutionImage({ layout, part, renderStatus = 'done', renderError }) {
+  const hasAnim = Boolean(layout.sequence && part?.glb_url)
   const views = useMemo(() => {
     const list = []
+    if (hasAnim) list.push({ key: 'anim', label: 'Animation', kind: 'anim', sequence: layout.sequence, glbUrl: part.glb_url })
     if (hasDrawing(layout.packed_url)) list.push({ key: 'packed', label: 'Packed', url: layout.packed_url })
     if (hasDrawing(layout.drawing_url)) list.push({ key: 'exploded', label: 'Exploded', url: layout.drawing_url })
     if (hasDrawing(layout.gif_url)) list.push({ key: 'gif', label: 'Packing order', url: layout.gif_url })
     return list
-  }, [layout])
-  const defaultView = hasDrawing(layout.packed_url) ? 'packed' : 'exploded'
+  }, [layout, part, hasAnim])
+  const defaultView = hasAnim ? 'anim' : (hasDrawing(layout.packed_url) ? 'packed' : 'exploded')
   const [view, setView] = useState(defaultView)
   useEffect(() => setView(defaultView), [layout?.asset_name, defaultView])
   // F2: at hero size the drawing/GIF is unreadable — click it to reopen the
@@ -713,7 +724,7 @@ function CertificateCard({ layout, box, clearanceMm }) {
  * re-picked here; clicking a different card below only changes LayoutDetail,
  * not this block.
  */
-function HeroSolution({ layout, box, run, label, beatsCatalogue, clearanceMm, renderStatus, renderError }) {
+function HeroSolution({ layout, box, part, run, label, beatsCatalogue, clearanceMm, renderStatus, renderError }) {
   const runLabel = run?.solve_job_id
     ? `Run #${String(run.solve_job_id).slice(0, 8)} · ${fmtRunDate(run.created_at) || 'stored run'}`
     : null
@@ -742,7 +753,7 @@ function HeroSolution({ layout, box, run, label, beatsCatalogue, clearanceMm, re
       </div>
 
       <div className="hero-grid">
-        <SolutionImage layout={layout} renderStatus={renderStatus} renderError={renderError} />
+        <SolutionImage layout={layout} part={part} renderStatus={renderStatus} renderError={renderError} />
         <CertificateCard layout={layout} box={box} clearanceMm={clearanceMm} />
       </div>
     </div>
@@ -976,7 +987,8 @@ function LayoutDetail({ layout, box, part, type, tab, onTabChange, truck, truckB
           lattice and needs no packaging row, so a layout missing from the
           master list still gets its insert design. */}
       {activeTab === 'insert' && (
-        <DunnageBom dunnage={layout.dunnage} drawingUrl={layout.drawing_url} gifUrl={layout.gif_url} />
+        <DunnageBom dunnage={layout.dunnage} drawingUrl={layout.drawing_url} gifUrl={layout.gif_url}
+          sequence={layout.sequence} glbUrl={part?.glb_url} />
       )}
 
       {activeTab === 'truck' && truck && (
@@ -1058,16 +1070,19 @@ function TruckSection({ truck, vehicles, dropdownVehicleId, box }) {
  * Not every layout carries one yet, so this renders nothing when absent —
  * same convention as the rest of the tab (no packaging record → no drawing).
  */
-function DunnageBom({ dunnage, drawingUrl, gifUrl }) {
-  const [modalView, setModalView] = useState(null) // null: closed; else 'png' | 'gif'
+function DunnageBom({ dunnage, drawingUrl, gifUrl, sequence, glbUrl }) {
+  const [modalView, setModalView] = useState(null) // null: closed; else 'anim' | 'png' | 'gif'
   if (!dunnage) return null
   const budget = heightBudget(dunnage)
+  const showAnim = Boolean(sequence && glbUrl)
   const showExplode = hasDrawing(drawingUrl)
   const showPack = hasDrawing(gifUrl)
-  // Same order as before this ticket (gif first) — only the modal's own
-  // views list moved up here so ExplodeModal can be shared with the hero
-  // image below without knowing about drawingUrl/gifUrl at all.
+  // Same order as before this ticket (gif, then exploded) with 'anim' ahead
+  // of both as the F4 default — only the modal's own views list moved up
+  // here so ExplodeModal can be shared with the hero image below without
+  // knowing about sequence/drawingUrl/gifUrl at all.
   const views = [
+    ...(showAnim ? [{ key: 'anim', label: 'Animation', kind: 'anim', sequence, glbUrl }] : []),
     ...(showPack ? [{ key: 'gif', label: 'Packing sequence', url: gifUrl }] : []),
     ...(showExplode ? [{ key: 'png', label: 'Exploded view', url: drawingUrl }] : []),
   ]
@@ -1076,8 +1091,13 @@ function DunnageBom({ dunnage, drawingUrl, gifUrl }) {
     <div className="detail-block dunnage-block">
       <div className="insert-card-head">
         <h3 style={{ margin: 0 }}><span className="h-icon">▤</span> Insert BOM</h3>
-        {(showExplode || showPack) && (
+        {(showAnim || showExplode || showPack) && (
           <div className="insert-card-actions">
+            {showAnim && (
+              <button className="btn-ghost" onClick={() => setModalView('anim')}>
+                ▶ Animate
+              </button>
+            )}
             {showExplode && (
               <button className="btn-ghost" onClick={() => setModalView('png')}>
                 ⛶ Explode
@@ -1170,7 +1190,8 @@ function ExplodeModal({ views, initial, onClose }) {
             the card itself scrolls (overflow: auto, index.css) instead of
             the image shrinking to fit. */}
         <ImageStage views={views} view={view} onViewChange={setView}
-          imgClassName={zoom === 'actual' ? 'actual' : ''} />
+          imgClassName={zoom === 'actual' ? 'actual' : ''}
+          animHeight={Math.round(window.innerHeight * 0.72)} />
       </div>
     </div>
   )

@@ -185,7 +185,7 @@ export default function LoadCalculator() {
             <div>
               <div className="big-number">
                 {truck.boxes}
-                <span className="big-unit"> boxes</span>
+                <span className="big-unit"> {truck.boxes === 1 ? 'box' : 'boxes'}</span>
               </div>
               <div className={`bind-chip ${bindClass}`}>
                 {truck.boxes === 0 && "box doesn't fit this vehicle"}
