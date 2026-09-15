@@ -659,7 +659,7 @@ function ImageStage({ views, view, onViewChange, onImageClick, imgClassName = ''
         </div>
       )}
       {active.kind === 'anim' ? (
-        <PackAnimation sequence={active.sequence} glbUrl={active.glbUrl} height={animHeight}
+        <PackAnimation sequence={active.sequence} glbUrl={active.glbUrl} dunnage={active.dunnage} height={animHeight}
           onStageClick={onImageClick ? () => onImageClick(active.key) : undefined} />
       ) : onImageClick ? (
         <img src={active.url} alt={active.label} className={cls}
@@ -688,7 +688,7 @@ function SolutionImage({ layout, part, renderStatus = 'done', renderError }) {
   const hasAnim = Boolean(layout.sequence && part?.glb_url)
   const views = useMemo(() => {
     const list = []
-    if (hasAnim) list.push({ key: 'anim', label: 'Animation', kind: 'anim', sequence: layout.sequence, glbUrl: part.glb_url })
+    if (hasAnim) list.push({ key: 'anim', label: 'Animation', kind: 'anim', sequence: layout.sequence, glbUrl: part.glb_url, dunnage: layout.dunnage })
     if (hasDrawing(layout.packed_url)) list.push({ key: 'packed', label: 'Packed', url: layout.packed_url })
     if (hasDrawing(layout.drawing_url)) list.push({ key: 'exploded', label: 'Exploded', url: layout.drawing_url })
     if (hasDrawing(layout.gif_url)) list.push({ key: 'gif', label: 'Packing order', url: layout.gif_url })
@@ -1079,7 +1079,7 @@ function DunnageBom({ dunnage, drawingUrl, gifUrl, sequence, glbUrl }) {
   // here so ExplodeModal can be shared with the hero image below without
   // knowing about sequence/drawingUrl/gifUrl at all.
   const views = [
-    ...(showAnim ? [{ key: 'anim', label: 'Animation', kind: 'anim', sequence, glbUrl }] : []),
+    ...(showAnim ? [{ key: 'anim', label: 'Animation', kind: 'anim', sequence, glbUrl, dunnage }] : []),
     ...(showPack ? [{ key: 'gif', label: 'Packing sequence', url: gifUrl }] : []),
     ...(showExplode ? [{ key: 'png', label: 'Exploded view', url: drawingUrl }] : []),
   ]

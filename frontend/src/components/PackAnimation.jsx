@@ -11,7 +11,7 @@
  * component only decides WHEN to reveal them, never re-derives a count or
  * a position.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { MM_PER_M, computeTightBounds } from '../lib/glbModel.js'
@@ -28,12 +28,26 @@ const easeOut = (p) => 1 - Math.pow(1 - p, 3)
 const clamp01 = (v) => Math.max(0, Math.min(1, v))
 
 /** Deterministic, time-driven timeline off the backend's own step order —
- *  nothing here decides step order, captions or counts, only start/dur. */
+ *  nothing here decides step order, captions or counts, only start/dur.
+ *
+ *  F14: also stamps a 0-based `layer` on each step, for the layer slider.
+ *  Steps run dunnage(0), parts(0), dunnage(1), parts(1), ... (insert_drawing
+ *  `_sequence`: even i = dunnage, odd = parts, one pair per lattice layer),
+ *  so a dunnage step shares its layer number with the parts step it floors
+ *  — "layer < layerCap" hides both together. The trailing "Top dunnage" step
+ *  (after the last parts step) lands one past the last layer; the slider's
+ *  own max bypasses the cap entirely so it still shows at full pack. */
 function buildTimeline(steps) {
   const sorted = [...(steps || [])].sort((a, b) => a.i - b.i)
+  let layer = 0
+  const withLayer = sorted.map((step) => {
+    const decorated = { ...step, layer }
+    if (step.kind === 'parts') layer += 1
+    return decorated
+  })
   const events = [] // {step, start, dur, part?}
   let t = T_BOX
-  for (const step of sorted) {
+  for (const step of withLayer) {
     if (step.kind === 'parts') {
       const parts = step.parts || []
       parts.forEach((part, i) => {
@@ -54,18 +68,35 @@ function currentStep(events, t) {
   return cur
 }
 
-export default function PackAnimation({ sequence, glbUrl, height = 420, onStageClick }) {
+export default function PackAnimation({ sequence, glbUrl, dunnage, height = 420, onStageClick }) {
   const mountRef = useRef(null)
   const [caption, setCaption] = useState({ title: 'Empty box', text: '', meta: '' })
-  const [playing, setPlaying] = useState(true)
+  // F14: default state is the finished, packed box, not a running loop from
+  // empty — Play still starts the build from t=0 (see initial tCur below).
+  const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState(1)
-  const [seekPct, setSeekPct] = useState(0)
+  const [seekPct, setSeekPct] = useState(1000)
   const [timeLabel, setTimeLabel] = useState('0.0 s')
-  // playing/speed/manual-seek live in a ref too, so the rAF loop (which does
-  // not want to re-run on every state change) always reads the latest value.
-  const ctrlRef = useRef({ playing: true, speed: 1, seekTo: null })
+  // Layer slider (0..numLayers) + hide-dunnage toggle. numLayers is just a
+  // count of the backend's own "parts" steps (one per lattice layer, per
+  // insert_drawing._sequence) — not a re-derivation, a tally.
+  const numLayers = useMemo(
+    () => (sequence?.steps || []).filter((s) => s.kind === 'parts').length,
+    [sequence],
+  )
+  const [layerCap, setLayerCap] = useState(numLayers)
+  useEffect(() => { setLayerCap(numLayers) }, [numLayers])
+  const [hideDunnage, setHideDunnage] = useState(false)
+  // playing/speed/manual-seek/layerCap/hideDunnage live in a ref too, so the
+  // rAF loop (which does not want to re-run on every state change) always
+  // reads the latest value.
+  const ctrlRef = useRef({ playing: false, speed: 1, seekTo: null, layerCap: numLayers, hideDunnage: false })
   useEffect(() => { ctrlRef.current.playing = playing }, [playing])
   useEffect(() => { ctrlRef.current.speed = speed }, [speed])
+  // layerCap/hideDunnage also flag the paused rAF loop to render one more
+  // frame — it otherwise skips GPU work entirely while static (see `dirty`).
+  useEffect(() => { ctrlRef.current.layerCap = layerCap; ctrlRef.current.requestRender = true }, [layerCap])
+  useEffect(() => { ctrlRef.current.hideDunnage = hideDunnage; ctrlRef.current.requestRender = true }, [hideDunnage])
 
   useEffect(() => {
     if (!sequence) return undefined
@@ -101,39 +132,61 @@ export default function PackAnimation({ sequence, glbUrl, height = 420, onStageC
     let rGuess = Math.hypot(Lx, By, Hz) // seed for the first frame only
     // box corner is (0,0,0) per the sequence contract; BoxGeometry is
     // centred, so shift every box mesh by half its size to align corners.
+    // F14: a filled translucent box read as a blue "voxel blob" (the thing
+    // this ticket exists to kill) — a thin light-grey outline plus a floor
+    // plane is the competitor's own box treatment, so the fill mesh is gone.
     const boxEdges = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(Lx, By, Hz)),
-      new THREE.LineBasicMaterial({ color: 0x64748b, transparent: true, opacity: 0 }))
+      new THREE.LineBasicMaterial({ color: 0xcbd5e1, transparent: true, opacity: 0 }))
     boxEdges.position.set(Lx / 2, By / 2, Hz / 2)
     world.add(boxEdges)
-    const wallMat = new THREE.MeshStandardMaterial({
-      color: 0x93c5fd, transparent: true, opacity: 0.06, side: THREE.DoubleSide, depthWrite: false,
-    })
-    const walls = new THREE.Mesh(new THREE.BoxGeometry(Lx, By, Hz), wallMat)
-    walls.position.copy(boxEdges.position)
-    world.add(walls)
+    // Faint floor, white ground (memory: dark ground failed with users).
+    // PlaneGeometry already lies in the XY plane (normal +Z) so it needs no
+    // extra rotation in this Z-up frame; sits a hair below z=0 to avoid
+    // z-fighting with dunnage/parts resting at z=0.
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(Lx * 1.15, By * 1.15),
+      new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.95 }))
+    floor.position.set(Lx / 2, By / 2, -0.5)
+    world.add(floor)
 
     const { events, tEnd, total } = buildTimeline(sequence.steps)
 
     // dunnage: one mesh per cuboid, across every dunnage step, parked
     // invisible above its rest position until its own step's window.
-    const dunnage = [] // {ev, mesh, restZ}
+    // Cardboard colour throughout — the backend's `colour`/`alpha` on each
+    // cuboid is tuned for the matplotlib PNG's own palette (hard rule 9 is
+    // about dimensions/counts, not a rendering style choice), so only alpha
+    // carries over, not colour.
+    const dunnageByName = new Map((dunnage?.elements || []).map((e) => [e.name, e]))
+    const partExtent = sequence.part_extent
+    const dunnageMeshes = [] // {ev, mesh, restZ}
     for (const ev of events) {
       if (ev.part) continue
       for (const c of ev.step.cuboids || []) {
+        const el = dunnageByName.get(c.name)
+        // F11 (a separate, open ticket): an interleaved pose can still get a
+        // pocket_tray BOM whose pockets are narrower than the part in plane
+        // (SX4 cover: pitch 177 vs extent 332) — a pocket like that cannot
+        // really hold the part, so it's not drawn. Sheets/bars (no cell_mm)
+        // always draw. Both sides of the comparison are backend numbers.
+        if (el?.cell_mm && partExtent &&
+            (el.cell_mm[0] < partExtent[0] || el.cell_mm[1] < partExtent[1])) {
+          continue
+        }
         const geo = new THREE.BoxGeometry(...c.size)
         const mat = new THREE.MeshStandardMaterial({
-          color: c.colour ?? '#60a5fa',
+          color: 0xc9a66b,
           transparent: (c.alpha ?? 1) < 1,
           opacity: c.alpha ?? 1,
-          roughness: 0.6,
+          roughness: 0.85,
         })
         const mesh = new THREE.Mesh(geo, mat)
         const restZ = c.origin[2] + c.size[2] / 2
         mesh.position.set(c.origin[0] + c.size[0] / 2, c.origin[1] + c.size[1] / 2, restZ)
         mesh.visible = false
         world.add(mesh)
-        dunnage.push({ ev, mesh, restZ })
+        dunnageMeshes.push({ ev, mesh, restZ })
       }
     }
 
@@ -154,7 +207,9 @@ export default function PackAnimation({ sequence, glbUrl, height = 420, onStageC
     const partEvents = events.filter((ev) => ev.part)
     const instanced = []
     const tmp = new THREE.Matrix4()
-    const partMat = new THREE.MeshStandardMaterial({ color: 0x8b8f5c, roughness: 0.55, metalness: 0.05 })
+    // F14: darker, brand blue (--accent, #1E40AF) against the light-grey box
+    // and cardboard dunnage so the part reads as the subject of the picture.
+    const partMat = new THREE.MeshStandardMaterial({ color: 0x1e40af, roughness: 0.5, metalness: 0.05 })
     let aabbMin = null
     let dirty = true
     if (glbUrl && partEvents.length && sequence.pose_matrix) {
@@ -184,19 +239,24 @@ export default function PackAnimation({ sequence, glbUrl, height = 420, onStageC
 
     function render(t) {
       const bp = clamp01(t / T_BOX)
-      boxEdges.material.opacity = 0.9 * bp
-      wallMat.opacity = 0.06 * bp
+      boxEdges.material.opacity = 0.55 * bp
 
-      for (const { ev, mesh, restZ } of dunnage) {
+      // layerCap === numLayers (the slider's max) means "no cap" — bypasses
+      // the check entirely, so the trailing "Top dunnage" step (one past the
+      // last layer, see buildTimeline) still shows at full pack, same as
+      // before this ticket's layer slider existed.
+      const capOk = (l) => ctrlRef.current.layerCap >= numLayers || l < ctrlRef.current.layerCap
+
+      for (const { ev, mesh, restZ } of dunnageMeshes) {
         const q = clamp01((t - ev.start) / ev.dur)
-        mesh.visible = q > 0
+        mesh.visible = q > 0 && !ctrlRef.current.hideDunnage && capOk(ev.step.layer)
         mesh.position.z = restZ + (1 - easeOut(q)) * DROP_DUN
       }
 
       if (aabbMin) {
         for (const im of instanced) {
           partEvents.forEach((ev, n) => {
-            const q = clamp01((t - ev.start) / ev.dur)
+            const q = clamp01((t - ev.start) / ev.dur) * (capOk(ev.step.layer) ? 1 : 0)
             if (q <= 0) {
               tmp.makeScale(0, 0, 0)
             } else {
@@ -259,19 +319,27 @@ export default function PackAnimation({ sequence, glbUrl, height = 420, onStageC
     }
 
     let last = performance.now()
-    let tCur = 0
+    // F14: default state is the finished, packed box — start the clock at
+    // the build's own end instant (not 0) so the very first frame is a
+    // static, fully-packed picture. Play (paused by default) restarts from 0.
+    let tCur = tEnd
     let raf
     function tick(now) {
       raf = requestAnimationFrame(tick)
       const dt = (now - last) / 1000
       last = now
+      if (ctrlRef.current.requestRender) { dirty = true; ctrlRef.current.requestRender = false }
       if (ctrlRef.current.seekTo != null) {
         tCur = ctrlRef.current.seekTo
         ctrlRef.current.seekTo = null
       } else if (ctrlRef.current.playing) {
+        // Play pressed while the clock sits in the end HOLD (the default
+        // packed view): start the build now, not after 3 s of nothing.
+        if (ctrlRef.current.restartIfHeld && tCur >= tEnd) tCur = 0
+        ctrlRef.current.restartIfHeld = false
         tCur = (tCur + dt * ctrlRef.current.speed) % total
       } else if (!dirty) {
-        return // paused: render only when something changed (GLB arrived, resize)
+        return // paused: render only when something changed (GLB arrived, resize, layer/hide toggle)
       }
       if (!mount.offsetParent) { dirty = true; return } // hidden (Truck tab): keep time, skip GPU work
       dirty = false
@@ -309,10 +377,10 @@ export default function PackAnimation({ sequence, glbUrl, height = 420, onStageC
       renderer.dispose()
       mount.removeChild(renderer.domElement)
     }
-    // sequence/glbUrl identity change rebuilds the whole scene — cheap
-    // enough (one run per solve/view-switch) and much simpler than patching
-    // an existing scene in place.
-  }, [sequence, glbUrl, height])
+    // sequence/glbUrl/dunnage identity change rebuilds the whole scene —
+    // cheap enough (one run per solve/view-switch) and much simpler than
+    // patching an existing scene in place.
+  }, [sequence, glbUrl, dunnage, height])
 
   if (!sequence) return null
 
@@ -327,7 +395,10 @@ export default function PackAnimation({ sequence, glbUrl, height = 420, onStageC
         </div>
       </div>
       <div className="pack-anim-controls">
-        <button type="button" className="btn-ghost" onClick={() => setPlaying((p) => !p)}>
+        <button type="button" className="btn-ghost" onClick={() => {
+          if (!playing) ctrlRef.current.restartIfHeld = true
+          setPlaying((p) => !p)
+        }}>
           {playing ? 'Pause' : 'Play'}
         </button>
         <input type="range" min={0} max={1000} value={seekPct}
@@ -346,6 +417,20 @@ export default function PackAnimation({ sequence, glbUrl, height = 420, onStageC
           <option value={1}>1×</option>
           <option value={2}>2×</option>
         </select>
+        {numLayers > 0 && (
+          <>
+            <input type="range" min={0} max={numLayers} value={layerCap}
+              style={{ flex: 'none', width: 90 }}
+              onChange={(e) => setLayerCap(Number(e.target.value))} />
+            <span className="t mono">{layerCap}/{numLayers}</span>
+          </>
+        )}
+        {dunnage?.elements?.length > 0 && (
+          <button type="button" className="btn-ghost" aria-pressed={hideDunnage}
+            onClick={() => setHideDunnage((h) => !h)}>
+            {hideDunnage ? 'Show dunnage' : 'Hide dunnage'}
+          </button>
+        )}
       </div>
     </div>
   )
