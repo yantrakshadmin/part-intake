@@ -654,7 +654,9 @@ function ResultsPanel({ layout, box, part, truck, label, renderStatus = 'done', 
               onImageClick={() => setZoomViews(animViews)} animHeight={360} />
           ) : renderStatus === 'pending' ? (
             <p className="muted hero-image-wait">Drawing the packed box…</p>
-          ) : renderStatus === 'failed' ? (
+          ) : renderStatus === 'failed' || renderError ? (
+            // render_error is also set with status "done" when one layout's
+            // insert BOM refused to render (F11): show the reason, not "yet".
             <p className="muted hero-image-wait">{renderError || 'Drawing could not be rendered'}</p>
           ) : (
             <p className="muted hero-image-wait">No packed view for this run yet.</p>
