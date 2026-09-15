@@ -200,10 +200,6 @@ class DunnageOut(BaseModel):
     # pockets). Omitting it here did not drop a field -- a Literal REJECTS, so
     # GET /api/solve-jobs/{id} 500'd for every interleaved part.
     archetype: Literal["bar_and_rod", "pocket_tray", "layer_sheets"]
-    # F11: set when the parts nest side by side in plan, which is why this BOM
-    # has sheets and no pockets. {"axis": 0|1, "pitch_mm", "extent_mm"} or null.
-    # Declared here or pydantic drops it silently (hard rule 9).
-    interleaved: Optional[dict] = None
     elements: list[DunnageElementOut]
     stack_height_mm: float
     build_height_mm: float
@@ -213,6 +209,13 @@ class DunnageOut(BaseModel):
     # or B means the side separators do not fit beside the parts; the worker
     # turns that into a warning. `fits` is the height budget only.
     slack_lbh: tuple[float, float, float]
+    # F11. `interleaved` says why this insert has no pockets (the parts nest
+    # side by side in plan); `layer_step_mm` is the vertical distance the
+    # count was solved on and the drawing stacks at -- the measured pitch plus
+    # any separator the parts do not nest into. Declared here or pydantic
+    # drops them silently (hard rule 9).
+    interleaved: Optional[dict] = None
+    layer_step_mm: float = 0.0
     fits: bool
     caveat: str
 

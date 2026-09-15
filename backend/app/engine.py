@@ -298,11 +298,14 @@ def solve(mesh, candidates, part_kg: float = 0.0, assets=None, top_n: int = 2,
             if pose.voxel_mm > 0:
                 v = pose.voxel_mm
                 dead = dunnage.dead_height_mm(design.extent_lbh, design.pitch_lbh,
-                                              clearance_lbh)
+                                              clearance_lbh, grid=design.grid)
+                step = dunnage.layer_step_mm(design.extent_lbh, design.pitch_lbh,
+                                             clearance_lbh, grid=design.grid)
                 usable = (design.inner[0], design.inner[1], design.inner[2] - dead)
                 upper = max(upper, lattice_count(
                     tuple(e - v for e in design.extent_lbh),
-                    tuple(p - v for p in design.pitch_lbh), usable)[0])
+                    (design.pitch_lbh[0] - v, design.pitch_lbh[1] - v, step - v),
+                    usable)[0])
             best_custom = replace(design, pose_label=pose.label, count_upper=upper)
     if best_custom is not None:
         # Baseline against this box's OWN inner -- the synthesised box is not

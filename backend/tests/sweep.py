@@ -70,6 +70,28 @@ CAD_SUFFIXES = {".stp", ".step", ".igs", ".iges"}
 UNREADABLE_SUFFIXES = {".sldprt", ".sldasm"}
 DEFAULT_PATHS = ["../Rahul", "tests/fixtures/customer"]
 
+def pocket_lt_part(layout) -> list:
+    """Dunnage cells too small to hold the part in plan (F11). -> [(name, axis,
+    cell, extent)]
+
+    Reads the SAME `dunnage.bom` dict the sweep already stamped on the layout
+    (hard rule 9: one expression, not a second opinion). `dunnage.bom` raises
+    rather than return such a BOM, so on a real file the flag arrives the
+    other way round -- `process` catches that ValueError and flags the row --
+    and this scan is what catches a BOM that got past the invariant.
+    """
+    bad = []
+    for el in (layout.dunnage or {}).get("elements", []):
+        cell = el.get("cell_mm")
+        if not cell:
+            continue
+        for ax in (0, 1):
+            if round(cell[ax], 1) < round(float(layout.extent_lbh[ax]), 1) - 1e-6:
+                bad.append((el["name"], "LB"[ax], cell[ax],
+                            float(layout.extent_lbh[ax])))
+    return bad
+
+
 EXTRACT_SLOW_S = 60.0
 RENDER_SLOW_S = 20.0
 
@@ -151,6 +173,9 @@ class Row:
     explode_png: Path | None = None
     packed_png: Path | None = None
 
+    # F11: [(element, axis, cell_mm, extent_mm)] over every ranked layout.
+    pockets_lt_part: list = field(default_factory=list)
+
     flags: list = field(default_factory=list)
 
     @property
@@ -210,11 +235,25 @@ def process(path: Path, assets, out_dir: Path, top_n: int) -> Row:
             if inner is None:
                 stamped.append(lay)
                 continue
-            bom = dunnage.bom(lay.extent_lbh, lay.pitch_lbh, lay.grid, inner,
-                              clearance_lbh)
             cc = engine_mod.cuboid_count(part_lbh, inner)
+            try:
+                bom = dunnage.bom(lay.extent_lbh, lay.pitch_lbh, lay.grid,
+                                  inner, clearance_lbh)
+            except ValueError as exc:
+                # `dunnage.bom`'s own F11 invariant. Caught HERE: the outer
+                # except sets ENGINE_FAIL, which is not fatal, so a BOM with a
+                # pocket narrower than the part would have exited 0.
+                row.pockets_lt_part.append((lay.asset_name, "-", 0.0, 0.0))
+                row.flags.append("POCKET_LT_PART")
+                logger.error("dunnage.bom refused %s/%s: %s",
+                             path.name, lay.asset_name, exc)
+                stamped.append(replace(lay, cuboid_count=cc))
+                continue
             stamped.append(replace(lay, dunnage=bom.as_dict(), cuboid_count=cc))
         row.top = stamped
+        row.pockets_lt_part += [b for lay in stamped for b in pocket_lt_part(lay)]
+        if row.pockets_lt_part and "POCKET_LT_PART" not in row.flags:
+            row.flags.append("POCKET_LT_PART")
 
         no_nest = all(
             p.pitch[0] >= p.extent[0] - 1e-6 and p.pitch[1] >= p.extent[1] - 1e-6
@@ -247,6 +286,12 @@ def process(path: Path, assets, out_dir: Path, top_n: int) -> Row:
     except Exception as exc:  # noqa: BLE001
         row.engine_error = f"{type(exc).__name__}: {exc}"
         row.flags.append("ENGINE_FAIL")
+        # `dunnage.bom`'s F11 invariant, raised from wherever the engine asked
+        # for a BOM (`layouts_for` charges one per pose for the height budget,
+        # long before this file stamps its own). ENGINE_FAIL is not fatal, so
+        # without this line a pocket narrower than the part still exits 0.
+        if "cannot hold it" in str(exc):
+            row.flags.append("POCKET_LT_PART")
         return row
     row.engine_s = time.monotonic() - t0
 
@@ -377,14 +422,14 @@ def render_markdown(rows: list[Row], unreadable: list[Path], top_n: int) -> str:
         lines.append("")
         lines.append("| rank | asset | pose | count | grid | extent_lbh | "
                      "pitch_lbh | count_upper | cuboid_count | limited_by | "
-                     "turned |")
-        lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+                     "turned | archetype |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
         for i, lay in enumerate(row.top, start=1):
             lines.append(
                 f"| {i} | {lay.asset_name} | {lay.pose_label} | {lay.count} | "
                 f"{lay.grid} | {lay.extent_lbh} | {lay.pitch_lbh} | "
                 f"{lay.count_upper} | {lay.cuboid_count} | {lay.limited_by} | "
-                f"{lay.turned} |"
+                f"{lay.turned} | {(lay.dunnage or {}).get('archetype', '-')} |"
             )
         lines.append("")
         if row.gt_check:
@@ -393,6 +438,9 @@ def render_markdown(rows: list[Row], unreadable: list[Path], top_n: int) -> str:
                 f"- ground-truth contract: {name} got {got_c}/{got_g}, "
                 f"shipped {want_c}/{want_g} -> {'MATCH' if match else 'MISMATCH'}"
             )
+        for name, ax, cell, ext in row.pockets_lt_part:
+            lines.append(f"- POCKET_LT_PART: {name} cell {cell:g}mm on {ax} "
+                         f"under a {ext:g}mm part")
         if row.render_error:
             lines.append(f"- RENDER_FAIL: {row.render_error}")
         if row.explode_s is not None or row.gif_s is not None:
@@ -412,7 +460,8 @@ def render_markdown(rows: list[Row], unreadable: list[Path], top_n: int) -> str:
     lines.append("## Flag summary")
     all_flags = ["EXTRACT_FAIL", "EXTRACT_SLOW", "ENGINE_FAIL", "CLIPPED",
                 "NO_NEST", "BELOW_CUBOID", "UPPER_LT_COUNT", "TURNED",
-                "RENDER_FAIL", "RENDER_SLOW", "WARNINGS", "GT_MISMATCH"]
+                "RENDER_FAIL", "RENDER_SLOW", "WARNINGS", "GT_MISMATCH",
+                "POCKET_LT_PART"]
     for flag in all_flags:
         hit = [r.path.name for r in rows if flag in r.flags]
         lines.append(f"- {flag}: {len(hit)} -- {', '.join(hit) if hit else '(none)'}")
@@ -459,7 +508,8 @@ def main(argv: list[str] | None = None) -> int:
     # ground-truth regression is CLAUDE.md's own non-negotiable, and this is
     # the one check in this file that can actually see it break.
     fatal = any(f in row.flags for row in rows
-               for f in ("BELOW_CUBOID", "UPPER_LT_COUNT", "GT_MISMATCH"))
+               for f in ("BELOW_CUBOID", "UPPER_LT_COUNT", "GT_MISMATCH",
+                         "POCKET_LT_PART"))
     return 1 if fatal else 0
 
 

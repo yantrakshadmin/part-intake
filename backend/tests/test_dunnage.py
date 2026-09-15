@@ -330,6 +330,143 @@ def check_coplanar_bars_charge_once(check) -> None:
           f": build {mubea.build_height_mm:.1f} vs stack {mubea.stack_height_mm:.1f}")
 
 
+def check_interleaved_pose_gets_no_pockets(check) -> None:
+    """F11: pitch < extent in plane means NO in-plane divider can exist.
+
+    The SX4 floor side cover's winning layout in PLS12103 (no CAD needed --
+    these are the engine's own extent/pitch/grid): extent 332 on L, pitch 177,
+    5 parts across. The BOM said "5 x 1 pockets, 177 x 833 x 69 mm each" and a
+    177mm pocket cannot hold a 332mm part -- the parts nest side by side, so
+    there is nowhere for a wall to go. Layer separator sheets only; a slotted
+    comb is the design for parts standing on edge (engine ticket E1), and its
+    slot pitch is a deck question, so nothing here invents one.
+    """
+    ext, pitch = (332.0, 876.0, 76.0), (177.0, 833.0, 72.0)
+    grid, inner = (5, 1, 13), (1150.0, 950.0, 1000.0)
+    got = dunnage.bom(ext, pitch, grid, inner)
+
+    check(got.archetype != "pocket_tray",
+          "SX4 (pitch_L 177 < extent_L 332, 5 across) is not a pocket tray",
+          f": got {got.archetype!r}")
+    check(got.archetype == "layer_sheets", "SX4 -> layer_sheets",
+          f": got {got.archetype!r}")
+    check(not any(e.cell_mm for e in got.elements),
+          "no element claims a pocket cell",
+          f": {[(e.name, e.cell_mm) for e in got.elements if e.cell_mm]}")
+    check(got.interleaved == {"axis": 0, "pitch_mm": 177.0, "extent_mm": 332.0},
+          "the interleaved axis is reported with its numbers",
+          f": got {got.interleaved}")
+    check(got.as_dict()["interleaved"] == got.interleaved,
+          "interleaved is on the wire")
+
+    sheets = [e for e in got.elements if e.name.startswith("Separator sheet")]
+    check(len(got.elements) == 1 and len(sheets) == 1,
+          "one element: the separator sheet",
+          f": {[e.name for e in got.elements]}")
+    check(sheets and sheets[0].qty == grid[2] + 1,
+          f"{grid[2] + 1} separator sheets (one per layer boundary)",
+          f": got {sheets[0].qty if sheets else None}")
+    check(sheets and sheets[0].dims_mm[:2] == (inner[0], inner[1]),
+          "sheet is the full inner L x B",
+          f": got {sheets[0].dims_mm if sheets else None}")
+    # Same lattice, one part across: the pitch then describes nothing, so the
+    # tray survives -- with a pocket sized to the PART, never to the pitch.
+    one = dunnage.bom(ext, pitch, (1, 1, 13), inner)
+    check(one.archetype == "pocket_tray" and one.interleaved is None,
+          "one part across -> still a pocket tray", f": {one.archetype}")
+    tray = next(e for e in one.elements if e.cell_mm)
+    check(tray.cell_mm[0] == ext[0],
+          "...whose single-column pocket is the part, not the 177mm pitch",
+          f": got {tray.cell_mm}")
+
+    # The invariant is wired into `bom()` ITSELF, not merely available as a
+    # helper: with the archetype switch stubbed out -- the exact regression it
+    # guards -- `bom()` must refuse to return the tray it just built. Replace
+    # the `_assert_cells_hold_the_part(...)` call in `bom` with `pass` and
+    # this is the check that fails.
+    original = dunnage._interleaved_in_plane
+    dunnage._interleaved_in_plane = lambda *a, **k: None
+    try:
+        dunnage.bom(ext, pitch, grid, inner)
+        raised = ""
+    except ValueError as exc:
+        raised = str(exc)
+    finally:
+        dunnage._interleaved_in_plane = original
+    check("177mm cell on axis 0 under a 332mm part" in raised,
+          "bom() itself refuses to emit a 177mm pocket under a 332mm part",
+          f": raised {raised!r}")
+
+    # The invariant itself: a BOM with a too-small cell must never leave
+    # `bom()`. Built by hand because no lattice can reach it any more.
+    bad = dunnage.Element(name="x", labels=("L", "B", "H"),
+                          dims_mm=(1.0, 1.0, 1.0), qty=1, spec="s",
+                          basis="derived", cell_mm=(100.0, 100.0, 10.0))
+    try:
+        dunnage._assert_cells_hold_the_part([bad], (332.0, 100.0, 76.0))
+        raised = False
+    except ValueError:
+        raised = True
+    check(raised, "a 100mm cell under a 332mm part is refused by bom()'s own "
+                  "invariant")
+
+
+def check_layer_sheets_charge_every_boundary(check) -> None:
+    """F11: with no tray under them, the parts rest ON the sheets.
+
+    10 layers need 11 sheets. Charging one (the tray's rule, where the sheet
+    shares the pitch with the pocket under it) promised a layer the insert
+    cannot carry: extent 100 / pitch 100 / inner 1003 read 10 layers x 42 per
+    layer = 420 parts, while the BOM's own sheets need 1033mm.
+
+    Both halves are checked here: the BOM charges every boundary, and the
+    ENGINE steps by `pitch_H + sheet` so the count it picks is one the BOM
+    supports. The engine expressions are `nesting.layouts_for`'s own.
+    """
+    from app.nesting import lattice_count
+    ext, pitch, inner = (300.0, 100.0, 100.0), (150.0, 100.0, 100.0), (1150.0, 750.0, 1003.0)
+
+    _flat, in_plane, _ = lattice_count(ext, pitch, (inner[0], inner[1], ext[2]))
+    dead = dunnage.dead_height_mm(ext, pitch, grid=in_plane)
+    step = dunnage.layer_step_mm(ext, pitch, grid=in_plane)
+    count, grid, _ = lattice_count(ext, (pitch[0], pitch[1], step),
+                                   (inner[0], inner[1], inner[2] - dead))
+    got = dunnage.bom(ext, pitch, grid, inner)
+
+    check(got.archetype == "layer_sheets", "reviewer's lattice -> layer_sheets",
+          f": {got.archetype}")
+    check(step == pitch[2] + dunnage.LAYER_SHEET_MM,
+          f"the engine steps by pitch + one {dunnage.LAYER_SHEET_MM:g}mm sheet",
+          f": step {step}")
+    check(grid[2] == 9 and count == 378,
+          "9 layers x 42 = 378, not the 10 x 42 = 420 that does not fit",
+          f": grid {grid}, count {count}")
+    sheet = next(e for e in got.elements if e.qty == grid[2] + 1)
+    check(sheet.net_height_mm == (grid[2] + 1) * dunnage.LAYER_SHEET_MM,
+          f"all {grid[2] + 1} sheets are charged, not one",
+          f": {sheet.net_height_mm}mm")
+    check(got.fits and got.build_height_mm <= inner[2] + 1e-6,
+          "the BOM for the layout the engine emits fits the box",
+          f": build {got.build_height_mm} vs {inner[2]}")
+    # Non-vacuity: one more layer is what does NOT fit, so the count is right
+    # up against the box and not merely conservative.
+    over = dunnage.bom(ext, pitch, (grid[0], grid[1], grid[2] + 1), inner)
+    check(not over.fits, "one more layer does not fit (1033 > 1003mm)",
+          f": build {over.build_height_mm}")
+    # A vertical interleave deeper than the sheet absorbs it: SX4's own pose
+    # (nest depth 4mm > 3mm sheet) charges nothing per layer, which is why its
+    # counts do not move.
+    check(dunnage.layer_step_mm((332.0, 876.0, 76.0), (177.0, 833.0, 72.0),
+                                grid=(5, 1, 13)) == 72.0,
+          "a 4mm vertical interleave swallows the 3mm sheet: step = pitch",
+          f": {dunnage.layer_step_mm((332.0, 876.0, 76.0), (177.0, 833.0, 72.0), grid=(5, 1, 13))}")
+    # Mubea and TRW cannot move: neither is layer_sheets.
+    for case in CASES:
+        check(dunnage.layer_step_mm(case.pose_lbh, case.pitch_lbh,
+                                    grid=_grid(case)) == case.pitch_lbh[2],
+              f"{case.ref}: step is the measured pitch, unchanged")
+
+
 def main() -> int:
     failures: list[str] = []
 
@@ -346,6 +483,8 @@ def main() -> int:
     check_in_plane_slack(check)
     check_bottom_separator_is_the_nest_depth(check)
     check_coplanar_bars_charge_once(check)
+    check_interleaved_pose_gets_no_pockets(check)
+    check_layer_sheets_charge_every_boundary(check)
 
     print()
     for case in CASES:

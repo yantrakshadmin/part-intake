@@ -52,11 +52,17 @@ def test_design_space():
 
 def usable(d, clearance_lbh=(0.0, 0.0, 0.0)):
     """The design's inner less the height its own insert occupies above the
-    stack -- the inner the lattice gets. One expression, shared with
-    `nesting.layouts_for` and `synthesise` via `dunnage.dead_height_mm`."""
+    stack, and the vertical pitch the lattice must step by -- the two numbers
+    `nesting.layouts_for` and `synthesise` hand `lattice_count`, from the same
+    `dunnage` expressions (F11: with layer sheets the step is not the pitch).
+    -> (inner_lbh, pitch_lbh)"""
     from app import dunnage
-    dead = dunnage.dead_height_mm(d.extent_lbh, d.pitch_lbh, clearance_lbh)
-    return (d.inner[0], d.inner[1], d.inner[2] - dead)
+    dead = dunnage.dead_height_mm(d.extent_lbh, d.pitch_lbh, clearance_lbh,
+                                  grid=d.grid)
+    step = dunnage.layer_step_mm(d.extent_lbh, d.pitch_lbh, clearance_lbh,
+                                 grid=d.grid)
+    return ((d.inner[0], d.inner[1], d.inner[2] - dead),
+            (d.pitch_lbh[0], d.pitch_lbh[1], step))
 
 
 def test_self_consistent():
@@ -68,7 +74,8 @@ def test_self_consistent():
     that -- 42 reported in a box solved for 21 (wheel, Alternative 1 pose).
     """
     for c, d in _designs():
-        count, grid, _ = lattice_count(d.extent_lbh, d.pitch_lbh, usable(d))
+        inner_fit, pitch_fit = usable(d)
+        count, grid, _ = lattice_count(d.extent_lbh, pitch_fit, inner_fit)
         assert (count, grid) == (d.count, d.grid), \
             f"{c.ref}: design says {d.count} {d.grid}, lattice_count says {count} {grid}"
         print(f"  {c.ref:<18} {count} = {grid} recomputed ok")
@@ -92,17 +99,19 @@ def test_own_bom_fits():
         bd = dunnage.bom(d.extent_lbh, d.pitch_lbh, d.grid, d.inner)
         assert bd.fits, f"{c.ref}: custom box does not fit its own BOM {bd.slack_lbh}"
     # The review's repro: the wheel's "Alternative 1" pose interleaves in plane
-    # (121 < 140 on B) but stacks flat. It is a slotted tray now (both
-    # interleaves are needed for bars), so the dead height is one sheet; the
+    # (121 < 140 on B) but stacks flat. It is layer sheets now -- bars need
+    # both interleaves, and F11 rules out pockets on an axis where the parts
+    # nest side by side (a 121mm pocket cannot hold a 140mm part) -- so the
     # point of the check is the invariant -- the count is the count of the box
     # reported, recomputed on inner-minus-dead, and the BOM fits it. The first
     # version of the loop accepted 1 layer and then recomputed 2 on the taller
     # inner it had just made room for the dunnage in.
     alt = synthesise((372.0, 140.0, 356.0), (377.0, 121.0, 356.0), 2.5, clearance_lbh=clr)
     ba = dunnage.bom(alt.extent_lbh, alt.pitch_lbh, alt.grid, alt.inner, clr)
-    n, g, _ = lattice_count(alt.extent_lbh, alt.pitch_lbh, usable(alt, clr))
+    inner_fit, pitch_fit = usable(alt, clr)
+    n, g, _ = lattice_count(alt.extent_lbh, pitch_fit, inner_fit)
     assert ba.fits and (n, g) == (alt.count, alt.grid) and alt.layers == 2 \
-        and ba.archetype == "pocket_tray", \
+        and ba.archetype == "layer_sheets", \
         (alt.count, alt.grid, alt.inner, ba.slack_lbh, ba.archetype, n, g)
     # And when the sheet would push past the cap, a layer goes, not the fit:
     # 8 layers of a 125-tall, 125-pitch part stack to exactly 1000.

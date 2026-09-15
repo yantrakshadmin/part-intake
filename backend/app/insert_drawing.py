@@ -520,7 +520,7 @@ def _labels(rows: list, el: dict, extent, pitch, grid, count: int) -> list:
                 dim="%g x %g x %g mm" % tuple(extent),
                 extras=["%d x %d per layer, pitch %g / %g mm"
                         % (grid[0], grid[1], pitch[0], pitch[1]),
-                        "%d layers at %g mm pitch" % (grid[2], pitch[2]),
+                        "%d layers at %g mm step" % (grid[2], pitch[2]),
                         "pitch %g < width %g: layers interleave"
                         % (pitch[1], extent[1]) if pitch[1] < extent[1] else
                         "pitch %g > width %g: clearance / pocket wall"
@@ -635,6 +635,12 @@ def _place(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     """
     extent = tuple(float(v) for v in extent_lbh)
     pitch = tuple(float(v) for v in pitch_lbh)
+    # F11: layers step by the BOM's own vertical step, which is the measured
+    # pitch PLUS any layer separator the parts do not nest into -- the number
+    # `nesting.layouts_for` counted layers with (hard rule 9: one expression).
+    # At the raw pitch every layer was drawn into the sheet above it and the
+    # insert topped out below its own build height.
+    pitch = (pitch[0], pitch[1], bom.layer_step_mm or pitch[2])
     inner = tuple(float(v) for v in inner_lbh)
     grid = tuple(int(v) for v in grid)
     el = {e.name: e for e in bom.elements}
@@ -972,7 +978,8 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
             "(extent H %g - pitch H %g): dunnage inside that depth is free\n%s"
             % (round(bom.build_height_mm, 1), bom.inner_h_mm,
                "fits" if bom.fits else "DOES NOT FIT",
-               round(bom.nest_depth_mm, 1), extent[2], pitch[2], bom.caveat))
+               round(bom.nest_depth_mm, 1), extent[2],
+               float(pitch_lbh[2]), bom.caveat))
     ax.text(0.0, 0.0, foot, transform=ax.transAxes, fontsize=8.5, va="bottom",
             color=C_MUTE, wrap=True, linespacing=1.6)
 
@@ -1761,6 +1768,42 @@ def _check_frames_false(case) -> None:
           "frames=True byte-for-byte" % (bom.archetype, asset, ref))
 
 
+def _check_layer_step_is_drawn() -> None:
+    """The picture must stack at the step the count and the BOM charged (F11).
+
+    With layer separators under the parts (no tray to share the pitch with)
+    the vertical step is `pitch_H + sheet`, which is what `nesting.layouts_for`
+    solved the layer count on. Stacking the drawing at the raw pitch put every
+    layer inside the sheet above it and topped the insert out below its own
+    `build_height_mm` -- 912 against 930 on the numbers below, and 24mm short
+    on a real FLC12101 layout. Bar and tray archetypes step by the measured
+    pitch (`layer_step_mm` returns it unchanged), so their pictures cannot
+    move; this is the case that can.
+    """
+    from .nesting import lattice_count
+    extent, pitch, inner = (300.0, 100.0, 100.0), (150.0, 100.0, 100.0), (1150.0, 750.0, 1003.0)
+    _flat, in_plane, _ = lattice_count(extent, pitch, (inner[0], inner[1], extent[2]))
+    dead = dunnage.dead_height_mm(extent, pitch, grid=in_plane)
+    step = dunnage.layer_step_mm(extent, pitch, grid=in_plane)
+    count, grid, _ = lattice_count(extent, (pitch[0], pitch[1], step),
+                                   (inner[0], inner[1], inner[2] - dead))
+    bom = dunnage.bom(extent, pitch, grid, inner)
+    assert bom.archetype == "layer_sheets" and bom.layer_step_mm == step, \
+        (bom.archetype, bom.layer_step_mm, step)
+
+    vox = np.ones([int(np.ceil(e / CELL_MM)) for e in extent], dtype=bool)
+    p = _place(voxels=vox, extent_lbh=extent, pitch_lbh=pitch, grid=grid,
+               inner_lbh=inner, bom=bom, count=count, cell_mm=CELL_MM)
+    top = max(o[2] + s[2] for r in p.rows
+              if r.geo is not None and not r.is_parts for o, s in r.geo()[0])
+    assert abs(top - bom.build_height_mm) < 1e-6, \
+        "insert drawn %g mm tall, BOM says %g" % (top, bom.build_height_mm)
+    print("PASS  %-14s step %g mm (pitch %g + %g sheet): %d layers drawn, "
+          "insert tops out at %g mm == BOM build height"
+          % (bom.archetype, bom.layer_step_mm, pitch[2],
+             bom.layer_step_mm - pitch[2], grid[2], top))
+
+
 def _check_ortho_panels(outdir) -> None:
     """The orthographic report drawing must actually SEPARATE parts (F15).
 
@@ -2039,6 +2082,7 @@ def _selfcheck(outdir) -> int:
     assert not catch.msgs, catch.msgs
     _check_frames_false(cases[0])
     _check_ortho_panels(outdir)
+    _check_layer_step_is_drawn()
     logger.removeHandler(catch)
     print("all insert-drawing checks passed")
     return 0

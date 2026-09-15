@@ -463,6 +463,13 @@ part.** SX4 cover: pitch 177 < extent 332 in plane, yet the BOM says
 archetype must be a slotted comb (slot = part thickness + clearance, count =
 grid) or plain layer sheets — not pockets. Check: no BOM element whose cell
 is smaller than the part extent on an in-plane axis; sweep asserts it.
+Review follow-ups (2026-09-15, not blockers): **F11a** — `bom()` now
+raises on the invariant, and `engine.solve` calls it in a plain list
+comprehension, so a dunnage-only defect would fail the whole solve and lose
+every count; near-unreachable today, but it should degrade the BOM, not the
+answer. **F11b** — `_interleaved_in_plane` has no noise floor: at clearance
+0 a 2-mm overlap (below `archetype_of`'s 4-mm floor) strips a tray to
+sheets. Require the overlap to exceed the sheet thickness, or state why not.
 
 **F12 — Drawing clips 1.2 % of cells on a 35-column lattice.** Sweep:
 Y2V_YK9_Rack, PLS12803, pitch 33 mm x 35 columns = 8.25 cells per step;
@@ -506,6 +513,16 @@ single info line ("Weight limit cuts this box from 70 to 65 parts"), not a
 WHY disclosure. Acceptance: at 1440×900 the Packaging screen shows the 3D
 view, the list and the ranked candidates with no paragraph of prose
 anywhere. Candidate cards show three numbers: box, parts/box, parts/truck.
+
+**F13a — Backend emits the binding-constraint sentence per layout.** The
+results screen showed `warnings[0]` under the selected card and it was about
+the custom box. Rule 9: the sentence is computed, so the backend owns it.
+Add `Layout.constraint: str | None` (from `limited_by` + the two counts it
+already has: "Weight cap cuts PLS12803 from 70 to 65 parts", "Inner height
+allows 8 layers, a 9th needs 1033 mm") and `LayoutOut.constraint` in the same
+edit; frontend shows it as the one info line; nothing else on the screen
+explains anything. Check: the sentence is null for a geometry-limited layout
+and names the number for a weight/height-limited one, over real HTTP.
 
 **F14 — Packed view drawn from the real mesh in cardboard, on white.** Their
 viewport shows shaded solid parts sitting in thin brown partitions and

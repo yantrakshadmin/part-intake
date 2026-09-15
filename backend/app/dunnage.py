@@ -8,11 +8,16 @@ their own lattice as a contract at the same status as the 40/48 counts.
 Pure arithmetic over (extent, pitch, grid, asset inner). No DB, no mesh, no
 CAD -- everything here comes from numbers `nesting` already measured.
 
-Two systems, ONE rule. The Mubea and TRW decks look like two archetypes and
-are not: they are the same predicate answered differently.
+Three systems, ONE rule. The Mubea and TRW decks look like two archetypes and
+are not: they are the same predicate -- do the parts nest? -- answered per
+axis, and F11 added the third answer.
 
-    parts interleave in plane  ->  layer bars + separators   (Mubea)
-    they do not                ->  pocket tray + sheets      (TRW)
+    nest in plane AND vertically  ->  layer bars + separators   (Mubea)
+    nest in plane only            ->  layer separator sheets    (SX4 cover)
+    do not nest in plane          ->  pocket tray + sheets      (TRW)
+
+A pocket needs a wall between two parts, and parts that interleave in plan
+leave nowhere to put one -- hence sheets, never pockets, on that pose.
 
 What is derived, and what is not, is the whole point of this module. A
 plausible wrong number here costs real money per shipment, so every element
@@ -38,7 +43,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +148,7 @@ class Element:
 class Bom:
     """The insert BOM for one layout, plus its height budget."""
 
-    archetype: str                 # "bar_and_rod" | "pocket_tray"
+    archetype: str                 # "bar_and_rod" | "pocket_tray" | "layer_sheets"
     elements: list = field(default_factory=list)
     stack_height_mm: float = 0.0   # what the parts themselves occupy
     build_height_mm: float = 0.0   # stack + dead height from the dunnage
@@ -159,6 +164,15 @@ class Bom:
     # axis the count was solved on, and negative in-plane slack reaches the
     # engineer as a warning with the number in it.
     slack_lbh: tuple = (0.0, 0.0, 0.0)
+    # F11: set when the parts nest side by side in plan (raw pitch < extent
+    # with more than one part on that axis), which is what rules pockets out.
+    # {"axis": 0|1, "pitch_mm": ..., "extent_mm": ...}, else None.
+    interleaved: dict | None = None
+    # Vertical distance from one layer to the next, mm: the measured pitch
+    # plus any layer separator the parts do not nest into (`layer_step_mm`).
+    # The count is solved on this, so the PICTURE has to stack on it too --
+    # drawing at the raw pitch put every layer 3mm inside the sheet above it.
+    layer_step_mm: float = 0.0
     caveat: str = CAVEAT
 
     @property
@@ -180,6 +194,8 @@ class Bom:
             "inner_h_mm": round(self.inner_h_mm, 2),
             "nest_depth_mm": round(self.nest_depth_mm, 2),
             "slack_lbh": [round(s, 2) for s in self.slack_lbh],
+            "interleaved": self.interleaved,
+            "layer_step_mm": round(self.layer_step_mm, 2),
             "fits": self.fits,
             "caveat": self.caveat,
         }
@@ -192,10 +208,12 @@ def archetype_of(extent_lbh, pitch_lbh, clearance_lbh=NO_CLEARANCE_LBH,
     Bars and rods are the Mubea mechanism: layers sit INTO each other on bars
     whose height is the vertical pitch, and the parts overlap in plan. Both
     interleaves have to be real -- beyond `min_interleave_mm` -- for that
-    system to make sense. A part that overlaps in plan but stacks flat is a
-    slotted tray per layer with a sheet between (the pocket-tray structure
-    with cells at the pitch); a part that nests vertically but not in plan is
-    a pocket tray whose pockets are deeper than the part (TRW). The touching
+    system to make sense. A part that overlaps in plan but stacks flat gets
+    layer separator sheets and nothing in plane (F11: `bom` downgrades the
+    tray to "layer_sheets" -- no wall fits between parts that interleave, and
+    a pocket at the pitch is narrower than the part it must hold); a part that
+    nests vertically but not in plan is a pocket tray whose pockets are deeper
+    than the part (TRW). The touching
     pitch is the measured pitch minus the clearance baked into it. Per
     CLAUDE.md hard rule 9 the backend owns this and ships it.
     """
@@ -207,24 +225,102 @@ def archetype_of(extent_lbh, pitch_lbh, clearance_lbh=NO_CLEARANCE_LBH,
     return "bar_and_rod" if in_plane and vertical else "pocket_tray"
 
 
-def dead_height_mm(extent_lbh, pitch_lbh, clearance_lbh=NO_CLEARANCE_LBH,
-                   **kw) -> float:
-    """Height the insert adds ABOVE the parts stack, mm. Independent of the grid.
+def sheet_step_mm(nest_depth: float, layer_sheet_mm: float = LAYER_SHEET_MM) -> float:
+    """Height ONE layer separator adds, mm: its thickness less the vertical
+    interleave the parts nest into it with."""
+    return max(0.0, float(layer_sheet_mm) - float(nest_depth))
 
-    Every `net_height_mm` in both generators is a function of extent_H,
-    pitch_H and the archetype alone -- a bar taller than the nest depth, a top
-    separator above it, the sheet under the bottom tray -- never of how many
-    layers there are. So the count can charge it up front:
-    `nesting.layouts_for` and `synthesis.synthesise` both hand `lattice_count`
-    an inner height of `inner_H - dead_height_mm(...)`, which is the feedback
-    the audit found missing (dunnage designed after the count, then reported
-    as not fitting). By construction `Bom.fits` is then true on H for every
-    layout the engine returns; it stays reported because callers can still
-    feed `bom()` a grid the engine did not solve for.
+
+def archetype_for(extent_lbh, pitch_lbh, grid,
+                  clearance_lbh=NO_CLEARANCE_LBH, **kw) -> str:
+    """`archetype_of` plus the F11 downgrade, which needs the grid to see."""
+    kind = archetype_of(extent_lbh, pitch_lbh, clearance_lbh,
+                        kw.get("min_interleave_mm", INTERLEAVE_MIN_MM))
+    if kind == "pocket_tray" and _interleaved_in_plane(
+            extent_lbh, pitch_lbh, grid) is not None:
+        return "layer_sheets"
+    return kind
+
+
+def layer_step_mm(extent_lbh, pitch_lbh, clearance_lbh=NO_CLEARANCE_LBH,
+                  grid=(1, 1, 1), layer_sheet_mm: float = LAYER_SHEET_MM,
+                  **kw) -> float:
+    """Vertical pitch the LATTICE must step by: the measured pitch plus the
+    separator at every layer boundary the parts do not nest into.
+
+    Only "layer_sheets" pays it. A pocket tray's sheet shares the pitch with
+    the pocket under it (depth + sheet == pitch) and a bar lies inside the
+    pitch by construction, so both step by the measured pitch -- which is why
+    Mubea and TRW cannot move. With the tray slab gone the parts rest ON the
+    sheets instead, and 10 layers of a flat-stacking part need 11 of them:
+    the engine must step by `pitch_H + sheet` or it promises a layer the
+    insert cannot carry (extent 100 / pitch 100 / inner 1003 claimed 10
+    layers; the BOM needs 1033mm and only 9 fit).
+    """
+    pitch_h = float(pitch_lbh[2])
+    if archetype_for(extent_lbh, pitch_lbh, grid, clearance_lbh, **kw) \
+            != "layer_sheets":
+        return pitch_h
+    return pitch_h + sheet_step_mm(max(0.0, float(extent_lbh[2]) - pitch_h),
+                                   layer_sheet_mm)
+
+
+def dead_height_mm(extent_lbh, pitch_lbh, clearance_lbh=NO_CLEARANCE_LBH,
+                   grid=(1, 1, 1), **kw) -> float:
+    """Height the insert adds OUTSIDE the layer pitch, mm, for `grid` layers.
+
+    Pass the in-plane grid: whether the parts interleave in plan decides the
+    archetype (F11), and with the default (1, 1, 1) this function cannot see
+    it. The vertical part of `grid` is deliberately ignored -- everything
+    per-layer belongs to `layer_step_mm`, so what is left here is the bar or
+    top separator above the stack and the sheets under the bottom and over
+    the top row, none of which depend on the layer count.
+
+    `nesting.layouts_for` and `synthesis.synthesise` hand `lattice_count` an
+    inner height of `inner_H - dead_height_mm(...)` AND a vertical pitch of
+    `layer_step_mm(...)`. Together those two make `Bom.fits` true by
+    construction for every layout the engine returns; `fits` stays reported
+    because callers can still feed `bom()` a grid the engine did not solve
+    for.
     """
     return sum(e.net_height_mm for e in
-               bom(extent_lbh, pitch_lbh, (1, 1, 1), (1e9, 1e9, 1e9),
-                   clearance_lbh, **kw).elements)
+               bom(extent_lbh, pitch_lbh, (int(grid[0]), int(grid[1]), 1),
+                   (1e9, 1e9, 1e9), clearance_lbh, **kw).elements)
+
+
+def _interleaved_in_plane(extent_lbh, pitch_lbh, grid) -> dict | None:
+    """First in-plane axis on which the parts nest side by side, or None.
+
+    RAW pitch, not the clearance-corrected pitch `archetype_of` uses: that one
+    asks whether the PARTS nest, this one asks whether a pocket wall would fit
+    between two of them, and the wall has to fit in the pitch as measured.
+    `grid > 1` because with one part on an axis the pitch describes nothing.
+    """
+    for ax in (0, 1):
+        if (int(grid[ax]) > 1
+                and float(pitch_lbh[ax]) < float(extent_lbh[ax]) - EPS):
+            return {"axis": ax,
+                    "pitch_mm": round(float(pitch_lbh[ax]), 1),
+                    "extent_mm": round(float(extent_lbh[ax]), 1)}
+    return None
+
+
+def _assert_cells_hold_the_part(elements, extent_lbh) -> None:
+    """No BOM leaves `bom()` with a cell narrower than the part it holds.
+
+    The F11 defect in one line. Enforced here rather than in the tests because
+    the number reaches a customer proposal; both are rounded to the emitted
+    1dp so the check cannot trip on the rounding itself.
+    """
+    for e in elements:
+        if e.cell_mm is None:
+            continue
+        for ax in (0, 1):
+            if round(e.cell_mm[ax], 1) < round(float(extent_lbh[ax]), 1) - EPS:
+                raise ValueError(
+                    f"dunnage BOM element {e.name!r} has a "
+                    f"{e.cell_mm[ax]:g}mm cell on axis {ax} under a "
+                    f"{float(extent_lbh[ax]):g}mm part -- it cannot hold it")
 
 
 def bom(extent_lbh, pitch_lbh, grid, inner_lbh,
@@ -250,8 +346,16 @@ def bom(extent_lbh, pitch_lbh, grid, inner_lbh,
     nest_depth = max(0.0, ext_h - pitch_h)
     stack = ext_h + (layers - 1) * pitch_h
 
-    kind = archetype_of(extent_lbh, pitch_lbh, clearance_lbh)
-    build = (_bar_and_rod if kind == "bar_and_rod" else _pocket_tray)
+    # F11. Parts that interleave in plan have no gap between them, so no
+    # in-plane divider can exist: the SX4 floor cover measured pitch_L 177
+    # under a 332mm part and was handed "5 x 1 pockets, 177mm each", a pocket
+    # that cannot hold the part. Separator sheets only. (Parts standing on
+    # edge want a slotted comb instead -- engine ticket E1, and the slot
+    # pitch is a deck question, so this does not invent one.)
+    interleaved = _interleaved_in_plane(extent_lbh, pitch_lbh, grid)
+    kind = archetype_for(extent_lbh, pitch_lbh, grid, clearance_lbh)
+    build = {"bar_and_rod": _bar_and_rod,
+             "pocket_tray": _pocket_tray}.get(kind, _layer_sheets)
     elements = build(extent_lbh, pitch_lbh, grid, inner_lbh, nest_depth,
                      side_separator_mm=side_separator_mm,
                      top_separator_mm=top_separator_mm,
@@ -270,9 +374,14 @@ def bom(extent_lbh, pitch_lbh, grid, inner_lbh,
     slack = (float(inner_lbh[0]) - span[0] - beside_l,
              float(inner_lbh[1]) - span[1],
              inner_h - (stack + dead))
+    _assert_cells_hold_the_part(elements, extent_lbh)
     result = Bom(archetype=kind, elements=elements, stack_height_mm=stack,
                  build_height_mm=stack + dead, inner_h_mm=inner_h,
-                 nest_depth_mm=nest_depth, slack_lbh=slack)
+                 nest_depth_mm=nest_depth, slack_lbh=slack,
+                 interleaved=interleaved,
+                 layer_step_mm=layer_step_mm(extent_lbh, pitch_lbh,
+                                             clearance_lbh, grid,
+                                             layer_sheet_mm))
     if result.overflow:
         logger.debug("dunnage BOM overflows the inner on %s (%s)",
                        result.overflow, kind)
@@ -397,6 +506,36 @@ def _bar_and_rod(extent_lbh, pitch_lbh, grid, inner_lbh, nest_depth, *,
     return out
 
 
+def _layer_sheets(extent_lbh, pitch_lbh, grid, inner_lbh, nest_depth,
+                  **kw) -> list:
+    """Interleaved-in-plane: the pocket tray's separator sheets, no pockets.
+
+    These sheets are NOT free the way a tray's are. A tray's sheet shares the
+    vertical pitch with the pocket under it, so only the one under the bottom
+    tray is dead height; here there is no tray, the parts rest ON the sheets,
+    and every one of the `layers + 1` boundaries costs its thickness less
+    whatever vertical interleave the parts nest into it with. Charging one
+    sheet (the first version of this generator) promised a layer the insert
+    could not carry: extent 100 / pitch 100 / inner 1003 read 10 layers x 420
+    parts and the BOM's own 11 sheets need 1033mm, so 9 layers fit.
+    `layer_step_mm` is the other half of this -- the engine steps by
+    `pitch_H + sheet` so the count it picks is one this BOM supports.
+
+    ponytail: still `_pocket_tray`'s own sheet element, so the sheet stays
+    one expression. The in-plane dunnage for these poses (comb, end stops) is
+    a deck question; nothing is invented here.
+    """
+    layers = int(grid[2])
+    step = sheet_step_mm(nest_depth, kw.get("layer_sheet_mm", LAYER_SHEET_MM))
+    return [replace(e, net_height_mm=(layers + 1) * step,
+                    note=e.note.replace("bottom tray", "bottom layer")
+                    + f" No in-plane pockets: the parts interleave in plan, so "
+                      f"no divider fits between them, and with no tray under "
+                      f"them every sheet costs {_fmt(step)}mm of height.")
+            for e in _pocket_tray(extent_lbh, pitch_lbh, grid, inner_lbh,
+                                  nest_depth, **kw) if e.cell_mm is None]
+
+
 def _pocket_tray(extent_lbh, pitch_lbh, grid, inner_lbh, nest_depth, *,
                  centre_bar_w_mm=None, side_bar_w_mm=None,   # bar_and_rod only
                  tray_sheet_mm, layer_sheet_mm, **_ignored) -> list:
@@ -409,6 +548,15 @@ def _pocket_tray(extent_lbh, pitch_lbh, grid, inner_lbh, nest_depth, *,
     inner_l, inner_b, _inner_h = (float(v) for v in inner_lbh)
     nx, ny, layers = int(grid[0]), int(grid[1]), int(grid[2])
     pocket_depth = float(pitch_lbh[2]) - float(layer_sheet_mm)
+    # F11: with ONE part on an axis the pitch describes nothing (it is the
+    # pose's own pitch, not a spacing anything uses), so the pocket is the
+    # PART there -- a 73mm cell under a 148mm part is not a pocket, and
+    # `dead_height_mm` asks for exactly that lattice, grid (1, 1, 1). Applied
+    # only to a single row on purpose: with more than one part a short pitch
+    # is the F11 interleave, `bom` has already left this generator, and
+    # widening the cell here would hide that from `_assert_cells_hold_the_part`.
+    cell_l = max(float(pitch_lbh[0]), float(extent_lbh[0])) if nx == 1 else float(pitch_lbh[0])
+    cell_b = max(float(pitch_lbh[1]), float(extent_lbh[1])) if ny == 1 else float(pitch_lbh[1])
 
     return [
         Element(
@@ -417,11 +565,12 @@ def _pocket_tray(extent_lbh, pitch_lbh, grid, inner_lbh, nest_depth, *,
             qty=layers, spec=f"PP Bubble Guard, 1200 GSM, {_fmt(tray_sheet_mm)}mm",
             basis="derived",
             matrix=(nx, ny),
-            cell_mm=(round(float(pitch_lbh[0]), 1), round(float(pitch_lbh[1]), 1),
-                     round(pocket_depth, 1)),
+            cell_mm=(round(cell_l, 1), round(cell_b, 1), round(pocket_depth, 1)),
             net_height_mm=0.0,   # pocket depth + layer sheet == the pitch
-            note=f"{nx}x{ny} pockets, one insert per layer. Pocket = pitch_L x "
-                 f"pitch_B x (pitch_H - {_fmt(layer_sheet_mm)}mm sheet), so the "
+            note=f"{nx}x{ny} pockets, one insert per layer. Pocket = "
+                 f"{_fmt(round(cell_l, 1))} x {_fmt(round(cell_b, 1))} x "
+                 f"(pitch_H - {_fmt(layer_sheet_mm)}mm sheet): the lattice "
+                 "pitch in plane, never less than the part itself, so the "
                  "part sits INTO the tray. Material/GSM from the PLANNING "
                  "§6 stock list, not measured.",
         ),

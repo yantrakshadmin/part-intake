@@ -91,7 +91,8 @@ def run_extraction(job_id: str) -> None:
 
 
 def _render_drawings(job_id: str, mesh, candidates, assets, result,
-                     clearance_lbh=engine_mod.DEFAULT_CLEARANCE_LBH):
+                     clearance_lbh=engine_mod.DEFAULT_CLEARANCE_LBH,
+                     render_errors: list | None = None):
     """Exploded insert drawings for every ranked layout plus the custom
     design. Packing-sequence GIFs are built only for catalogue[0] (top
     ranked) and the custom design when GIF_FOR_TOP_CATALOGUE_ONLY is set --
@@ -126,6 +127,10 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
     animated (never a second placement call, hard rule 9), so it exists
     exactly where a GIF does.
     """
+    # Reasons a layout ended up with no picture, for `run_render` to put in
+    # `render_error`. A drawing that vanishes with nothing said anywhere is
+    # the failure mode this whole function's docstring is about.
+    render_errors = [] if render_errors is None else render_errors
     rotation_by_label = {c.label: c.rotation_matrix for c in candidates}
     inner_by_name = {a.name: a.inner for a in assets}
     voxel_cache: dict = {}
@@ -189,9 +194,13 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
             # disagree with the numbers already returned.
             bom = dunnage.bom(extent_lbh, pitch_lbh, grid, inner_lbh,
                               clearance_lbh)
-        except Exception:
+        except Exception as exc:
             logger.exception("dunnage.bom failed for %s (%s)",
                              job_id, file_stem)
+            # Say so. Returning five Nones left render_status "done" with
+            # render_error null: the user saw correct counts, no drawing for
+            # this layout and no reason anywhere (F11 review #4).
+            render_errors.append(f"insert BOM refused this layout: {exc}")
             return None, None, None, None, None
 
         png_url = None
@@ -723,11 +732,13 @@ def run_render(job_id: str) -> None:
                 turned=custom_dict.get("turned", False),
             ) if custom_dict is not None else None)
             result = SimpleNamespace(catalogue=catalogue, custom=custom)
+            render_notes: list[str] = []
 
             (drawing_urls, ortho_urls, gif_urls, packed_urls, sequences,
              custom_drawing_url, custom_ortho_url, custom_gif_url,
              custom_packed_url, custom_sequence) = _render_drawings(
-                job_id, mesh, candidates, assets, result, clearance_lbh)
+                job_id, mesh, candidates, assets, result, clearance_lbh,
+                render_notes)
 
             for i, layout in enumerate(r.get("catalogue") or []):
                 layout["drawing_url"] = drawing_urls.get(i)
@@ -742,7 +753,10 @@ def run_render(job_id: str) -> None:
                 r["custom"]["packed_url"] = custom_packed_url
                 r["custom"]["sequence"] = custom_sequence
             r["render_status"] = "done"
-            r["render_error"] = None
+            # Every picture that did not render, with its reason: status stays
+            # "done" (the solve and the rest of the drawings are fine) but the
+            # gap is never silent.
+            r["render_error"] = "; ".join(render_notes) or None
         except Exception as exc:  # noqa: BLE001 — surface, never fail silently
             logger.exception("Render failed for job %s", job_id)
             r["render_status"] = "failed"

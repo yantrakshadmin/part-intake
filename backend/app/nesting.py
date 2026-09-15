@@ -400,6 +400,13 @@ def layouts_for(poses, asset, part_kg: float = 0.0) -> list:
     the inner and the BOM then reported it did not fit. Mubea and TRW are
     unmoved: the bar's 68mm bars sit inside an 80mm nest depth (dead 0), the
     wheel's 3mm sheet leaves 975 + 3 <= 1000.
+
+    The vertical PITCH the lattice steps by is `dunnage.layer_step_mm`, not
+    the measured pitch: with layer separator sheets and no tray to share the
+    pitch with (F11) the parts rest ON each sheet, so every layer costs one.
+    Both numbers come from the insert, and `Layout.pitch_lbh` stays the
+    measured pitch -- `dunnage.bom` derives the stack and the nest depth from
+    it, and the drawing gets the step off the BOM (`Bom.layer_step_mm`).
     """
     from . import dunnage   # dunnage imports nothing from here; local to be safe
     out = []
@@ -407,10 +414,28 @@ def layouts_for(poses, asset, part_kg: float = 0.0) -> list:
         # `footprint_orders` yields (0,1,2) then (1,0,2); index 1 IS the turn.
         for turned, (extent, pitch, silhouette, clearance) in enumerate(
                 pose.footprint_orders()):
-            dead = dunnage.dead_height_mm(extent, pitch, clearance)
+            # F11: the insert -- and so the height each layer costs -- turns
+            # on whether the parts interleave IN PLAN, which needs the in-plane
+            # grid. One flat layer in the real footprint is that grid, from
+            # this same function rather than a second copy of the formula.
+            flat, in_plane, _ = lattice_count(
+                extent, pitch, (asset.inner[0], asset.inner[1], extent[2]))
+            # Geometric grid on purpose: no `part_kg`, so the weight cap
+            # cannot shrink it here. The cap only ever REMOVES parts from a
+            # layer, and a smaller in-plane grid can only turn the interleave
+            # off, so this over-reserves height at worst -- never under.
+            in_plane = in_plane if flat else (1, 1, 1)
+            dead = dunnage.dead_height_mm(extent, pitch, clearance,
+                                          grid=in_plane)
+            # Layer separators that the parts do NOT nest into are part of the
+            # step, not of `dead`: 10 layers need 11 sheets, and charging them
+            # once promised a layer the insert cannot carry.
+            step = dunnage.layer_step_mm(extent, pitch, clearance,
+                                         grid=in_plane)
+            pitch_fit = (pitch[0], pitch[1], step)
             inner = (asset.inner[0], asset.inner[1], asset.inner[2] - dead)
             count, grid_counts, limited_by = lattice_count(
-                extent, pitch, inner, part_kg,
+                extent, pitch_fit, inner, part_kg,
                 getattr(asset, "max_weight_kg", 0.0),
             )
             if count:
@@ -418,7 +443,8 @@ def layouts_for(poses, asset, part_kg: float = 0.0) -> list:
                 if pose.voxel_mm > 0:
                     v = pose.voxel_mm
                     upper = max(count, lattice_count(
-                        tuple(e - v for e in extent), tuple(p - v for p in pitch),
+                        tuple(e - v for e in extent),
+                        tuple(p - v for p in pitch_fit),
                         inner, part_kg, getattr(asset, "max_weight_kg", 0.0),
                     )[0])
                 out.append(Layout(asset.name, pose.label, count, grid_counts,

@@ -134,7 +134,9 @@ def synthesise(extent_lbh, pitch_lbh, part_kg: float = 0.0,
         much dead height the dunnage adds above the parts stack (a pocket
         tray's bottom sheet, a bar taller than the nest depth); the inner
         height carries it, and a layer is dropped when that pushes past
-        `max_inner_height_mm`. Without this the synthesised box shipped with
+        `max_inner_height_mm`. Layers step by `dunnage.layer_step_mm` for the
+        same reason: a layer separator the parts do not nest into is paid once
+        per layer, not once per box (F11). Without this the synthesised box shipped with
         `fits: False` on its own BOM -- 3mm short on the wheel -- and the
         catalogue side never can, because a stock box's height is a given.
         `clearance_lbh` is what the pitch already carries, for the archetype
@@ -163,18 +165,22 @@ def synthesise(extent_lbh, pitch_lbh, part_kg: float = 0.0,
             # What the insert adds above the stack; the box carries it and the
             # lattice does not get it. Same expression `nesting.layouts_for`
             # charges the catalogue with.
-            dead = dunnage.dead_height_mm(extent, pitch, clearance_lbh)
+            # One layer in this footprint first: it fixes parts-per-layer,
+            # which both the weight cap and the F11 archetype (does the pose
+            # interleave in plan?) need before they can talk about layers.
+            per_layer, in_plane, _ = lattice_count(
+                extent, pitch, (inner_l, inner_b, extent[2]))
+            if not per_layer:
+                continue
+            dead = dunnage.dead_height_mm(extent, pitch, clearance_lbh,
+                                          grid=in_plane)
+            step = dunnage.layer_step_mm(extent, pitch, clearance_lbh,
+                                         grid=in_plane)
             usable_h = max_inner_height_mm - dead
             if extent[2] > usable_h + EPS:
                 continue
 
-            # One layer first: it fixes parts-per-layer, which the weight cap
-            # needs before it can talk about layers.
-            per_layer, _, _ = lattice_count(extent, pitch, (inner_l, inner_b, extent[2]))
-            if not per_layer:
-                continue
-
-            layers = int((usable_h - extent[2]) / pitch[2] + EPS) + 1
+            layers = int((usable_h - extent[2]) / step + EPS) + 1
             if part_kg > 0 and max_weight_kg > 0:
                 layers = min(layers, int(max_weight_kg / (part_kg * per_layer) + EPS))
             if layers < 1:
@@ -185,7 +191,11 @@ def synthesise(extent_lbh, pitch_lbh, part_kg: float = 0.0,
             # reproduces it (test_self_consistent) -- the height the insert
             # occupies is never counted as room for parts.
             stack_h = extent[2] + (layers - 1) * pitch[2]
-            inner = (inner_l, inner_b, stack_h + dead)
+            # Layer-separator height scales with the layer count (F11), so the
+            # box carries the dead height of the grid it actually got.
+            inner = (inner_l, inner_b, stack_h + dunnage.dead_height_mm(
+                extent, pitch, clearance_lbh, grid=in_plane)
+                + (layers - 1) * (step - pitch[2]))
             count, grid, _ = lattice_count(extent, pitch, (inner_l, inner_b, stack_h))
             if not count:
                 continue
