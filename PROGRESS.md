@@ -2514,3 +2514,9 @@ Open: GIF caption card overlaps the box top edge in frame 1
 (GIF now only in the self-check, so low priority); `voids` not in the
 sequence (tray reads as a translucent slab, alpha 0.30); the animation's
 "Empty box" caption card touches the box top edge at t=0 (cosmetic).
+
+Deployed: 6d78736 pushed to main; Cloud Build 6f54655e SUCCESS (asia-south1).
+Prod workers keep explicit `-Q celery` / `-Q render`, so the dev-only
+`task_queues` declaration in worker.py changes nothing on the VM. gcloud auth
+on this Mac has expired (`gcloud auth login` needed to read build logs); the
+GitHub check run on the commit is the deploy signal meanwhile.
