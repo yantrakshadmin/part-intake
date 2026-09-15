@@ -89,6 +89,16 @@ export default function PackAnimation({ sequence, glbUrl, height = 420, onStageC
     scene.add(sun)
 
     const [Lx, By, Hz] = sequence.inner
+    // The 8 box corners in WORLD space, for the camera-fit projection in
+    // render() below. `world.rotation.x = -PI/2` (Z-up model -> Y-up world)
+    // maps local (x, y, z) -> world (x, z, -y) -- same mapping the comment
+    // by the camera block below already relies on for the -By/2 centring.
+    const boxCorners = []
+    for (const bx of [0, Lx]) for (const by of [0, By]) for (const bz of [0, Hz]) {
+      boxCorners.push(new THREE.Vector3(bx, bz, -by))
+    }
+    const projTmp = new THREE.Vector3()
+    let rGuess = Math.hypot(Lx, By, Hz) // seed for the first frame only
     // box corner is (0,0,0) per the sequence contract; BoxGeometry is
     // centred, so shift every box mesh by half its size to align corners.
     const boxEdges = new THREE.LineSegments(
@@ -204,16 +214,47 @@ export default function PackAnimation({ sequence, glbUrl, height = 420, onStageC
         }
       }
 
-      // camera: gentle orbit, fixed iso-ish view, rises as the stack builds —
-      // scaled off the box's own diagonal so this isn't tuned to one asset.
-      const diag = Math.hypot(Lx, By, Hz)
-      const a = -0.62 + 0.1 * Math.sin((t / total) * Math.PI)
-      const r = diag * 2.05
-      const h = Hz * 1.4 + Hz * 0.5 * clamp01(t / tEnd)
+      // camera: gentle orbit, fixed iso-ish view, rises as the stack builds.
       // `world` is rotated -90deg about X, so the box's Y (By) lands on world -Z:
       // its centre is at -By/2, not +By/2 (tester caught the box cropped off-frame).
-      camera.position.set(r * Math.sin(a) + Lx / 2, h, r * Math.cos(a) - By / 2)
-      camera.lookAt(Lx / 2, Hz * 0.48, -By / 2)
+      const MARGIN = 0.92
+      const a = -0.62 + 0.1 * Math.sin((t / total) * Math.PI)
+      const h = Hz * 1.4 + Hz * 0.5 * clamp01(t / tEnd)
+      const setCam = (r) => {
+        camera.position.set(r * Math.sin(a) + Lx / 2, h, r * Math.cos(a) - By / 2)
+        camera.lookAt(Lx / 2, Hz * 0.48, -By / 2)
+        camera.updateMatrixWorld(true) // project() below needs a fresh matrixWorldInverse
+      }
+      // A bounding-sphere fit (radius = diag/2, fit to the FOV) covers the
+      // worst case over every orientation, but at this iso-ish angle the
+      // box's actual silhouette is far smaller than its circumscribed
+      // sphere -- that made the hero box shrink to under half the stage
+      // height. Fit the real projected footprint instead: project the 8
+      // box corners (already in world space, see `boxCorners` above) at a
+      // trial radius, read off m = max(|ndc.x|, |ndc.y|) (NDC already
+      // bakes in aspect via the projection matrix, so this is exact on
+      // both axes at once), and rescale r towards m / MARGIN. The camera
+      // height `h` stays fixed while r moves, so the response is NOT linear
+      // in r: a plain `r *= m / MARGIN` oscillates (1.69 -> 0.61 -> 1.19 ...)
+      // and left the first frames cropped on 11 of 17 catalogue boxes.
+      // Damped (sqrt) steps converge in <= 7 passes on every catalogue box
+      // at 900x320, 730x1000 and 1400x700 (scratch sim, code review F8);
+      // after the first frame `rGuess` is already converged so this is
+      // normally one pass.
+      let r = rGuess
+      for (let pass = 0; pass < 8; pass++) {
+        setCam(r)
+        let m = 1e-6
+        for (const c of boxCorners) {
+          projTmp.copy(c).project(camera)
+          m = Math.max(m, Math.abs(projTmp.x), Math.abs(projTmp.y))
+        }
+        const k = m / MARGIN
+        if (Math.abs(k - 1) < 0.01) break
+        r *= Math.sqrt(k)
+      }
+      setCam(r)
+      rGuess = r
       renderer.render(scene, camera)
     }
 
