@@ -23,7 +23,8 @@ from . import dunnage, engine as engine_mod, synthesis
 from .catalogue import containers, containers_named, excluded_drafts
 from .config import settings
 from .geometry import OrientationCandidate, extract_part, load_unified_mesh
-from .insert_drawing import _as_4x4, build_gif, explode_png, pose_voxels
+from .insert_drawing import (_as_4x4, build_gif, explode_png, ortho_png,
+                             pose_voxels)
 from .nesting import IN_PLANE_TURN
 from .models import (ExtractionJob, PartProfile, Project, Proposal, SolveJob,
                     Vehicle)
@@ -115,9 +116,12 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
     `build_gif` itself -- is guarded separately again: a failure writing it
     to disk must not cost the GIF that already rendered fine.
 
-    Returns (drawing_urls, gif_urls, packed_urls, sequences,
-    custom_drawing_url, custom_gif_url, custom_packed_url, custom_sequence)
-    -- the first four keyed by catalogue index. `sequences` is F4's JSON
+    Returns (drawing_urls, ortho_urls, gif_urls, packed_urls, sequences,
+    custom_drawing_url, custom_ortho_url, custom_gif_url,
+    custom_packed_url, custom_sequence) -- the first five keyed by catalogue
+    index. `ortho_urls` is F15's Front/Side/Top report drawing, guarded
+    separately from the exploded PNG for the same reason the GIF is: one
+    picture failing must not cost the other. `sequences` is F4's JSON
     packing order, returned BY `build_gif` off the placement it just
     animated (never a second placement call, hard rule 9), so it exists
     exactly where a GIF does.
@@ -169,15 +173,16 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
         path.write_bytes(data)
         return f"/api/files/{file_name}"
 
-    render_counts = {"png": 0, "seq": 0, "gif": 0}
+    render_counts = {"png": 0, "ortho": 0, "seq": 0, "gif": 0}
 
     def render(*, pose_label, extent_lbh, pitch_lbh, grid, inner_lbh,
-               asset_name, count, file_stem, turned: bool = False,
-               want_gif: bool = True
-               ) -> tuple[str | None, str | None, str | None, dict | None]:
+               asset_name, count, file_stem, ortho_stem,
+               turned: bool = False, want_gif: bool = True
+               ) -> tuple[str | None, str | None, str | None, str | None,
+                          dict | None]:
         voxels = voxels_for(pose_label, turned)
         if voxels is None:
-            return None, None, None, None
+            return None, None, None, None, None
         try:
             # Same pure expression engine.solve used to stamp `layout.dunnage`
             # -- recomputed, not a second opinion, so the drawing cannot
@@ -187,7 +192,7 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
         except Exception:
             logger.exception("dunnage.bom failed for %s (%s)",
                              job_id, file_stem)
-            return None, None, None, None
+            return None, None, None, None, None
 
         png_url = None
         try:
@@ -200,6 +205,22 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
         except Exception:
             logger.exception("insert drawing failed for %s (%s)",
                              job_id, file_stem)
+
+        # F15: the orthographic Front/Side/Top report drawing, off the same
+        # `_place` lattice as the count. Guarded on its own -- the exploded
+        # PNG above already landed and must not be lost to this one.
+        ortho_url = None
+        try:
+            ortho_url = _write(
+                ortho_png(voxels=voxels, extent_lbh=extent_lbh,
+                          pitch_lbh=pitch_lbh, grid=grid,
+                          inner_lbh=inner_lbh, bom=bom,
+                          asset_name=asset_name, count=count),
+                f"{ortho_stem}.png")
+            render_counts["ortho"] += 1
+        except Exception:
+            logger.exception("ortho drawing failed for %s (%s)",
+                             job_id, ortho_stem)
 
         gif_url = None
         packed_url = None
@@ -232,10 +253,11 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
                     logger.exception("packed frame write failed for %s (%s)",
                                      job_id, file_stem)
 
-        return png_url, gif_url, packed_url, sequence
+        return png_url, ortho_url, gif_url, packed_url, sequence
 
     start = time.monotonic()
     drawing_urls: dict = {}
+    ortho_urls: dict = {}
     gif_urls: dict = {}
     packed_urls: dict = {}
     sequences: dict = {}
@@ -248,14 +270,17 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
         # (see GIF_FOR_TOP_CATALOGUE_ONLY) -- and so no packed_url either,
         # since it is the GIF's own final frame.
         want_gif = (not GIF_FOR_TOP_CATALOGUE_ONLY) or i == 0
-        png_url, gif_url, packed_url, sequence = render(
+        png_url, ortho_url, gif_url, packed_url, sequence = render(
             pose_label=layout.pose_label, extent_lbh=layout.extent_lbh,
             pitch_lbh=layout.pitch_lbh, grid=layout.grid,
             inner_lbh=inner_lbh, asset_name=layout.asset_name,
             count=layout.count, file_stem=f"drawing_{job_id}_{i}",
+            ortho_stem=f"ortho_{job_id}_{i}",
             turned=layout.turned, want_gif=want_gif)
         if png_url is not None:
             drawing_urls[i] = png_url
+        if ortho_url is not None:
+            ortho_urls[i] = ortho_url
         if gif_url is not None:
             gif_urls[i] = gif_url
         if packed_url is not None:
@@ -263,24 +288,27 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
         if sequence is not None:
             sequences[i] = sequence
 
-    custom_drawing_url = custom_gif_url = custom_packed_url = None
+    custom_drawing_url = custom_ortho_url = None
+    custom_gif_url = custom_packed_url = None
     custom_sequence = None
     if result.custom is not None:
-        (custom_drawing_url, custom_gif_url, custom_packed_url,
-         custom_sequence) = render(
+        (custom_drawing_url, custom_ortho_url, custom_gif_url,
+         custom_packed_url, custom_sequence) = render(
             pose_label=result.custom.pose_label,
             extent_lbh=result.custom.extent_lbh,
             pitch_lbh=result.custom.pitch_lbh, grid=result.custom.grid,
             inner_lbh=result.custom.inner, asset_name="custom design",
             count=result.custom.count, turned=result.custom.turned,
-            file_stem=f"drawing_{job_id}_custom")
+            file_stem=f"drawing_{job_id}_custom",
+            ortho_stem=f"ortho_{job_id}_custom")
 
-    logger.info("rendered %d png + %d packed/sequence + %d gif in %.1fs for %s",
-                render_counts["png"], render_counts["seq"], render_counts["gif"],
+    logger.info("rendered %d png + %d ortho + %d packed/sequence + %d gif in "
+                "%.1fs for %s", render_counts["png"], render_counts["ortho"],
+                render_counts["seq"], render_counts["gif"],
                 time.monotonic() - start, job_id)
-    return (drawing_urls, gif_urls, packed_urls, sequences,
-            custom_drawing_url, custom_gif_url, custom_packed_url,
-            custom_sequence)
+    return (drawing_urls, ortho_urls, gif_urls, packed_urls, sequences,
+            custom_drawing_url, custom_ortho_url, custom_gif_url,
+            custom_packed_url, custom_sequence)
 
 
 @celery_app.task(name="solve_part", time_limit=600, soft_time_limit=570)
@@ -576,10 +604,12 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
 
             job.result_json = {
                 "catalogue": [
-                    # drawing_url/gif_url/packed_url/sequence start null --
-                    # render_run fills them in place once the pictures exist.
+                    # drawing_url/ortho_url/gif_url/packed_url/sequence
+                    # start null -- render_run fills them in place once the
+                    # pictures exist.
                     {**dataclasses.asdict(l), "interleave": l.interleave,
-                     "drawing_url": None, "gif_url": None, "packed_url": None,
+                     "drawing_url": None, "ortho_url": None,
+                     "gif_url": None, "packed_url": None,
                      "sequence": None}
                     for i, l in enumerate(result.catalogue)
                 ],
@@ -588,7 +618,8 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
                 "custom": (
                     {**dataclasses.asdict(result.custom),
                      "layers": result.custom.layers,
-                     "drawing_url": None, "gif_url": None, "packed_url": None,
+                     "drawing_url": None, "ortho_url": None,
+                     "gif_url": None, "packed_url": None,
                      "sequence": None}
                     if result.custom is not None else None
                 ),
@@ -693,18 +724,20 @@ def run_render(job_id: str) -> None:
             ) if custom_dict is not None else None)
             result = SimpleNamespace(catalogue=catalogue, custom=custom)
 
-            (drawing_urls, gif_urls, packed_urls, sequences,
-             custom_drawing_url, custom_gif_url, custom_packed_url,
-             custom_sequence) = _render_drawings(
+            (drawing_urls, ortho_urls, gif_urls, packed_urls, sequences,
+             custom_drawing_url, custom_ortho_url, custom_gif_url,
+             custom_packed_url, custom_sequence) = _render_drawings(
                 job_id, mesh, candidates, assets, result, clearance_lbh)
 
             for i, layout in enumerate(r.get("catalogue") or []):
                 layout["drawing_url"] = drawing_urls.get(i)
+                layout["ortho_url"] = ortho_urls.get(i)
                 layout["gif_url"] = gif_urls.get(i)
                 layout["packed_url"] = packed_urls.get(i)
                 layout["sequence"] = sequences.get(i)
             if r.get("custom") is not None:
                 r["custom"]["drawing_url"] = custom_drawing_url
+                r["custom"]["ortho_url"] = custom_ortho_url
                 r["custom"]["gif_url"] = custom_gif_url
                 r["custom"]["packed_url"] = custom_packed_url
                 r["custom"]["sequence"] = custom_sequence

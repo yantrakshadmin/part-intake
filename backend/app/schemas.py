@@ -196,7 +196,14 @@ class DunnageElementOut(BaseModel):
 class DunnageOut(BaseModel):
     """The generated insert BOM for one layout (PLANNING §7)."""
 
-    archetype: Literal["bar_and_rod", "pocket_tray"]
+    # "layer_sheets" is F11's third archetype (interleaved in plan: sheets, no
+    # pockets). Omitting it here did not drop a field -- a Literal REJECTS, so
+    # GET /api/solve-jobs/{id} 500'd for every interleaved part.
+    archetype: Literal["bar_and_rod", "pocket_tray", "layer_sheets"]
+    # F11: set when the parts nest side by side in plan, which is why this BOM
+    # has sheets and no pockets. {"axis": 0|1, "pitch_mm", "extent_mm"} or null.
+    # Declared here or pydantic drops it silently (hard rule 9).
+    interleaved: Optional[dict] = None
     elements: list[DunnageElementOut]
     stack_height_mm: float
     build_height_mm: float
@@ -273,6 +280,10 @@ class LayoutOut(BaseModel):
     # count is the valuable output and a render failure must never fail the
     # solve (CLAUDE.md hard rule 9: declare it here or pydantic drops it).
     drawing_url: Optional[str] = None
+    # F15: the same box as three orthographic views (Front/Side/Top), which is
+    # what the proposal PDF embeds. Same file/failure discipline as
+    # drawing_url -- declare it here or pydantic drops it silently.
+    ortho_url: Optional[str] = None
     # The packing-sequence GIF, same file/failure discipline as drawing_url.
     gif_url: Optional[str] = None
     # The complete, fully packed box -- the GIF's own final frame, so it can
@@ -308,6 +319,7 @@ class BoxDesignOut(BaseModel):
     silhouette: Optional[SilhouetteOut] = None
     dunnage: Optional[DunnageOut] = None
     drawing_url: Optional[str] = None
+    ortho_url: Optional[str] = None     # as LayoutOut.ortho_url (F15)
     gif_url: Optional[str] = None
     packed_url: Optional[str] = None
     # As LayoutOut.sequence -- declared or pydantic drops it (hard rule 9).

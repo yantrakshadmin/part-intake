@@ -59,12 +59,14 @@ from typing import Callable
 
 import numpy as np
 import trimesh
+from scipy import ndimage
 
 import matplotlib
 matplotlib.use("Agg")               # Celery worker, no display. Before pyplot.
 import matplotlib.pyplot as plt     # noqa: E402
 from matplotlib.collections import LineCollection, PolyCollection   # noqa: E402
 from matplotlib.patches import Rectangle                            # noqa: E402
+from matplotlib import font_manager                                # noqa: E402
 from PIL import Image                                               # noqa: E402
 
 from . import dunnage                               # noqa: E402
@@ -110,6 +112,14 @@ C_PART, PART_ALT = "#E8DFA0", "#CBBF77"   # warm part vs cool dunnage:
 # the deck's own contrast. Blue parts inside a blue tray read as one mass
 # however good the alpha is, which defeats drawing them translucent at all.
 LABEL0 = 10              # first component label in the voxel volume
+
+# Report-drawing typeface. The UI direction is Fira Sans; matplotlib only has
+# what is installed on the host, so fall back rather than emit a warning per
+# text call. ponytail: no font file is bundled -- ship one in the repo if the
+# PDF must look identical on every machine.
+SANS = next((n for n in ("Fira Sans", "Fira Sans Condensed", "DejaVu Sans")
+             if n in {f.name for f in font_manager.fontManager.ttflist}),
+            "sans-serif")
 
 # BOM elements we DELIBERATELY do not draw, and the reason, which goes on the
 # label. Narrow on purpose: any other element carrying a size and a qty that
@@ -436,7 +446,15 @@ def _pocket_tray_rows(el: dict, extent, pitch, grid, inner, cell_mm) -> list:
     which is what the deck's own picture shows (image9: the hub stands proud of
     the grey sheets capping the pockets).
     """
-    tray = next(e for e in el.values() if e.matrix)
+    # F11 landed a third archetype, "layer_sheets": an interleaved-in-plane
+    # pose gets the tray's sheets and NO tray, because no wall fits between
+    # parts that overlap in plan. `_place` routes everything that is not
+    # bar_and_rod here, so without this guard `next(...)` raised StopIteration
+    # and the worker swallowed it into `drawing_url: None` -- silently, on the
+    # exact SX4-cover pose F9/F15 exist for. One guard here fixes the exploded
+    # PNG, the GIF/sequence and the ortho view together, since all three place
+    # through `_place`.
+    tray = next((e for e in el.values() if e.matrix), None)
     sheet = next(e for e in el.values()
                  if e.matrix is None and e is not tray)
     ox, oy = _origins(extent, pitch, grid, inner)
@@ -467,11 +485,11 @@ def _pocket_tray_rows(el: dict, extent, pitch, grid, inner, cell_mm) -> list:
         return [((0.0, 0.0, k * pitch[2]), (l, b, h))
                 for k in range(layers + 1)], []
 
-    return [
-        _Row(None, C_PART, None, 1.0, z0=sheet_h),
-        _Row(tray.name, "#38BDF8", trays, A_TRAY),
-        _Row(sheet.name, "#94A3B8", sheets, A_SLAB),
-    ]
+    rows = [_Row(None, C_PART, None, 1.0, z0=sheet_h)]
+    if tray is not None:
+        rows.append(_Row(tray.name, "#38BDF8", trays, A_TRAY))
+    rows.append(_Row(sheet.name, "#94A3B8", sheets, A_SLAB))
+    return rows
 
 
 @dataclass
@@ -969,6 +987,154 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     logger.info("drew %s %s: %d components, build %g of %g mm inner, "
                 "exploded %g mm per layer", asset_name, bom.archetype,
                 len(rows), round(bom.build_height_mm, 1), bom.inner_h_mm, gap)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Orthographic Front / Side / Top -- the legible report drawing (F15)
+# ---------------------------------------------------------------------------
+# (name, axis projected away, horizontal axis, vertical axis). The two kept
+# axes are always in ascending order, so `mask.any(axis=drop)` is already
+# (horizontal, vertical) with no transpose to get wrong.
+ORTHO_VIEWS = (("Front", 1, 0, 2), ("Side", 0, 1, 2), ("Top", 2, 0, 1))
+C_SIL = "#1E40AF"        # the part silhouette; the deck's own primary blue
+C_SIL_EDGE = "#14286B"   # its drawn outline, so a part reads as a shape
+C_CARD = "#B45309"       # dunnage outlines: cardboard, thin, never filled
+# The silhouette is a raster of a 12mm lattice and at report scale that
+# staircase is what the eye sees first ("very low level of image generation").
+# Upsample the mask x4 and threshold at 0.5, then stroke the same 0.5 contour:
+# the shape is unchanged -- this is resampling of `_place`'s own mask, not a
+# different mask -- but the edge reads as drawn instead of as pixels.
+SMOOTH = 4
+
+
+def _runs(flags: np.ndarray) -> list:
+    """`[(start, stop), ...]` for every run of True in a 1-D bool array."""
+    idx = np.flatnonzero(np.diff(np.r_[False, flags.astype(bool), False]))
+    return list(zip(idx[0::2], idx[1::2]))
+
+
+def ortho_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
+              bom: dunnage.Bom, asset_name: str, count: int,
+              cell_mm: float = CELL_MM) -> bytes:
+    """The packed box as three flat views -- Front, Side, Top -- as PNG bytes.
+
+    The competitor's pack report (PLANNING F15) draws parts as filled
+    silhouettes inside a thin box outline with the dunnage as thin lines; on a
+    13-layer stack that reads where `explode_png`'s isometric voxel mass does
+    not (F9).
+
+    Every silhouette is `_place`'s OWN parts volume flattened along one axis --
+    the same lattice the count came off, never a second placement expression
+    (hard rule 9). The dunnage rectangles are the same `row.geo()` cuboids
+    `_place` rasterises.
+    """
+    p = _place(voxels=voxels, extent_lbh=extent_lbh, pitch_lbh=pitch_lbh,
+              grid=grid, inner_lbh=inner_lbh, bom=bom, count=count,
+              cell_mm=cell_mm)
+    inner, extent = p.inner, p.extent
+    # Each panel gets the same axes height, so the figure follows the tallest
+    # one; widths follow the horizontal span so all three share one mm scale.
+    widths = [inner[h] for _n, _d, h, _v in ORTHO_VIEWS]
+    fig_w = 13.0
+    fig_h = float(np.clip(fig_w * 0.94 * max(inner[1], inner[2]) / sum(widths)
+                          + 1.1, 3.5, 16.0))
+    fig, axes = plt.subplots(1, 3, figsize=(fig_w, fig_h), dpi=110,
+                             gridspec_kw={"width_ratios": widths})
+    fig.suptitle("%s  -  %d parts  -  grid %d x %d x %d"
+                 % (asset_name, count, *p.grid),
+                 fontsize=13, weight="bold", color=C_INK, family=SANS)
+
+    for ax, (name, drop, h, v) in zip(axes, ORTHO_VIEWS):
+        mask = (p.prt > 0).any(axis=drop)           # (horizontal, vertical)
+        # `grid_mode=True` resamples CELLS, not sample points, so the smoothed
+        # field covers exactly the same mm extent as `mask` -- endpoint-aligned
+        # zoom would stretch it by half a cell at each end. `> 0.5` (strict)
+        # keeps a one-cell gap between two parts open: bilinear reads exactly
+        # 0.5 across it.
+        field = ndimage.zoom(mask.astype(float), SMOOTH, order=1,
+                             grid_mode=True, mode="nearest")
+        fill = field > 0.5
+        rgba = np.zeros(fill.shape[::-1] + (4,))
+        rgba[fill.T] = matplotlib.colors.to_rgba(C_SIL)
+        span_h, span_v = mask.shape[0] * cell_mm, mask.shape[1] * cell_mm
+        ax.imshow(rgba, origin="lower", interpolation="nearest", zorder=2,
+                  extent=(0.0, span_h, 0.0, span_v))
+        sub = cell_mm / SMOOTH
+        ax.contour((np.arange(field.shape[0]) + 0.5) * sub,
+                   (np.arange(field.shape[1]) + 0.5) * sub, field.T,
+                   levels=[0.5], colors=[C_SIL_EDGE], linewidths=0.6,
+                   zorder=2.5)
+        for row in p.rows:
+            if row.geo is None:
+                continue
+            solids, voids = row.geo()
+            if name == "Top":
+                # Plan view: a layer sheet or a tray slab is the whole
+                # footprint and would just restate the box outline. Only a
+                # pocket that could actually HOLD the part earns a wall line
+                # -- an interleaved pose whose in-plane pitch is under the
+                # part extent has no pockets, whatever its BOM says (F11).
+                e = p.el[row.name]
+                if not (e.matrix and e.cell_mm
+                        and e.cell_mm[0] >= extent[0]
+                        and e.cell_mm[1] >= extent[1]):
+                    continue
+                boxes = voids
+            else:
+                # ponytail: EVERY dunnage solid, outlined, not just the layer
+                # sheets -- a sheet is full footprint x 3mm and draws as the
+                # thin line the ticket asks for, and a bar or tray drawing
+                # itself costs one rectangle. Filter by element role here if a
+                # busy bar_and_rod front view ever needs it.
+                boxes = solids
+            # Snap every dunnage rectangle to the SAME `cell_mm` lattice the
+            # silhouette is a raster of, and draw each distinct one once.
+            # Unsnapped, a component thinner than a drawn line contributed two
+            # coincident edges: the 3mm separator sheet and the 69mm tray that
+            # sits 3mm above it produced FOUR full-width lines per 72mm layer,
+            # and where sub-pixel rounding split a pair by 2px the part
+            # silhouette showed through the gap as a stray line across the
+            # Side view. Snapped, the sheet is one line at the layer boundary
+            # and the tray's edges land on it.
+            seen = set()
+            for o, s in boxes:
+                k = (int(round(o[h] / cell_mm)), int(round(o[v] / cell_mm)),
+                     int(round((o[h] + s[h]) / cell_mm)),
+                     int(round((o[v] + s[v]) / cell_mm)))
+                if k in seen:
+                    continue
+                seen.add(k)
+                # ponytail: a component under half a cell on BOTH axes snaps to
+                # a point and vanishes. At 12mm cells nothing in any shipped
+                # BOM is that small; drop the snap for that element if one ever
+                # is.
+                # Clamp to the box: a 1150 inner snaps to 1152 at 12mm cells,
+                # and a full-footprint sheet must not poke past the outline.
+                x0, x1 = (min(max(k[i] * cell_mm, 0.0), inner[h]) for i in (0, 2))
+                y0, y1 = (min(max(k[i] * cell_mm, 0.0), inner[v]) for i in (1, 3))
+                ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False,
+                                       ec=C_CARD, lw=0.5, zorder=3))
+        ax.add_patch(Rectangle((0.0, 0.0), inner[h], inner[v], fill=False,
+                               ec=C_INK, lw=1.1, zorder=4))
+        ax.set_title("%s\n%g x %g mm" % (name, inner[h], inner[v]),
+                     fontsize=11, color=C_INK, family=SANS)
+        pad = 0.03 * max(inner)
+        ax.set_xlim(-pad, inner[h] + pad)
+        ax.set_ylim(-pad, inner[v] + pad)
+        ax.set_aspect("equal")
+        # `aspect="equal"` shrinks the axes box to fit the data; anchoring it
+        # north keeps the three panel tops -- and so the three titles -- on
+        # one line instead of each floating at its own centred height.
+        ax.set_anchor("N")
+        ax.set_axis_off()
+
+    fig.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", facecolor="#FFFFFF")
+    plt.close(fig)
+    logger.info("ortho %s %s: grid %s, %d parts", asset_name, bom.archetype,
+                p.grid, count)
     return buf.getvalue()
 
 
@@ -1595,6 +1761,74 @@ def _check_frames_false(case) -> None:
           "frames=True byte-for-byte" % (bom.archetype, asset, ref))
 
 
+def _check_ortho_panels(outdir) -> None:
+    """The orthographic report drawing must actually SEPARATE parts (F15).
+
+    A 3 x 2 x 4 lattice of a well-separated box: Top is 6 silhouettes, Front
+    is 4 occupied row bands (one per layer). Both numbers come off the decoded
+    PNG, not off the lattice -- a view flattened along the wrong axis, a
+    transposed mask or silhouettes merged into one blob all fail here while
+    every count in `_place` still asserts clean.
+
+    Panels are located by their own box outlines: the two full-height dark
+    columns per panel. Clustering the blue by gaps cannot work -- the gap
+    between two part columns inside a panel is the same order as the gutter
+    between panels.
+    """
+    from pathlib import Path
+    from scipy import ndimage
+
+    extent, pitch, grid = (200.0, 150.0, 80.0), (300.0, 300.0, 150.0), (3, 2, 4)
+    inner, count = (1000.0, 700.0, 700.0), 24
+    bom = dunnage.bom(extent, pitch, grid, inner)
+    vox = np.ones([int(np.ceil(e / CELL_MM)) for e in extent], dtype=bool)
+    png = ortho_png(voxels=vox, extent_lbh=extent, pitch_lbh=pitch, grid=grid,
+                    inner_lbh=inner, bom=bom, asset_name="CHECK", count=count)
+    path = Path(outdir) / "ortho_check_3x2x4.png"
+    path.write_bytes(png)
+
+    a = np.asarray(Image.open(BytesIO(png)).convert("RGB")).astype(int)
+    r, g, b = a[..., 0], a[..., 1], a[..., 2]
+    blue = (b > 100) & (b - r > 60) & (b - g > 60)
+    dark = (r < 90) & (g < 90) & (b < 90)
+    tall = dark.sum(axis=0)
+    panels = _runs(tall >= 0.5 * tall.max())        # 2 box edges per panel
+    assert len(panels) == 6, \
+        "found %d full-height box edges, expected 6 (3 panels)" % len(panels)
+    spans = [(panels[i][0], panels[i + 1][1]) for i in (0, 2, 4)]
+    names = [v[0] for v in ORTHO_VIEWS]
+    front, _side, top = (blue[:, x0:x1] for x0, x1 in spans)
+
+    # Close 1-2px dropouts before counting: imshow resamples the boolean
+    # raster onto pixels and the odd edge row antialiases out of the blue
+    # test, splitting one band in two. The real gaps here are 70mm+ (~30px),
+    # so nothing a closing of 4px can merge is a gap the drawing meant.
+    n_top = ndimage.label(ndimage.binary_closing(top, np.ones((5, 5))))[1]
+    assert n_top == 6, "%s panel has %d blue components, expected 6" \
+        % (names[2], n_top)
+    bands = _runs(ndimage.binary_closing(front.any(axis=1), np.ones(5)))
+    assert len(bands) == 4, "%s panel has %d occupied row bands, expected 4" \
+        % (names[0], len(bands))
+
+    # The x4 bilinear smoothing must move the EDGE, never the area: it is a
+    # resample of `_place`'s mask, not a dilation of it. Measured off the
+    # decoded PNG against the mm area the lattice actually rasterises (the
+    # part rounded up to whole cells x 6 silhouettes), with mm-per-pixel taken
+    # from the Top box outline the panels were located by. Component and band
+    # counts alone do NOT catch over-smoothing -- a 9x9 dilation and a
+    # `> 0.0` threshold both left them at 6 and 4.
+    mm_px = inner[0] / (np.mean(panels[5]) - np.mean(panels[4]))
+    area = top.sum() * mm_px ** 2
+    ref = 6 * np.prod([int(np.ceil(e / CELL_MM)) * CELL_MM for e in extent[:2]])
+    assert abs(area / ref - 1) < 0.04, \
+        "%s panel silhouettes cover %.0f mm2, lattice says %.0f (%.1f%% off) " \
+        "-- the smoothing is growing the shape, not just its edge" \
+        % (names[2], area, ref, 100 * (area / ref - 1))
+    print("PASS  ortho panels %s: Top %d silhouettes (%.1f%% of the lattice "
+          "area), Front %d layer bands  ->  %s"
+          % ("/".join(names), n_top, 100 * area / ref, len(bands), path))
+
+
 def _selfcheck(outdir) -> int:
     import sys
     import time
@@ -1641,6 +1875,13 @@ def _selfcheck(outdir) -> int:
     cases.append(("no vertical nest", "PLS1280", (200.0, 100.0, 60.0),
                   (100.0, 100.0, 60.0), (1, 7, 16), (1150, 750, 1000), 112,
                   "bar"))
+    # F11's third archetype: interleaved in plan (pitch_L 150 under a 300mm
+    # part), flat in z -> "layer_sheets", a BOM with sheets and NO tray. The
+    # drawing routed every non-bar BOM to the pocket-tray builder and raised
+    # StopIteration on this one. Synthetic numbers, not the customer's.
+    cases.append(("interleaved in plan", "PLS12103", (300.0, 800.0, 70.0),
+                  (150.0, 800.0, 72.0), (5, 1, 10), (1150, 950, 1000), 50,
+                  "bar"))
 
     # A component the BOM lists and the picture does not contain is the
     # failure the count assertions cannot see: they count cuboids, not cells.
@@ -1676,6 +1917,14 @@ def _selfcheck(outdir) -> int:
               "%.2f MB, %.2fs)"
               % (bom.archetype, asset, ref, count, grid, path,
                  img.width, img.height, len(png) / 1e6, dt))
+        opath = outdir / ("ortho_%s_%s.png"
+                          % (bom.archetype,
+                             ref.replace("/", "_").replace(" ", "_")))
+        opath.write_bytes(ortho_png(
+            voxels=_demo_voxels(extent, CELL_MM, kind), extent_lbh=extent,
+            pitch_lbh=pitch, grid=grid, inner_lbh=inner, bom=bom,
+            asset_name=asset, count=count))
+        print("        ortho  ->  %s" % opath)
         for e in bom.elements:
             print("        %-46s qty %-5s %s"
                   % (e.name, e.qty,
@@ -1789,6 +2038,7 @@ def _selfcheck(outdir) -> int:
     _check_undrawn_warns(cases[0], catch)
     assert not catch.msgs, catch.msgs
     _check_frames_false(cases[0])
+    _check_ortho_panels(outdir)
     logger.removeHandler(catch)
     print("all insert-drawing checks passed")
     return 0

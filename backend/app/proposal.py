@@ -124,6 +124,15 @@ def _footer(ax, text: str) -> None:
     ax.text(0.06, 0.03, text, fontsize=8, color=C_MUTE, va="bottom")
 
 
+def _drawing_of(best_obj: dict | None) -> str | None:
+    """The packed-box picture for the PDF: F15's orthographic Front/Side/Top,
+    falling back to the exploded isometric for results rendered before it
+    existed. One expression, so every page embeds the same drawing.
+    """
+    o = best_obj or {}
+    return o.get("ortho_url") or o.get("drawing_url")
+
+
 def _local_path(url: str | None) -> Path | None:
     """`/api/files/<name>` -> the file on disk, or None (missing/absent)."""
     if not url:
@@ -216,14 +225,17 @@ def _part_pose_page(part: PartProfile, run_out: RunOut,
         ax.text(0.06, y, line, fontsize=12.5, color=C_INK, va="top")
         y -= 0.07
 
-    png = _local_path((best_obj or {}).get("drawing_url"))
+    png = _local_path(_drawing_of(best_obj))
     if png is not None:
         img = Image.open(png)
-        iax = fig.add_axes((0.5, 0.12, 0.46, 0.62))
+        # Full width under the text block: the F15 drawing is three panels
+        # side by side (~13:5), and the old portrait slot beside the text
+        # shrank it to a thumbnail and ran the pose sentence under it.
+        iax = fig.add_axes((0.06, 0.08, 0.88, 0.34))
         iax.imshow(img)
         iax.axis("off")
     else:
-        ax.text(0.5, 0.4, "No exploded drawing available for this part.",
+        ax.text(0.5, 0.4, "No packed-box drawing available for this part.",
                 fontsize=11, color=C_MUTE, ha="center")
     _footer(ax, f"Run {run_out.solve_job_id}")
     return fig
@@ -320,8 +332,8 @@ def _bom_page(best_obj: dict | None, run_out: RunOut):
 
 def _exploded_page(best_obj: dict | None, run_out: RunOut):
     fig, ax = _page()
-    _header(ax, "Exploded insert drawing", run_out.best_asset or "")
-    png = _local_path((best_obj or {}).get("drawing_url"))
+    _header(ax, "Packed box - Front / Side / Top", run_out.best_asset or "")
+    png = _local_path(_drawing_of(best_obj))
     if png is not None:
         img_rect = (0.06, 0.06, 0.88, 0.76)
         img = Image.open(png)
@@ -329,7 +341,7 @@ def _exploded_page(best_obj: dict | None, run_out: RunOut):
         iax.imshow(img)
         iax.axis("off")
     else:
-        ax.text(0.5, 0.5, "No exploded drawing available for this option.",
+        ax.text(0.5, 0.5, "No packed-box drawing available for this option.",
                 fontsize=12, color=C_MUTE, ha="center")
     _footer(ax, f"Run {run_out.solve_job_id}")
     return fig
