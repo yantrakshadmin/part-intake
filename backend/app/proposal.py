@@ -339,9 +339,20 @@ def _sequence_page(best_obj: dict | None, run_out: RunOut):
     fig, ax = _page()
     _header(ax, "Packing sequence", run_out.best_asset or "")
     gif = _local_path((best_obj or {}).get("gif_url"))
-    if gif is None:
+    # F5 S1: a part with a GLB has no GIF (the live animation replaces it),
+    # only `packed_url` -- the same hold frame the GIF would have ended on
+    # (hard rule 9) -- so the still stands in for the First/Middle/Last strip.
+    packed = None if gif is not None else _local_path(
+        (best_obj or {}).get("packed_url"))
+    if gif is None and packed is None:
         ax.text(0.5, 0.5, "No packing-sequence GIF available for this option.",
                 fontsize=12, color=C_MUTE, ha="center")
+    elif gif is None:
+        img = Image.open(packed).convert("RGB")
+        iax = fig.add_axes((0.06, 0.06, 0.88, 0.76))
+        iax.imshow(img)
+        iax.axis("off")
+        iax.set_title("Packed", fontsize=11, color=C_INK)
     else:
         im = Image.open(gif)
         n = getattr(im, "n_frames", 1)

@@ -195,19 +195,21 @@ def main() -> int:
 
             # B-GIF, same hard rule 9 discipline, tightened for the VM cost
             # fix (worker.GIF_FOR_TOP_CATALOGUE_ONLY): the packing-sequence
-            # GIF is now only rendered for catalogue[0] (top-ranked box) and
-            # the custom design -- every other ranked layout still gets its
-            # exploded PNG but ships gif_url=None on purpose.
-            def _opens(url: str) -> bool:
-                from PIL import Image
-                path = Path(settings.local_storage_dir) / url.rsplit("/", 1)[-1]
-                with Image.open(path) as im:
-                    im.verify()
-                return path.is_file()
-
+            # GIF/packed/sequence trio is only built for catalogue[0]
+            # (top-ranked box) and the custom design -- every other ranked
+            # layout still gets its exploded PNG but ships gif_url=None on
+            # purpose.
+            #
+            # F5 S1: this part has a GLB (`_make_wheel_part` ran real STEP
+            # extraction), so the frontend replays the live 3D animation off
+            # `sequence` and has no use for the GIF -- `worker._render_drawings`
+            # passes `frames=False`, so gif_url stays null for BOTH of them,
+            # while packed_url/sequence (built off that same `frames=False`
+            # `build_gif` call, hard rule 9) are non-null exactly like before.
             top = status.result.catalogue[0]
-            check(bool(top.gif_url) and _opens(top.gif_url),
-                  "catalogue[0] (top ranked) ships a gif_url that opens",
+            check(top.gif_url is None,
+                  "catalogue[0] (top ranked, GLB part) ships gif_url=None "
+                  "-- the animation replaces it (F5 S1)",
                   f": {top.gif_url}")
             others_have_gif = [
                 l.asset_name for l in status.result.catalogue[1:]
@@ -217,32 +219,30 @@ def main() -> int:
                   "other ranked layouts ship gif_url=None",
                   f": unexpected gif on {others_have_gif}")
             check(status.result.custom is not None
-                  and bool(status.result.custom.gif_url)
-                  and _opens(status.result.custom.gif_url),
-                  "custom.gif_url ships and opens with PIL",
+                  and status.result.custom.gif_url is None,
+                  "custom (GLB part) ships gif_url=None too (F5 S1)",
                   f": {status.result.custom.gif_url if status.result.custom else None}")
 
-            # Ticket 1a: packed_url is the GIF's own final frame -- present
-            # exactly where gif_url is present (top-ranked + custom), null
-            # everywhere else, opens with PIL, same size as the GIF frames,
-            # and not a blank/solid image.
+            # packed_url/sequence still ship -- `frames=False` still runs the
+            # SAME `_place`/`_sequence`/`_captions` expression and still
+            # renders the one hold frame (F5 S1) -- present exactly where a
+            # gif WOULD have been built (top-ranked + custom), null
+            # everywhere else, opens with PIL, and not a blank/solid image.
             def _packed_ok(layout) -> bool:
-                if not (layout.gif_url and layout.packed_url):
+                if not layout.packed_url:
                     return False
                 from PIL import Image
-                gpath = (Path(settings.local_storage_dir)
-                        / layout.gif_url.rsplit("/", 1)[-1])
                 ppath = (Path(settings.local_storage_dir)
                         / layout.packed_url.rsplit("/", 1)[-1])
-                with Image.open(gpath) as gim, Image.open(ppath) as pim:
-                    gim.seek(gim.n_frames - 1)
-                    same_size = pim.size == gim.size
+                with Image.open(ppath) as pim:
                     colours = pim.convert("RGB").getcolors(maxcolors=256 * 256)
                     non_blank = colours is None or len(colours) > 1
-                return ppath.is_file() and same_size and non_blank
+                return ppath.is_file() and non_blank
 
-            check(_packed_ok(top),
-                  "catalogue[0] ships a packed_url matching its GIF's final frame",
+            check(_packed_ok(top) and top.sequence is not None
+                  and len(top.sequence.steps) > 0,
+                  "catalogue[0] ships a packed_url (opens, non-blank) and a "
+                  "sequence, with no gif_url built (F5 S1)",
                   f": {top.packed_url}")
             others_have_packed = [
                 l.asset_name for l in status.result.catalogue[1:]
@@ -252,8 +252,11 @@ def main() -> int:
                   "other ranked layouts ship packed_url=None (no GIF built)",
                   f": unexpected packed_url on {others_have_packed}")
             check(status.result.custom is not None
-                  and _packed_ok(status.result.custom),
-                  "custom.packed_url ships and matches its GIF's final frame",
+                  and _packed_ok(status.result.custom)
+                  and status.result.custom.sequence is not None
+                  and len(status.result.custom.sequence.steps) > 0,
+                  "custom ships a packed_url (opens, non-blank) and a "
+                  "sequence, with no gif_url built (F5 S1)",
                   f": {status.result.custom.packed_url if status.result.custom else None}")
 
             # The synthesised custom design has no catalogue tare and no
@@ -855,13 +858,18 @@ def main_http() -> int:
               "best_count is present on that same pending-render poll")
         check(seen_done_render,
               "a LATER poll has render_status=done with catalogue[0]."
-              "drawing_url/gif_url/packed_url all non-null",
+              "drawing_url/packed_url/sequence all non-null",
               f": statuses seen={statuses_seen}")
         if seen_done_render:
             cat0 = polls[-1]["result"]["catalogue"][0]
-            check(bool(cat0.get("drawing_url")) and bool(cat0.get("gif_url"))
-                  and bool(cat0.get("packed_url")),
-                  "catalogue[0] drawing_url/gif_url/packed_url all non-null",
+            # F5 S1: this WHEEL part has a GLB, so gif_url stays null on
+            # purpose (the frontend animates off `sequence` instead) while
+            # drawing_url/packed_url/sequence still ship.
+            check(bool(cat0.get("drawing_url")) and cat0.get("gif_url") is None
+                  and bool(cat0.get("packed_url"))
+                  and bool((cat0.get("sequence") or {}).get("steps")),
+                  "catalogue[0] drawing_url/packed_url/sequence non-null, "
+                  "gif_url null (F5 S1, part has a GLB)",
                   f": {cat0.get('drawing_url')}, {cat0.get('gif_url')}, "
                   f"{cat0.get('packed_url')}")
     finally:

@@ -335,7 +335,15 @@ The number is fast; the ~26 s tail is pictures. Function-level breakdown:
 | truck fit, ranking | <0.05 s | <0.05 s | never the bottleneck |
 
 Levers, in order (none touches a count; ground truth 40/48 must hold):
-- *S1 — GIF only when it is the only moving picture.* Once F4 ships, a
+- *S1 — DONE 2026-09-15, and simpler than planned: the worker never builds
+  the animated GIF any more.* Every solvable part has a GLB (`run_solve` and
+  `run_render` load the mesh from it; manual parts 422 before solving), so
+  the "GIF for no-GLB parts" branch was unreachable — a test that nulled
+  `glb_path` and re-rendered proved it (render fails, no mesh). `build_gif(
+  frames=False)` renders the hold frame + sequence off the same `_place`;
+  the GIF code path stays alive in `insert_drawing`'s self-check only.
+  Measured over HTTP: render tail 26 s → 1.1 s (TRW). Original plan:*
+  GIF only when it is the only moving picture.* Once F4 ships, a
   part with a GLB gets the live animation; the GIF is then a fallback for
   manual-source parts (no GLB) and nothing else. Render `packed_url`
   straight from the hold frame (`frame(None)`, one matplotlib pass) and

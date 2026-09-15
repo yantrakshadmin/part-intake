@@ -200,8 +200,10 @@ def min_pitch(grid: np.ndarray, axis: int, voxel_mm: float = VOXEL_MM,
     def clear_at(offset: int) -> bool:
         # Slices, not np.take(range(...)): a range index is fancy indexing and
         # COPIES the whole grid, twice per probe. min_pitch runs ~n.ln(n)
-        # probes per axis against a ~760k-cell grid, and this is the ~2.4s/pose
-        # the endpoint had to go async for. Basic slicing returns views.
+        # probes per axis against a ~760k-cell grid -- cheap next to the
+        # ~2.4s/pose `occupancy` (trimesh's own voxeliser) actually costs,
+        # which is why the endpoint had to go async. Basic slicing returns
+        # views regardless.
         hi = [slice(None)] * grid.ndim
         lo = [slice(None)] * grid.ndim
         hi[axis] = slice(offset, n)

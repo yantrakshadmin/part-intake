@@ -1070,8 +1070,8 @@ def _step_masks(dun: np.ndarray, dun_step: np.ndarray, prt: np.ndarray,
 def build_gif(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
              bom: dunnage.Bom, asset_name: str, count: int,
              cell_mm: float = CELL_MM, dunnage_ms: int = 600,
-             parts_ms: int = 1500, hold_ms: int = 3000, pose_matrix=None
-             ) -> tuple[bytes, bytes, dict]:
+             parts_ms: int = 1500, hold_ms: int = 3000, pose_matrix=None,
+             frames: bool = True) -> tuple[bytes | None, bytes, dict]:
     """The packing sequence as an animated GIF: the empty asset, then per
     layer the dunnage that goes in before it and that layer's parts, then the
     top dunnage, then a hold on the finished box before it loops.
@@ -1092,6 +1092,15 @@ def build_gif(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     never re-derived, only replayed cumulatively by the per-cell step index
     `_place` stamped alongside every label (hard rule 9 applies to the
     picture too). A step with no cell at all is dropped, not rendered empty.
+
+    `frames=False` (F5 S1: a part with a live 3D animation has no more use
+    for the GIF) skips rendering every per-step matplotlib frame -- the
+    expensive part, ~18 s of a solve's render tail -- and returns `gif_bytes
+    None`. It still runs `_place`/`_sequence`/`_captions`, the SAME
+    expression as the `frames=True` path, and still renders the one hold
+    frame `frame(None, ...)` for `packed_png_bytes`, so that PNG and the
+    `sequence` are byte-for-byte and value-for-value what they would have
+    been with the GIF built (see `_check_frames_false` self-check).
     """
     p = _place(voxels=voxels, extent_lbh=extent_lbh, pitch_lbh=pitch_lbh,
               grid=grid, inner_lbh=inner_lbh, bom=bom, count=count,
@@ -1177,22 +1186,29 @@ def build_gif(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
         plt.close(fig)
         return img
 
-    frames = [frame(s, idx) for idx, s in enumerate(non_empty)]
     packed_frame = frame(None, len(non_empty) - 1)        # the hold frame:
-    frames.append(packed_frame)                           # complete, packed box
+    packed_buf = BytesIO()                                # complete, packed box
+    packed_frame.save(packed_buf, format="PNG")
+    seq = _sequence(p, bom, asset_name, count, non_empty, pose_matrix)
+
+    if not frames:
+        logger.info("built %s %s packed png only (frames=False), %d bytes",
+                    asset_name, bom.archetype, packed_buf.tell())
+        return None, packed_buf.getvalue(), seq
+
+    gif_frames = [frame(s, idx) for idx, s in enumerate(non_empty)]
+    gif_frames.append(packed_frame)
     durations = [(parts_ms if s % 2 else dunnage_ms) for s in non_empty]
     durations.append(hold_ms)
 
     buf = BytesIO()
-    frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:],
-                   optimize=True, duration=durations, loop=0)
-    packed_buf = BytesIO()
-    packed_frame.save(packed_buf, format="PNG")
+    gif_frames[0].save(buf, format="GIF", save_all=True,
+                       append_images=gif_frames[1:], optimize=True,
+                       duration=durations, loop=0)
     logger.info("built %s %s gif: %d frames (%d content + hold), %d bytes",
-                asset_name, bom.archetype, len(frames), len(non_empty),
+                asset_name, bom.archetype, len(gif_frames), len(non_empty),
                 buf.tell())
-    return (buf.getvalue(), packed_buf.getvalue(),
-            _sequence(p, bom, asset_name, count, non_empty, pose_matrix))
+    return buf.getvalue(), packed_buf.getvalue(), seq
 
 
 # ---------------------------------------------------------------------------
@@ -1554,6 +1570,31 @@ def _check_sequence(seq: dict, placement: _Placement, bom: dunnage.Bom,
     assert seq["inner"] == [float(v) for v in inner], seq["inner"]
 
 
+def _check_frames_false(case) -> None:
+    """F5 S1: `build_gif(frames=False)` (no GIF -- a GLB part animates
+    instead) must still produce the identical `packed_png` and `sequence` a
+    `frames=True` call on the same fixture would -- both run the SAME
+    `_place`/`_sequence`/`_captions` expression (hard rule 9); only whether
+    the per-step matplotlib frames get rendered differs.
+    """
+    ref, asset, extent, pitch, grid, inner, count, kind = case
+    bom = dunnage.bom(extent, pitch, grid, inner)
+    voxels = _demo_voxels(extent, CELL_MM, kind)
+    kwargs = dict(voxels=voxels, extent_lbh=extent, pitch_lbh=pitch,
+                 grid=grid, inner_lbh=inner, bom=bom, asset_name=asset,
+                 count=count, pose_matrix=np.eye(4))
+    gif, packed_with_frames, seq_with_frames = build_gif(**kwargs, frames=True)
+    no_gif, packed_no_frames, seq_no_frames = build_gif(**kwargs, frames=False)
+    assert gif is not None, "%s: frames=True must still build a gif" % ref
+    assert no_gif is None, "%s: frames=False must return no gif bytes" % ref
+    assert packed_no_frames == packed_with_frames, \
+        "%s: frames=False packed PNG differs from frames=True's" % ref
+    assert seq_no_frames == seq_with_frames, \
+        "%s: frames=False sequence differs from frames=True's" % ref
+    print("PASS  %-14s %-9s %s  frames=False packed PNG and sequence match "
+          "frames=True byte-for-byte" % (bom.archetype, asset, ref))
+
+
 def _selfcheck(outdir) -> int:
     import sys
     import time
@@ -1747,6 +1788,7 @@ def _selfcheck(outdir) -> int:
     _check_spec_column(cases[1])
     _check_undrawn_warns(cases[0], catch)
     assert not catch.msgs, catch.msgs
+    _check_frames_false(cases[0])
     logger.removeHandler(catch)
     print("all insert-drawing checks passed")
     return 0

@@ -96,6 +96,14 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
     see that constant. Voxelises once per distinct pose -- `pose_voxels` is
     the expensive call, and several ranked layouts commonly share a pose.
 
+    F5 S1: the frontend replays the live 3D animation off `sequence`, so
+    `build_gif` runs with `frames=False` -- the same `_place` for
+    `packed_url`/`sequence`, minus the ~18 s (40 s on the prod VM) of
+    per-step matplotlib frames nobody sees. There is no "no-GLB" branch:
+    every part that reaches here has a GLB (run_solve/run_render load the
+    mesh from it), so `gif_url` is always None now. The GIF path stays alive
+    in insert_drawing's self-check.
+
     A render failure -- including `explode_png`/`build_gif`'s own
     drawn-count-vs-BOM AssertionError -- must never fail the solve: it is
     logged and that layout's picture is left absent. The count is the
@@ -142,7 +150,7 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
         path.write_bytes(data)
         return f"/api/files/{file_name}"
 
-    render_counts = {"png": 0, "gif": 0}
+    render_counts = {"png": 0, "seq": 0, "gif": 0}
 
     def render(*, pose_label, extent_lbh, pitch_lbh, grid, inner_lbh,
                asset_name, count, file_stem, want_gif: bool = True
@@ -184,9 +192,13 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
                     voxels=voxels, extent_lbh=extent_lbh,
                     pitch_lbh=pitch_lbh, grid=grid, inner_lbh=inner_lbh,
                     bom=bom, asset_name=asset_name, count=count,
-                    pose_matrix=rotation_by_label.get(pose_label))
-                gif_url = _write(gif, f"{file_stem}.gif")
-                render_counts["gif"] += 1
+                    pose_matrix=rotation_by_label.get(pose_label),
+                    frames=False)
+                render_counts["seq"] += 1
+                if gif is not None:            # never, with frames=False; kept so the
+                    # GIF path is one flag away if a no-GLB source ever appears
+                    gif_url = _write(gif, f"{file_stem}.gif")
+                    render_counts["gif"] += 1
             except Exception:
                 logger.exception("build sequence gif failed for %s (%s)",
                                  job_id, file_stem)
@@ -243,8 +255,8 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
             count=result.custom.count,
             file_stem=f"drawing_{job_id}_custom")
 
-    logger.info("rendered %d png + %d gif in %.1fs for %s",
-                render_counts["png"], render_counts["gif"],
+    logger.info("rendered %d png + %d packed/sequence + %d gif in %.1fs for %s",
+                render_counts["png"], render_counts["seq"], render_counts["gif"],
                 time.monotonic() - start, job_id)
     return (drawing_urls, gif_urls, packed_urls, sequences,
             custom_drawing_url, custom_gif_url, custom_packed_url,

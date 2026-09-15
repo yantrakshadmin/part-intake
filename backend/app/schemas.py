@@ -277,13 +277,16 @@ class LayoutOut(BaseModel):
     gif_url: Optional[str] = None
     # The complete, fully packed box -- the GIF's own final frame, so it can
     # never disagree with the animation. The first image the engineer should
-    # see after a solve; null wherever no GIF was built (same discipline as
-    # gif_url -- declare it here or pydantic drops it, hard rule 9).
+    # see after a solve. Built (and non-null) whenever `sequence` is, even
+    # when `gif_url` is null (F5 S1: a GLB part gets no GIF, but still gets
+    # this still and the sequence off the same `build_gif` call, frames=False
+    # -- same discipline as gif_url, declare it here or pydantic drops it).
     packed_url: Optional[str] = None
     # The same build the GIF animates, as data for the 3D animation. Present
-    # wherever a GIF was built; same failure discipline (a sequence failure
-    # never fails the solve) and the same declare-it-or-pydantic-drops-it
-    # rule as gif_url above.
+    # wherever `build_gif` ran for this layout -- with a GIF (`frames=True`)
+    # or without one (F5 S1, `frames=False`); same failure discipline (a
+    # sequence failure never fails the solve) and the same
+    # declare-it-or-pydantic-drops-it rule as gif_url above.
     sequence: Optional[BuildSequenceOut] = None
 
 

@@ -5,7 +5,7 @@ and `material`) is added to an existing dev.db by `main._ensure_added_columns`,
 idempotently, at import. Nothing to do by hand -- this used to say "drop
 dev.db", which now destroys data for no reason.
 
-TODO(PM): only the 15 seeded PACKAGING rows are exposed here. The other 34
+TODO(PM): only the 17 seeded PACKAGING rows are exposed here. The other 32
 catalogue assets (PLANNING §5: mislabeled types, impossible inner/outer pairs,
 trailing-zero weight errors) are not surfaced until that cleanup lands.
 """
