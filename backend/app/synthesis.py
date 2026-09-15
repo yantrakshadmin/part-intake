@@ -85,6 +85,11 @@ class BoxDesign:
     # with no geometry to draw, and the only drawing left is the cuboid one.
     silhouette: dict | None = None
     dunnage: dict | None = None
+    # Same as `nesting.Layout.turned` -- which of `Pose.footprint_orders`' two
+    # in-plane assignments this design won in. The worker composes
+    # `nesting.IN_PLANE_TURN` into the rotation it poses the custom box's
+    # drawing and 3D animation with (F7).
+    turned: bool = False
     # Which resting pose this design is for. `synthesise` is called per pose
     # and does not know the label, so `engine.solve` stamps it on the winner.
     # Defaulted, not required: without it a custom box reaches the UI as a
@@ -150,7 +155,9 @@ def synthesise(extent_lbh, pitch_lbh, part_kg: float = 0.0,
                 silhouettes=silhouettes)
 
     for name, inner_l, inner_b in ALLOWED_INNER_FOOTPRINTS:
-        for extent, pitch, silhouette, _clr in pose.footprint_orders():
+        # `footprint_orders` yields (0,1,2) then (1,0,2); index 1 IS the turn.
+        for turned, (extent, pitch, silhouette, _clr) in enumerate(
+                pose.footprint_orders()):
             if pitch[2] <= 0 or extent[2] > max_inner_height_mm + EPS:
                 continue
             # What the insert adds above the stack; the box carries it and the
@@ -194,6 +201,7 @@ def synthesise(extent_lbh, pitch_lbh, part_kg: float = 0.0,
                 extent_lbh=extent,
                 pitch_lbh=pitch,
                 silhouette=silhouette,
+                turned=bool(turned),
             )
             # Most parts wins; a tie goes to the smaller box.
             if best is None or (design.count, -design.outer[1], -design.outer[2]) > \

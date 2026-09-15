@@ -23,7 +23,8 @@ from . import dunnage, engine as engine_mod, synthesis
 from .catalogue import containers, containers_named, excluded_drafts
 from .config import settings
 from .geometry import OrientationCandidate, extract_part, load_unified_mesh
-from .insert_drawing import build_gif, explode_png, pose_voxels
+from .insert_drawing import _as_4x4, build_gif, explode_png, pose_voxels
+from .nesting import IN_PLANE_TURN
 from .models import (ExtractionJob, PartProfile, Project, Proposal, SolveJob,
                     Vehicle)
 from .proposal import build_pdf
@@ -125,19 +126,37 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
     inner_by_name = {a.name: a.inner for a in assets}
     voxel_cache: dict = {}
 
-    def voxels_for(pose_label: str):
-        if pose_label not in voxel_cache:
-            rotation = rotation_by_label.get(pose_label)
+    def rotation_for(pose_label: str, turned: bool):
+        """The matrix the part is actually posed with. ONE expression for the
+        voxels and for the 3D animation's `pose_matrix` (hard rule 9).
+
+        A layout can win in footprint order (1, 0, 2) -- extent, pitch, grid
+        and silhouette all permuted (`nesting.Layout.turned`). The resting
+        rotation alone then poses the part across the lattice it was measured
+        for: a real SX4 cover won PLS12103 at extent (332, 876, 76) and the
+        drawing stamped 875mm-long parts at a 177mm x-pitch, logging "parts
+        clipped by the volume" while every number on screen stayed right (F7).
+        """
+        rotation = rotation_by_label.get(pose_label)
+        if rotation is None or not turned:
+            return rotation
+        return IN_PLANE_TURN @ _as_4x4(rotation)
+
+    def voxels_for(pose_label: str, turned: bool):
+        # The turn changes the raster, so it is part of the cache key.
+        key = (pose_label, turned)
+        if key not in voxel_cache:
+            rotation = rotation_for(pose_label, turned)
             try:
-                voxel_cache[pose_label] = (
+                voxel_cache[key] = (
                     pose_voxels(mesh, rotation) if rotation is not None
                     else None
                 )
             except Exception:
-                logger.exception("pose_voxels failed for %s pose %r",
-                                 job_id, pose_label)
-                voxel_cache[pose_label] = None
-        return voxel_cache[pose_label]
+                logger.exception("pose_voxels failed for %s pose %r (turned=%s)",
+                                 job_id, pose_label, turned)
+                voxel_cache[key] = None
+        return voxel_cache[key]
 
     def _write(data: bytes, file_name: str) -> str:
         path = Path(settings.local_storage_dir) / file_name
@@ -153,9 +172,10 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
     render_counts = {"png": 0, "seq": 0, "gif": 0}
 
     def render(*, pose_label, extent_lbh, pitch_lbh, grid, inner_lbh,
-               asset_name, count, file_stem, want_gif: bool = True
+               asset_name, count, file_stem, turned: bool = False,
+               want_gif: bool = True
                ) -> tuple[str | None, str | None, str | None, dict | None]:
-        voxels = voxels_for(pose_label)
+        voxels = voxels_for(pose_label, turned)
         if voxels is None:
             return None, None, None, None
         try:
@@ -192,7 +212,7 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
                     voxels=voxels, extent_lbh=extent_lbh,
                     pitch_lbh=pitch_lbh, grid=grid, inner_lbh=inner_lbh,
                     bom=bom, asset_name=asset_name, count=count,
-                    pose_matrix=rotation_by_label.get(pose_label),
+                    pose_matrix=rotation_for(pose_label, turned),
                     frames=False)
                 render_counts["seq"] += 1
                 if gif is not None:            # never, with frames=False; kept so the
@@ -233,7 +253,7 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
             pitch_lbh=layout.pitch_lbh, grid=layout.grid,
             inner_lbh=inner_lbh, asset_name=layout.asset_name,
             count=layout.count, file_stem=f"drawing_{job_id}_{i}",
-            want_gif=want_gif)
+            turned=layout.turned, want_gif=want_gif)
         if png_url is not None:
             drawing_urls[i] = png_url
         if gif_url is not None:
@@ -252,7 +272,7 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
             extent_lbh=result.custom.extent_lbh,
             pitch_lbh=result.custom.pitch_lbh, grid=result.custom.grid,
             inner_lbh=result.custom.inner, asset_name="custom design",
-            count=result.custom.count,
+            count=result.custom.count, turned=result.custom.turned,
             file_stem=f"drawing_{job_id}_custom")
 
     logger.info("rendered %d png + %d packed/sequence + %d gif in %.1fs for %s",
@@ -657,7 +677,11 @@ def run_render(job_id: str) -> None:
                 SimpleNamespace(asset_name=l["asset_name"],
                                 pose_label=l["pose_label"], count=l["count"],
                                 grid=l["grid"], extent_lbh=l["extent_lbh"],
-                                pitch_lbh=l["pitch_lbh"])
+                                pitch_lbh=l["pitch_lbh"],
+                                # F7: which in-plane order these numbers are
+                                # in. Missing on result_json written before
+                                # F7 -- those rendered un-turned anyway.
+                                turned=l.get("turned", False))
                 for l in (r.get("catalogue") or [])
             ]
             custom_dict = r.get("custom")
@@ -665,6 +689,7 @@ def run_render(job_id: str) -> None:
                 pose_label=custom_dict["pose_label"], count=custom_dict["count"],
                 grid=custom_dict["grid"], extent_lbh=custom_dict["extent_lbh"],
                 pitch_lbh=custom_dict["pitch_lbh"], inner=custom_dict["inner"],
+                turned=custom_dict.get("turned", False),
             ) if custom_dict is not None else None)
             result = SimpleNamespace(catalogue=catalogue, custom=custom)
 

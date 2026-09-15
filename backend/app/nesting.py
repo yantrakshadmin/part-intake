@@ -85,6 +85,14 @@ class Layout:
     extent_lbh: tuple            # part bounding extent in this pose, mm
     pitch_lbh: tuple             # lattice spacing actually used, mm
     limited_by: str              # "geometry" or "weight"
+    # Which of `Pose.footprint_orders`' two in-plane assignments this won in:
+    # False = (0, 1, 2) as measured, True = (1, 0, 2), the quarter turn.
+    # The worker composes `IN_PLANE_TURN` into the rotation it poses the
+    # voxels AND the 3D animation with; without it the drawing stamped
+    # 876mm-long parts into a 332mm lattice and clipped every one of them
+    # while every number on screen stayed correct (F7). Not in the API
+    # response model -- the frontend only ever sees the composed pose_matrix.
+    turned: bool = False
     # Plan silhouette of ONE part in this footprint order -- `silhouette_runs`
     # wire format, or None when the pose carries no measured grid. The
     # interleaved insert drawing needs the real footprint; the engine used to
@@ -164,16 +172,33 @@ def silhouette_runs(mask: np.ndarray, cell_mm: float = VOXEL_MM) -> dict:
             "cols": int(mask.shape[1]), "runs": runs}
 
 
+# The in-plane quarter turn of footprint order (1, 0, 2), as a 4x4 the worker
+# composes into the resting rotation (`IN_PLANE_TURN @ candidate.rotation_matrix`)
+# so `pose_voxels` and the 3D animation's `pose_matrix` are the same expression.
+# +90 degrees about z pairs EXACTLY with `np.rot90(mask, 1)` below -- that
+# pairing is the whole point of the constant and `test_nesting` asserts it on a
+# voxelised L-shape. A transpose would be a MIRROR: same bounding size, same
+# pitch, wrong part.
+IN_PLANE_TURN = np.array([[0.0, -1.0, 0.0, 0.0],
+                          [1.0, 0.0, 0.0, 0.0],
+                          [0.0, 0.0, 1.0, 0.0],
+                          [0.0, 0.0, 0.0, 1.0]])
+
+
 def plan_silhouettes(mask: np.ndarray, cell_mm: float = VOXEL_MM) -> tuple:
     """The plan silhouette for each of `Pose.footprint_orders`' two orders.
 
     Order (0, 1, 2) is the mask as measured; order (1, 0, 2) swaps the two
-    floor axes, so it is the TRANSPOSE. Encoded once per pose here rather than
-    per (pose x asset) inside `footprint_orders`, because ranking the catalogue
-    calls that ~120 times for the same handful of masks.
+    floor axes -- a quarter TURN, `np.rot90(mask, 1)`, matching `IN_PLANE_TURN`
+    cell for cell. Not the transpose: extents and pitch permute identically
+    either way, so no number on screen moves, but a transpose is a mirror and
+    the posed part would not match its own drawing. Encoded once per pose here
+    rather than per (pose x asset) inside `footprint_orders`, because ranking
+    the catalogue calls that ~120 times for the same handful of masks.
     """
     mask = np.asarray(mask, dtype=bool)
-    return (silhouette_runs(mask, cell_mm), silhouette_runs(mask.T, cell_mm))
+    return (silhouette_runs(mask, cell_mm),
+            silhouette_runs(np.rot90(mask, 1), cell_mm))
 
 
 def min_pitch(grid: np.ndarray, axis: int, voxel_mm: float = VOXEL_MM,
@@ -306,7 +331,8 @@ class Pose:
 
         Pitch travels with its own axis, so extent and pitch permute together
         -- and so does the plan silhouette. Order (1, 0, 2) swaps the two
-        floor axes, so the mask is TRANSPOSED. Getting that wrong leaves the
+        floor axes, so the mask is TURNED (`plan_silhouettes`, and the worker
+        poses with the matching `IN_PLANE_TURN`). Getting that wrong leaves the
         insert drawing 90 degrees out while every number on screen stays
         correct; `tests/test_nesting.py` asserts the silhouette's bounding
         size against the extent it is yielded with, which is what catches it.
@@ -378,7 +404,9 @@ def layouts_for(poses, asset, part_kg: float = 0.0) -> list:
     from . import dunnage   # dunnage imports nothing from here; local to be safe
     out = []
     for pose in poses:
-        for extent, pitch, silhouette, clearance in pose.footprint_orders():
+        # `footprint_orders` yields (0,1,2) then (1,0,2); index 1 IS the turn.
+        for turned, (extent, pitch, silhouette, clearance) in enumerate(
+                pose.footprint_orders()):
             dead = dunnage.dead_height_mm(extent, pitch, clearance)
             inner = (asset.inner[0], asset.inner[1], asset.inner[2] - dead)
             count, grid_counts, limited_by = lattice_count(
@@ -396,6 +424,7 @@ def layouts_for(poses, asset, part_kg: float = 0.0) -> list:
                 out.append(Layout(asset.name, pose.label, count, grid_counts,
                                   tuple(round(v, 2) for v in extent),
                                   tuple(round(v, 2) for v in pitch), limited_by,
+                                  turned=bool(turned),
                                   silhouette=silhouette, count_upper=upper))
     out.sort(key=lambda l: -l.count)
     return out

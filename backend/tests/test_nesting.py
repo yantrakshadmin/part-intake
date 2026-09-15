@@ -157,9 +157,11 @@ def test_silhouette_round_trips_and_permutes_with_the_footprint():
 
     `Pose.footprint_orders` yields the two 90-degree in-plane assignments by
     permuting extent and pitch together. Order (1, 0, 2) means the mask is
-    TRANSPOSED. Get this wrong and the insert drawing is 90 degrees out while
-    every number on screen stays correct -- the exact defect class CLAUDE.md
-    hard rule 9 exists for, and no count assertion can catch it.
+    ROTATED a quarter turn (`np.rot90(mask, 1)`), NOT transposed -- a
+    transpose is a mirror and a part cannot be mirrored (F7). Get this wrong
+    and the insert drawing is 90 degrees out while every number on screen
+    stays correct -- the exact defect class CLAUDE.md hard rule 9 exists for,
+    and no count assertion can catch it.
     """
     import numpy as np
     # Deliberately asymmetric: an L, so a transpose is detectable.
@@ -174,10 +176,12 @@ def test_silhouette_round_trips_and_permutes_with_the_footprint():
 
     (ext0, _p0, sil0, _c0), (ext1, _p1, sil1, _c1) = orders
     assert np.array_equal(_mask_from_runs(sil0), plan), sil0
-    assert np.array_equal(_mask_from_runs(sil1), plan.T), sil1
+    assert np.array_equal(_mask_from_runs(sil1), np.rot90(plan, 1)), sil1
+    assert not np.array_equal(_mask_from_runs(sil1), plan.T), \
+        "order (1,0,2) mirrored the part instead of rotating it"
     assert (sil0["rows"], sil0["cols"]) == (4, 3)
     assert (sil1["rows"], sil1["cols"]) == (3, 4), \
-        "order (1,0,2) did not transpose the mask"
+        "order (1,0,2) did not turn the mask"
 
     # The assertion that catches a transposed mask: the silhouette's own
     # bounding size must equal the extent it was yielded with.
@@ -189,7 +193,7 @@ def test_silhouette_round_trips_and_permutes_with_the_footprint():
     # not a fabricated one.
     bare = list(Pose("bare", (1, 1, 1), (1, 1, 1)).footprint_orders())
     assert all(sil is None for _e, _p, sil, _c in bare), bare
-    print("  silhouette round-trips and transposes with order (1,0,2)")
+    print("  silhouette round-trips and turns 90 degrees with order (1,0,2)")
 
 
 def test_cuboid_silhouette_is_solid():
@@ -392,12 +396,79 @@ def test_count_upper_is_the_quantisation_ceiling():
           f"bare numbers: {b.count} (no band)")
 
 
+def test_turned_layout_carries_the_rotation_it_won_in():
+    """F7. A layout that wins in footprint order (1, 0, 2) must say so, and
+    the in-plane turn must be a ROTATION the worker can pose the mesh with.
+
+    The defect: `layouts_for` ranked both orders but nothing recorded which
+    one won, so the worker posed the voxels and shipped `pose_matrix` with
+    the raw un-turned resting rotation while extent/pitch/grid were the
+    turned ones. The drawing stamped 876mm-long parts across a 332mm lattice
+    and logged "parts clipped by the volume"; the 3D animation did the same
+    in the browser.
+
+    `IN_PLANE_TURN` and `plan_silhouettes`' second mask are one expression:
+    rotating the mesh by the matrix must give the same occupancy as
+    `np.rot90(mask, 1)` of the un-turned one -- same shape AND same cells,
+    not a transpose (a transpose is a mirror; a part cannot be mirrored).
+    """
+    import numpy as np
+    import trimesh
+    from types import SimpleNamespace
+    from app.catalogue import Container
+    from app.insert_drawing import CELL_MM, pose_voxels
+    from app.nesting import IN_PLANE_TURN, layouts_for, measure_poses
+
+    # Asymmetric AND non-square in plan, so a mirror and a wrong sign both show.
+    a = trimesh.creation.box(extents=(200.0, 60.0, 40.0))
+    b = trimesh.creation.box(extents=(60.0, 120.0, 40.0))
+    a.apply_translation((100.0, 30.0, 20.0))
+    b.apply_translation((30.0, 90.0, 20.0))
+    part = trimesh.util.concatenate([a, b])
+
+    flat = occupancy(part, np.eye(4), 4.0).any(axis=2)
+    turned = occupancy(part, IN_PLANE_TURN, 4.0).any(axis=2)
+    assert turned.shape == np.rot90(flat, 1).shape, (turned.shape, flat.shape)
+    assert np.array_equal(turned, np.rot90(flat, 1)), \
+        "IN_PLANE_TURN does not agree with np.rot90(mask, 1)"
+    assert not np.array_equal(turned, flat.T), \
+        "the turn is a mirror, not a rotation"
+
+    cand = SimpleNamespace(label="flat", rotation_matrix=np.eye(4))
+    pose = measure_poses(part, [cand], voxel_mm=4.0)[0]
+    assert np.array_equal(_mask_from_runs(pose.silhouettes[1]),
+                          np.rot90(_mask_from_runs(pose.silhouettes[0]), 1))
+
+    # Inner is too short for order (0,1,2)'s 204mm length, so only the turned
+    # order fits at all -- the winner is turned by construction.
+    box = Container("TURNME", (170.0, 230.0, 60.0), (190.0, 250.0, 80.0),
+                    100.0, "container")
+    best = layouts_for([pose], box)[0]
+    assert best.turned, f"turned layout not recorded: {best}"
+    assert best.extent_lbh[0] < best.extent_lbh[1], best.extent_lbh
+
+    # The composed matrix the worker poses with must produce the extent the
+    # numbers were computed from. Un-composed (the F7 defect) this is 200 x 120
+    # against a (120, 200) extent and every part is clipped.
+    rotation = (IN_PLANE_TURN @ np.asarray(cand.rotation_matrix, dtype=float)
+                if best.turned else cand.rotation_matrix)
+    shape = pose_voxels(part, rotation).shape
+    for axis in (0, 1):
+        got = shape[axis] * CELL_MM
+        assert abs(got - best.extent_lbh[axis]) <= CELL_MM, \
+            (f"posed voxels {shape} ({got}mm on axis {axis}) do not match "
+             f"the turned extent {best.extent_lbh}")
+    print(f"  turned winner {best.grid} extent {best.extent_lbh}; posed voxels "
+          f"{shape[0]}x{shape[1]} cells at {CELL_MM}mm")
+
+
 if __name__ == "__main__":
     for fn in (test_ground_truth, test_exact_fit_is_not_off_by_one, test_weight_cap,
                test_count_upper_is_the_quantisation_ceiling,
                test_pitch_is_clear_at_every_lattice_multiple,
                test_cuboid_has_no_interleave,
                test_silhouette_round_trips_and_permutes_with_the_footprint,
+               test_turned_layout_carries_the_rotation_it_won_in,
                test_cuboid_silhouette_is_solid, test_bar_silhouette_is_not_solid,
                test_real_bar, test_catalogue_ranking,
                test_ties_go_to_the_smaller_box):
