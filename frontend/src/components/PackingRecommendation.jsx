@@ -1,10 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { groupInserts, insertType, layerSummary, trayGeometry } from '../lib/packing.js'
+import { insertType, layerSummary } from '../lib/packing.js'
 import { runSolve, layoutToFit, floorPlanFromTruck, errorDetail } from '../lib/solve.js'
 import { fmtQty, fmtSize, basisClass, unknownNote, heightBudget, hasDrawing } from '../lib/bom.js'
 import { downloadFigure } from '../lib/download.js'
-import InsertTray3D from './InsertTray3D.jsx'
-import InsertIso from './InsertIso.jsx'
 import TruckLoadIso from './TruckLoadIso.jsx'
 import PackAnimation from './PackAnimation.jsx'
 
@@ -473,7 +471,7 @@ function asCustomLayout(custom) {
   return { ...custom, asset_name: CUSTOM_KEY }
 }
 
-/** The custom box's own inner/outer, in the shape trayGeometry/InsertPanel
+/** The custom box's own inner/outer, in the shape the Layers/Insert tabs
  *  expect — it is not a saved packaging row. */
 function customBox(custom) {
   const [il, ib, ih] = custom.inner
@@ -871,19 +869,6 @@ function LayoutCard({ layout, rank, box, selected, onClick, label, beats }) {
 function LayoutDetail({ layout, box, part, type, tab, onTabChange, truck, truckBox, vehicles, dropdownVehicleId,
   hideTruckTab }) {
   const fit = useMemo(() => layoutToFit(layout), [layout])
-  // Clearance/wall/foam are drawing-only (D4): they size the insert tray and
-  // never change a count, so they live here — next to the drawing they
-  // affect — not in the solve rail. Local state: nothing outside the insert
-  // tab reads them.
-  const [drawParams, setDrawParams] = useState({ clearance: '7.5', wall: '10', foam: '10' })
-  const clearance = +drawParams.clearance || 0
-  const wall = +drawParams.wall || 0
-  const foam = +drawParams.foam || 0
-  // Pocket depth / floor sheet come off the measured insert BOM when this
-  // layout has one (dunnage.py::_pocket_tray) — that supersedes the
-  // clearance/foam drawing knobs below (CLAUDE.md hard rule 9). `wall` is
-  // drawing-only (the divider width) either way, so it is never in this BOM.
-  const bom = layout.dunnage?.archetype === 'pocket_tray' ? layout.dunnage : null
 
   const contentWeight = layout.count * part.weight_kg
   const stackHeight = layout.extent_lbh[2] + (layout.grid[2] - 1) * layout.pitch_lbh[2]
@@ -994,61 +979,10 @@ function LayoutDetail({ layout, box, part, type, tab, onTabChange, truck, truckB
         </div>
       )}
 
-      {activeTab === 'insert' && (
-        box ? (
-          <>
-            {bom && (
-              <p className="muted" style={{ fontSize: 12, margin: '6px 0 10px' }}>
-                Pocket depth {fmtMm(bom.elements[0].cell_mm[2])} mm, layer sheet{' '}
-                {fmtMm(bom.elements[1].dims_mm[2])} mm — from the insert BOM.
-              </p>
-            )}
-            <details className="disclosure">
-              <summary>Insert drawing parameters</summary>
-              <p className="muted" style={{ fontSize: 12, margin: '6px 0 10px' }}>
-                Drawing only — part spacing comes from the measured nesting
-                pitch above, not from these. Changing them redraws the tray
-                below immediately.
-              </p>
-              <div className="form-grid rail-grid">
-                {/* Clearance/foam are superseded by the BOM's pocket depth /
-                    layer sheet above when one is present — showing them too
-                    would look editable but silently do nothing. Divider wall
-                    has no BOM source (F-AUDIT-2 flag) — it's a pure drawing
-                    knob and stays editable either way. */}
-                {!bom && (
-                  <label className="field">
-                    <span>Clearance / side (mm)</span>
-                    <input type="number" value={drawParams.clearance}
-                      onChange={(e) => setDrawParams({ ...drawParams, clearance: e.target.value })} />
-                  </label>
-                )}
-                <label className="field">
-                  <span>Divider wall (mm)</span>
-                  <input type="number" value={drawParams.wall}
-                    onChange={(e) => setDrawParams({ ...drawParams, wall: e.target.value })} />
-                </label>
-                {!bom && (
-                  <label className="field">
-                    <span>Layer foam (mm)</span>
-                    <input type="number" value={drawParams.foam}
-                      onChange={(e) => setDrawParams({ ...drawParams, foam: e.target.value })} />
-                  </label>
-                )}
-              </div>
-            </details>
-            <InsertPanel box={box} fit={fit} layout={layout} type={type}
-              clearance={clearance} wall={wall} foam={foam} bom={bom} />
-          </>
-        ) : (
-          <p className="muted">No packaging record for {layout.asset_name} —
-            add it to the master list to see the insert tray drawing.</p>
-        )
-      )}
-
-      {/* Outside the `box` branch on purpose: the BOM comes off the measured
-          lattice and needs no packaging row, so a layout missing from the
-          master list still gets its insert design. */}
+      {/* The BOM comes off the measured lattice (layout.dunnage) and needs no
+          packaging row, so a layout missing from the master list still gets
+          its insert design (F10: this used to also render a client-derived
+          tray drawing here — deleted, CLAUDE.md hard rule 9). */}
       {activeTab === 'insert' && (
         <DunnageBom dunnage={layout.dunnage} drawingUrl={layout.drawing_url} gifUrl={layout.gif_url}
           sequence={layout.sequence} glbUrl={part?.glb_url} />
@@ -1260,126 +1194,3 @@ function ExplodeModal({ views, initial, onClose }) {
   )
 }
 
-/**
- * All insert trays for the selected box, each as its own dimensioned
- * isometric drawing + spec card (no tabs — a solution with two tray designs
- * shows both). The rotating 3D view is an optional per-tray toggle.
- */
-function InsertPanel({ box, fit, layout, type, clearance, wall, foam, bom }) {
-  // Interleaved layouts (pitch < extent, in-plane): a pocket-per-part tray
-  // would draw pockets that overlap by (extent - pitch) mm — unmanufacturable.
-  // The count and pitch are still measured and correct; only the tray
-  // drawing for this pose does not exist yet (F2-2 F1). No groupInserts /
-  // trayGeometry call for it — there is no valid pocket geometry to compute.
-  if (fit.interleaved) {
-    const [pl, pb] = layout.pitch_lbh
-    const [el, eb] = layout.extent_lbh
-    const axis = pl < el ? { pitch: pl, extent: el } : { pitch: pb, extent: eb }
-    return (
-      <div className="detail-views">
-        <h3><span className="h-icon">▦</span> Insert design</h3>
-        <div className="foam-note">Parts interleave in this pose (pitch{' '}
-          {fmtMm(axis.pitch)} mm &lt; part width {fmtMm(axis.extent)} mm), so
-          the insert is a slotted comb, not one pocket per part. Count and
-          pitch are measured and correct; the tray drawing for interleaved
-          poses is not built yet.</div>
-      </div>
-    )
-  }
-
-  const groups = groupInserts(fit)
-  if (!groups.length) return null
-
-  return (
-    <div className="detail-views">
-      <h3><span className="h-icon">▦</span>
-        Insert design{groups.length > 1 ? `s — ${groups.length} trays` : ''}</h3>
-      {type === 'comb/slot' && (
-        <div className="foam-note">Long part (aspect ≥ 5:1) — pockets act as
-          comb/slot channels; slot profiles get refined in Phase 3.</div>
-      )}
-      {groups.map((g, i) => (
-        <InsertCard key={g.key} idx={i + 1} total={groups.length} group={g}
-          geom={trayGeometry({ box, group: g, clearance, wall, foam, bom })}
-          boxCode={box.item_code} />
-      ))}
-    </div>
-  )
-}
-
-function InsertCard({ idx, total, group, geom, boxCode }) {
-  const [show3d, setShow3d] = useState(false)
-  const figRef = useRef(null)
-  const dummies = group.count - group.filled
-
-  // dummy pockets pushed to one side: shade the far-end pockets
-  const dummySet = useMemo(() => {
-    if (!dummies) return new Set()
-    return new Set(
-      geom.pockets
-        .map((p, i) => [p, i])
-        .sort(([p], [q]) => q.x - p.x || q.y - p.y)
-        .slice(0, dummies)
-        .map(([, i]) => i),
-    )
-  }, [geom, dummies])
-
-  // distinct cutout sizes (main grid + rotated strip, if any)
-  const cutouts = useMemo(() => {
-    const m = new Map()
-    for (const p of geom.pockets) {
-      const key = `${fmtMm(p.w)} × ${fmtMm(p.h)}`
-      m.set(key, (m.get(key) || 0) + 1)
-    }
-    return [...m.entries()]
-  }, [geom])
-
-  return (
-    <div className="insert-card">
-      <div className="insert-card-head">
-        <div className="insert-card-title">
-          <strong>{total > 1 ? `Insert ${idx} of ${total}` : 'Insert tray'}</strong>
-          <span className="muted"> — {group.label} ({group.code}) · layer{group.layers.length > 1 ? 's' : ''} {group.layers.join(', ')}</span>
-        </div>
-        <div className="insert-card-actions">
-          <button className="btn-ghost" title="Download as PNG"
-            onClick={() => downloadFigure(figRef.current,
-              `insert-${boxCode}-${group.code}${show3d ? '-3d' : ''}.png`)}>
-            ⤓ PNG
-          </button>
-          <button className="btn-ghost" onClick={() => setShow3d(!show3d)}>
-            {show3d ? '↩ Drawing' : 'Rotate in 3D'}
-          </button>
-        </div>
-      </div>
-
-      <div ref={figRef}>
-        {show3d ? (
-          <>
-            <InsertTray3D geom={geom} />
-            <div className="floor-caption" style={{ textAlign: 'right' }}>
-              drag to rotate · scroll to zoom</div>
-          </>
-        ) : (
-          <InsertIso geom={geom} dummySet={dummySet} />
-        )}
-      </div>
-
-      <dl className="result-facts">
-        <div><dt>Tray L × B × H</dt><dd className="mono">
-          {fmtMm(geom.L)} × {fmtMm(geom.B)} × {fmtMm(geom.H)} mm</dd></div>
-        <div><dt>Pockets</dt><dd className="mono">
-          {geom.pockets.length} — {group.fill.desc}</dd></div>
-        {cutouts.map(([size, n]) => (
-          <div key={size}><dt>Cutout ({n}×)</dt><dd className="mono">
-            {size} mm · {fmtMm(geom.pocketDepth)} deep</dd></div>
-        ))}
-        <div><dt>Wall / floor</dt><dd className="mono">
-          {fmtMm(geom.wall)} / {fmtMm(geom.floorH)} mm</dd></div>
-        <div><dt>Parts / layer</dt><dd className="mono">
-          {group.filled} part{group.filled !== 1 ? 's' : ''}
-          {dummies > 0 && ` + ${dummies} dummy pocket${dummies !== 1 ? 's' : ''} (grey — weight cap)`}</dd></div>
-      </dl>
-    </div>
-  )
-}

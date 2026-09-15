@@ -948,13 +948,6 @@ body {
 
 .disclosure[open] summary { margin-bottom: 4px; }
 
-.detail-views {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  margin-top: 16px;
-}
-
 .view-fig { margin: 0; }
 
 .view-fig figcaption {
@@ -1001,24 +994,7 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.tray-wrap {
-  width: 100%;
-  height: 280px;
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-}
-
-/* ---- insert cards: dimensioned iso drawing + specs, one per tray type ---- */
-
-.insert-card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  padding: 16px;
-}
-
-.insert-card + .insert-card { margin-top: 4px; }
+/* ---- insert BOM (F-BOM) header/actions row also used by the truck plan --- */
 
 .insert-card-head {
   display: flex;
@@ -1028,8 +1004,6 @@ body {
   margin-bottom: 8px;
 }
 
-.insert-card-title { font-size: 13px; }
-.insert-card-title .muted { color: var(--text-3); font-weight: 400; }
 .insert-card-head .btn-ghost { font-size: 12px; padding: 4px 10px; flex-shrink: 0; }
 .insert-card-actions { display: flex; gap: 8px; flex-shrink: 0; }
 .insert-card-actions .btn-ghost { font-size: 12px; padding: 4px 10px; }
@@ -1041,16 +1015,6 @@ body {
   background: linear-gradient(180deg, #fdfdff, #f3f4fc);
   border: 1px solid var(--border);
   border-radius: 8px;
-}
-
-.foam-note {
-  font-size: 12px;
-  color: var(--amber-text);
-  background: var(--amber-bg);
-  border: 1px solid var(--amber-border);
-  border-radius: 8px;
-  padding: 8px 12px;
-  margin: 4px 0 8px;
 }
 
 /* ---- insert BOM (F-BOM) --------------------------------------------------- */

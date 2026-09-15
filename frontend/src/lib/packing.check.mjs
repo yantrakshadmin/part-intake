@@ -8,7 +8,6 @@
  */
 import assert from 'node:assert/strict'
 import { layoutToFit, runSolve, errorDetail, floorPlanFromTruck } from './solve.js'
-import { groupInserts, trayGeometry } from './packing.js'
 
 // Copied verbatim from a real backend /api/parts/{id}/solve run.
 const layout = {
@@ -33,19 +32,6 @@ for (const l of fit.layerConfig) {
 assert.equal(fit.fill.placements.length, 6)
 assert.equal(fit.interleaved, false) // non-interleaving path is unchanged (F2-2 F1)
 
-const group = groupInserts(fit)[0]
-const geom = trayGeometry({ box, group, clearance: 7.5, wall: 10, foam: 10 })
-
-assert.equal(geom.pockets.length, 6)
-for (const p of geom.pockets) {
-  assert.equal(p.w, 372.0)
-  assert.equal(p.h, 356.0)
-  assert.ok(p.x >= 0, `pocket x ${p.x} < 0`)
-  assert.ok(p.x + p.w <= box.inner_l_mm, `pocket x+w ${p.x + p.w} > ${box.inner_l_mm}`)
-  assert.ok(p.y >= 0, `pocket y ${p.y} < 0`)
-  assert.ok(p.y + p.h <= box.inner_b_mm, `pocket y+h ${p.y + p.h} > ${box.inner_b_mm}`)
-}
-
 // Derived from fit.layerConfig (partH/layerH), not from the input literals
 // directly — this exercises what layoutToFit did with them, not just the
 // fixture arithmetic.
@@ -55,15 +41,15 @@ assert.equal(stackHeight, 987)
 assert.ok(stackHeight <= box.inner_h_mm, `stack ${stackHeight} > inner H ${box.inner_h_mm}`)
 
 console.log('packing.check.mjs: all assertions passed —', fit.total, '/',
-  layout.grid.join(','), '/', geom.pockets.length, 'pockets')
+  layout.grid.join(','))
 
 // Mubea stabiliser bar, PLS12801 — the real interleaved case: 40/PLS12801,
 // the number this whole project is founded on (best cuboid answer is 8).
 // Measured verbatim from tests/test_nesting.py::test_real_bar. Pitch across
 // (140) is less than the part's own extent (300): consecutive pockets in
 // this pose overlap by 160 mm. layoutToFit must flag this (F2-2 F1) so the
-// caller renders a note instead of an unmanufacturable pocket-per-part
-// tray — trayGeometry is deliberately never called for it below.
+// caller (the backend's own dunnage BOM, since F10) renders a note instead
+// of an unmanufacturable pocket-per-part tray.
 const barLayout = {
   asset_name: 'PLS12801', count: 40, grid: [1, 4, 10],
   extent_lbh: [1092.0, 300.0, 148.0], pitch_lbh: [1092.0, 140.0, 68.0],
@@ -228,26 +214,3 @@ assert.equal(
 assert.equal(layoutToFit(barLayoutNoInterleave).interleaved, true) // pitch[1] 140 < extent[1] 300
 
 console.log('packing.check.mjs: interleaved-from-interleave-ratios passed')
-
-// --- F-AUDIT-1 F: trayGeometry takes pocket depth / floor sheet from the ---
-// dunnage BOM (pocket_tray), not the clearance/foam drawing knobs, when a
-// BOM is present — dunnage.py::_pocket_tray is the source of both numbers.
-const wheelFit = layoutToFit(layout)
-const wheelGroup = groupInserts(wheelFit)[0]
-const pocketBom = {
-  archetype: 'pocket_tray',
-  elements: [
-    { cell_mm: [377.0, 361.0, 99.0] },          // tray: pocket depth 99mm
-    { dims_mm: [1150, 750, 22.0] },             // separator sheet 22mm
-  ],
-}
-const bomGeom = trayGeometry({ box, group: wheelGroup, clearance: 7.5, wall: 10, foam: 10, bom: pocketBom })
-assert.equal(bomGeom.wallH, 99.0)
-assert.equal(bomGeom.floorH, 22.0)
-assert.equal(bomGeom.H, 121.0)
-// No bom -> unchanged fallback to clearance/foam (existing behaviour).
-const noBomGeom = trayGeometry({ box, group: wheelGroup, clearance: 7.5, wall: 10, foam: 10 })
-assert.equal(noBomGeom.wallH, wheelGroup.partH + 7.5)
-assert.equal(noBomGeom.floorH, 10)
-
-console.log('packing.check.mjs: trayGeometry bom (pocket depth/floor sheet) passed')

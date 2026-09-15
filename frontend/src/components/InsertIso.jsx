@@ -1,11 +1,8 @@
 /**
- * InsertIso — static isometric SVG drawing of an insert tray with CAD-style
- * dimension callouts (overall L × B × H plus pocket cutout sizes), matching
- * the team's SketchUp reference renders. Pure SVG: no WebGL context, so any
- * number of insert figures can sit on one page, and they print cleanly.
- *
- * Geometry comes from trayGeometry() (lib/packing.js): a slab L×B×H with
- * rectangular pockets cut from the top down to the floor sheet (floorH).
+ * InsertIso — shared isometric-SVG helpers (CLAUDE.md hard rule 5: shared iso
+ * helpers live here and are reused elsewhere — TruckLoadIso.jsx's truck-load
+ * drawing is the other consumer). Pure SVG: no WebGL context, so any number
+ * of figures can sit on one page, and they print cleanly.
  *
  * Projection is standard 30° isometric with the camera on the +x+y+z side,
  * so the visible faces are those with +x / +y / +z normals. Inside each
@@ -13,9 +10,12 @@
  * orthographic projection everything visible through a rectangular opening
  * projects inside the opening's screen polygon, so pocket interiors are
  * simply clipped to it (correct occlusion for any depth, no z-sorting).
+ *
+ * The tray-drawing component this file used to also export by default is
+ * gone (F10): the insert tab now shows only the backend's own dunnage
+ * drawing (DunnageBom in PackingRecommendation.jsx), never a client-derived
+ * one.
  */
-import { useId } from 'react'
-
 const C = Math.cos(Math.PI / 6)
 const S = Math.sin(Math.PI / 6)
 const P = (x, y, z) => [(x - y) * C, (x + y) * S - z]
@@ -90,99 +90,3 @@ function dimension({ a, b, dir, off, label, k }) {
   return { els, pts: [A, B, ...exts.flat(), lp] }
 }
 
-export default function InsertIso({ geom, dummySet, width = 460 }) {
-  const uid = useId()
-  const { L, B, H, floorH, pockets } = geom
-  const dummies = dummySet ?? new Set()
-
-  // provisional scale: projected tray width ≈ (L + B) · cos30
-  const k = ((L + B) * C * 1.34) / width
-
-  const D = Math.max(L, B)
-  const g1 = Math.max(0.075 * D, 26 * k) // pocket + height dims
-  const g2 = g1 * 2.2                    // overall dims
-
-  const top = [P(0, 0, H), P(L, 0, H), P(L, B, H), P(0, B, H)]
-  const corners = [
-    ...top, P(0, B, 0), P(L, B, 0), P(L, 0, 0),
-  ]
-
-  const pocketEls = pockets.map((p, i) => {
-    const { x, y, w, h } = p
-    const x1 = x + w, y1 = y + h
-    const open = [P(x, y, H), P(x1, y, H), P(x1, y1, H), P(x, y1, H)]
-    const id = `${uid}-pk${i}`
-    return (
-      <g key={i}>
-        <clipPath id={id}><path d={path(open)} /></clipPath>
-        <g clipPath={`url(#${id})`}>
-          <path d={path([P(x, y, floorH), P(x1, y, floorH),
-                         P(x1, y1, floorH), P(x, y1, floorH)])}
-            fill={dummies.has(i) ? COL.floorDummy : COL.floor} />
-          <path d={path([P(x, y, floorH), P(x, y1, floorH),
-                         P(x, y1, H), P(x, y, H)])} fill={COL.wallX} />
-          <path d={path([P(x, y, floorH), P(x1, y, floorH),
-                         P(x1, y, H), P(x, y, H)])} fill={COL.wallY} />
-        </g>
-      </g>
-    )
-  })
-
-  // top lattice: outer rect minus all pocket openings (evenodd)
-  const lattice = path(top) + pockets
-    .map((p) => path([P(p.x, p.y, H), P(p.x + p.w, p.y, H),
-                      P(p.x + p.w, p.y + p.h, H), P(p.x, p.y + p.h, H)]))
-    .join('')
-
-  // dimensions: overall L (upper right), B (upper left), H (right side),
-  // plus the cutout of the pocket nearest each labeled edge
-  const dims = [
-    dimension({ a: [0, 0, H], b: [L, 0, H], dir: [0, -1, 0], off: g2,
-                label: fmt(L), k }),
-    dimension({ a: [0, 0, H], b: [0, B, H], dir: [-1, 0, 0], off: g2,
-                label: fmt(B), k }),
-    dimension({ a: [L, 0, 0], b: [L, 0, H], dir: [0.707, -0.707, 0], off: g1,
-                label: fmt(H), k }),
-  ]
-  if (pockets.length) {
-    const pw = [...pockets].sort((p, q) => p.y - q.y || p.x - q.x)[0]
-    const ph = [...pockets].sort((p, q) => p.x - q.x || p.y - q.y)[0]
-    dims.push(dimension({
-      a: [pw.x, pw.y, H], b: [pw.x + pw.w, pw.y, H],
-      dir: [0, -1, 0], off: g1 + pw.y, label: fmt(pw.w), k,
-    }))
-    dims.push(dimension({
-      a: [ph.x, ph.y, H], b: [ph.x, ph.y + ph.h, H],
-      dir: [-1, 0, 0], off: g1 + ph.x, label: fmt(ph.h), k,
-    }))
-  }
-
-  // fit viewBox around everything
-  const all = [...corners, ...dims.flatMap((d) => d.pts)]
-  let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity
-  for (const [x, y] of all) {
-    if (x < mnX) mnX = x
-    if (y < mnY) mnY = y
-    if (x > mxX) mxX = x
-    if (y > mxY) mxY = y
-  }
-  const pad = 34 * k
-  const vb = [mnX - pad, mnY - pad, mxX - mnX + 2 * pad, mxY - mnY + 2 * pad]
-  const height = Math.round(width * (vb[3] / vb[2]))
-
-  return (
-    <svg className="insert-iso" viewBox={vb.join(' ')}
-      width={width} height={height} role="img"
-      aria-label={`Insert tray ${fmt(L)} × ${fmt(B)} × ${fmt(H)} mm`}>
-      {/* outer faces: x=L (right), y=B (front-left) */}
-      <path d={path([P(L, 0, 0), P(L, B, 0), P(L, B, H), P(L, 0, H)])}
-        fill={COL.right} stroke={COL.edge} strokeWidth={0.8 * k} />
-      <path d={path([P(0, B, 0), P(L, B, 0), P(L, B, H), P(0, B, H)])}
-        fill={COL.front} stroke={COL.edge} strokeWidth={0.8 * k} />
-      {pocketEls}
-      <path d={lattice} fillRule="evenodd" fill={COL.top}
-        stroke={COL.edge} strokeWidth={0.8 * k} />
-      {dims.map((d, i) => <g key={i}>{d.els}</g>)}
-    </svg>
-  )
-}

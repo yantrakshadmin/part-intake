@@ -1,8 +1,8 @@
 /**
  * solve.js — client for the real nesting engine (POST /api/parts/{id}/solve,
  * GET /api/solve-jobs/{id}), and the adapter that turns one ranked layout
- * into the `fit`-shaped object the insert-drawing helpers in lib/packing.js
- * already consume (layerSummary, groupInserts, trayGeometry).
+ * into the `fit`-shaped object the Layers tab and lib/packing.js's
+ * `layerSummary` consume.
  */
 
 const POLL_MS = 1500
