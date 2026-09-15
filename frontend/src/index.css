@@ -587,17 +587,31 @@ body {
 
 /* ---- hero solution (leads the Packaging tab, F1b) -------------------------- */
 
-.warnings-disclosure { margin-top: 0; }
-.warnings-disclosure .warning:first-of-type { margin-top: 8px; }
-/* R5: once a warning (e.g. the pose-mismatch note) is tucked behind "N
-   notes ▸" it's already de-emphasised by the disclosure itself — repeating
-   the amber alert colour on top reads as louder than a collapsed note
-   should. Neutral text/border here, same layout as .warning otherwise. */
-.warnings-disclosure .warning {
+/* F1 follow-up: the run caption + D8's warnings, folded into one line
+   (RunCaptionRow) — was `.warnings-disclosure`, same de-emphasis rationale
+   (R5): once a warning is tucked behind "N notes ▸" it's already
+   de-emphasised, so repeating the amber alert colour on top reads louder
+   than a collapsed note should. Neutral text/border, same layout as
+   .warning otherwise. */
+.run-caption-row .warning {
   background: var(--surface-2);
   border-color: var(--border);
   color: var(--text-2);
 }
+
+/* Inline disclosure triggers (F1 follow-up: WHY / N notes moved off their
+   own bordered bars, onto the end of an existing text line) — plain text
+   button, not .btn-ghost (that has its own border/padding, wrong here). */
+.inline-disclosure {
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.inline-disclosure:hover { text-decoration: underline; }
 
 .hero-solution {
   margin-top: 16px;
@@ -640,30 +654,36 @@ body {
 .hero-pose { font-family: 'Fira Sans', system-ui, sans-serif; font-weight: 400; }
 .hero-meta { font-size: 12.5px; margin-top: 4px; }
 
-.hero-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(240px, 1fr);
-  gap: 20px;
-  margin-top: 14px;
-}
-
+/* F1: the hero used to be a two-column grid (image | CertificateCard); the
+   grid is gone (the cert card's rows moved to Box Packing Analysis / the
+   detail chips), so .hero-image is now the whole width of the hero. Its cap
+   is lower than before (was 480px) so the ranked cards clear the fold at
+   1440x900 — see .ranked-heading below. */
 .hero-image {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface-2);
   padding: 12px;
+  margin-top: 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
-.hero-image > .modal-img { max-height: 480px; width: 100%; object-fit: contain; }
+/* F1 follow-up: 320px (the floor Rahul set), not 200 — a thumbnail-sized
+   animation defeats the point of F4 (the live packing animation IS the
+   deliverable). The fold budget comes back from RunCaptionRow/hero-meta
+   folding their triggers inline instead of their own bars, not from
+   shrinking this further. */
+.hero-image > .modal-img { max-height: 320px; width: 100%; object-fit: contain; }
 
 /* Ticket 2b: the "drawing the packed box" / "could not be rendered" text
    sits where the .modal-img above lands once it arrives — a fixed height
    close to the image's own max-height keeps the hero from jumping when the
    picture shows up mid-poll. */
-.hero-image-wait { min-height: 320px; display: flex; align-items: center; justify-content: center; text-align: center; }
+.hero-image-wait { min-height: 240px; display: flex; align-items: center; justify-content: center; text-align: center; }
+
+.hero-why { margin-top: 10px; }
 
 /* F4: live packing-order animation (PackAnimation) — same caption-card look
    as the GIF's own overlay, reusing .btn-ghost for the transport controls. */
@@ -683,25 +703,11 @@ body {
 .pack-anim-controls .t { font-family: var(--font-mono); color: var(--text-3); font-variant-numeric: tabular-nums; min-width: 56px; text-align: right; }
 .pack-anim-controls select { font: inherit; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 
-.cert-card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-2);
-  padding: 12px 14px;
-}
-
-/* Tighter than the shared .result-facts row (used elsewhere with more
-   breathing room) so the certificate fits the image's height in the first
-   viewport — a local override, not a change to the shared class. */
-.cert-card .result-facts { margin-top: 8px; }
-.cert-card .result-facts > div { padding: 5px 0; }
-.cert-card .disclosure { margin-top: 10px; padding: 6px 10px; }
-
 .ranked-heading {
-  /* 24px sat the heading's top at ~893.5px on a 1440x900 TRW run — a sliver
-     below the fold. 40px (8px rhythm) clears the fold with margin to spare
-     without touching the hero/certificate above it. */
-  margin: 40px 0 0;
+  /* F1: hero lost its details grid, so this clears the fold at 1440x900 with
+     a smaller margin than before (was 40px, needed when the hero still had
+     the two-column CertificateCard beside the image). */
+  margin: 16px 0 0;
   font-size: 12.5px;
   font-weight: 600;
   text-transform: uppercase;
@@ -710,10 +716,6 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-@media (max-width: 720px) {
-  .hero-grid { grid-template-columns: 1fr; }
 }
 
 .box-cards {

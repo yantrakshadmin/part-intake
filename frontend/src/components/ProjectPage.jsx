@@ -395,6 +395,14 @@ function NoPart() {
  *  40-50s, so a tab switch must never re-mount it. `resultTab` is the only
  *  thing that changes between the two project tabs. */
 function PackagingTruckTab({ project, run, packing, params, onParamsChange, onSolved, onSolveStarted, resultTab }) {
+  // F1: "Re-run with these parameters" moved from the bottom of PackingResults
+  // into the rail (PackingParams), a sibling under this shared parent — the
+  // ref carries PackingResults' own `solve` closure up (always current, see
+  // PackingResults) and rerunState carries the busy/ready flags that used to
+  // gate the button, so PackingParams re-renders when they change.
+  const rerunRef = useRef(null)
+  const [rerunState, setRerunState] = useState({ busy: false, ready: false })
+
   // `run` is computed once in ProjectPage (pickedRun(project, query)) and
   // handed down — Proposal reuses that same value, so the two tabs can
   // never resolve "the run on screen" differently (CLAUDE.md rule 9).
@@ -431,13 +439,16 @@ function PackagingTruckTab({ project, run, packing, params, onParamsChange, onSo
         <PackingParams params={params} onChange={onParamsChange}
           vehicles={packing.vehicles} packaging={packing.packaging}
           onAddBox={(b) => packing.setPackaging((p) => [...p, b])}
-          title={run ? 'Parameters of this run' : 'Ship it in'} />
+          title={run ? 'Parameters of this run' : 'Ship it in'}
+          onRerun={() => rerunRef.current?.()}
+          rerunReady={rerunState.ready} rerunBusy={rerunState.busy} />
       </aside>
       <main className="stage">
         <PackingResults part={project.part} params={params}
           packaging={packing.packaging} vehicles={packing.vehicles}
           projectId={project.id} onSolved={onSolved} onSolveStarted={onSolveStarted}
-          tab={resultTab} run={run} />
+          tab={resultTab} run={run}
+          rerunRef={rerunRef} onRerunStateChange={setRerunState} />
       </main>
     </div>
   )

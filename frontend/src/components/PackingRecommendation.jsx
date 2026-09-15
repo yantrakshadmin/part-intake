@@ -47,7 +47,9 @@ function BoxPicker({ packaging, selected, onChange }) {
   }
   const summary = selected.length === 0
     ? `All boxes (${containers.length})`
-    : `${selected.length} selected`
+    : selected.length <= 4
+      ? selected.join(', ')
+      : `${selected.length} selected`
 
   return (
     <label className="field box-picker">
@@ -80,7 +82,8 @@ function BoxPicker({ packaging, selected, onChange }) {
  * together (drawing-only clearance/wall/foam moved to the insert tab, D4 —
  * they never change a count, only where they're edited).
  */
-export function PackingParams({ params, onChange, vehicles, packaging, onAddBox, title = 'Ship it in' }) {
+export function PackingParams({ params, onChange, vehicles, packaging, onAddBox, title = 'Ship it in',
+  onRerun, rerunReady, rerunBusy }) {
   const [showCustom, setShowCustom] = useState(false)
   const [custom, setCustom] = useState({
     code: '', il: '', ib: '', ih: '', ol: '', ob: '', oh: '', wt: '',
@@ -165,13 +168,21 @@ export function PackingParams({ params, onChange, vehicles, packaging, onAddBox,
         </label>
       </div>
       <p className="muted" style={{ fontSize: 12, margin: '8px 0 0' }}>
-        Changes here apply on the next Save &amp; calculate or Re-solve — not as you type.
+        Changes here apply when you press "Re-run with these parameters"
+        below (or Save &amp; calculate for a new project) — not as you type.
       </p>
 
       <button className="btn-ghost" style={{ marginTop: 14 }}
         onClick={() => setShowCustom(!showCustom)}>
         {showCustom ? 'Cancel custom box' : '+ Custom box'}
       </button>
+
+      {rerunReady && (
+        <button className="btn-ghost" style={{ marginTop: 10 }}
+          disabled={rerunBusy} onClick={onRerun}>
+          {rerunBusy ? 'Solving…' : '↻ Re-run with these parameters'}
+        </button>
+      )}
 
       {showCustom && (
         <div className="custom-box-form">
@@ -234,7 +245,8 @@ function fmtRunDate(iso) {
  * the stored result over GET /api/solve-jobs/{id} and never re-solves
  * (PRD F5: "any row opens the existing results view").
  */
-export default function PackingResults({ part, params, packaging, vehicles, projectId, tab, run, onSolved, onSolveStarted }) {
+export default function PackingResults({ part, params, packaging, vehicles, projectId, tab, run, onSolved, onSolveStarted,
+  rerunRef, onRerunStateChange }) {
   const vehicle = vehicles.find((v) => String(v.id) === params.vehicleId) || null
   const type = insertType(part)
 
@@ -382,6 +394,18 @@ export default function PackingResults({ part, params, packaging, vehicles, proj
     return () => clearInterval(t)
   }, [job.status])
 
+  // F1: the "Re-run" button now lives in the left rail (PackingParams), a
+  // sibling component under a shared parent — it needs this render's `solve`
+  // closure (always current params/vehicle/etc, same as the old in-place
+  // button had for free) and the busy/ready flags that used to gate it.
+  // Mutating a ref during render is fine (no dev warning, unlike a parent
+  // setState call would be); the ready/busy flags DO need to re-render the
+  // sibling, so those go up via a state-setter prop from an effect instead.
+  if (rerunRef) rerunRef.current = solve
+  useEffect(() => {
+    onRerunStateChange?.({ busy: job.status === 'pending', ready: job.status !== 'no-id' })
+  }, [job.status]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const elapsedS = startedAt ? Math.round((Date.now() - startedAt) / 1000) : 0
   const runDate = fmtRunDate(run?.created_at)
   const runCaption = job.status === 'done' && run
@@ -402,7 +426,9 @@ export default function PackingResults({ part, params, packaging, vehicles, proj
         </span>
       </h2>
 
-      {runCaption && <p className="muted" style={{ margin: '-8px 0 14px', fontSize: 12.5 }}>{runCaption}</p>}
+      {job.status === 'done' && (
+        <RunCaptionRow caption={runCaption} warnings={job.result.warnings} />
+      )}
 
       {job.status === 'no-id' && (
         <p className="muted">Save the part first to see the fit.</p>
@@ -428,13 +454,6 @@ export default function PackingResults({ part, params, packaging, vehicles, proj
           packaging={packaging} vehicles={vehicles} params={params} run={run}
           selectedAsset={selectedAsset} onSelectAsset={setSelectedAsset}
           controlledTab={tab} />
-      )}
-
-      {job.status !== 'pending' && job.status !== 'no-id' && (
-        <button className="btn-ghost" style={{ marginTop: 14 }}
-          onClick={() => solve()}>
-          ↻ Re-run with these parameters
-        </button>
       )}
     </div>
   )
@@ -470,14 +489,10 @@ function boxForTruckAsset(assetName, packaging, custom) {
 }
 
 function ResultView({ result, part, type, packaging, vehicles, params, run, selectedAsset, onSelectAsset, controlledTab }) {
-  const { catalogue, custom, custom_beats_catalogue: beatsCatalogue, truck, warnings } = result
+  const { catalogue, custom, custom_beats_catalogue: beatsCatalogue, truck } = result
   const empty = catalogue.length === 0 && !custom
   const customLayout = custom ? asCustomLayout(custom) : null
   const options = customLayout ? [...catalogue, customLayout] : catalogue
-  const selected = options.find((l) => l.asset_name === selectedAsset) || options[0] || null
-  const selectedBox = selected?.asset_name === CUSTOM_KEY
-    ? customBox(custom) : packaging.find((p) => p.item_code === selected?.asset_name)
-  const truckBox = truck ? boxForTruckAsset(truck.asset_name, packaging, custom) : null
   // The hero is the run's BEST layout, not always catalogue[0]: when the
   // custom design wins (backend's own custom_beats_catalogue flag — never
   // re-derived client-side, hard rule 9), options[0] is still catalogue[0]
@@ -486,9 +501,13 @@ function ResultView({ result, part, type, packaging, vehicles, params, run, sele
   // leads the screen as a hero, independent of whatever card is clicked
   // below (that click only changes LayoutDetail, never the hero/`selected`).
   const heroLayout = beatsCatalogue && customLayout ? customLayout : (catalogue[0] || customLayout || null)
-  const heroBox = heroLayout
-    ? (heroLayout.asset_name === CUSTOM_KEY ? customBox(custom) : packaging.find((p) => p.item_code === heroLayout.asset_name))
-    : null
+  // Nothing clicked yet -> the detail below describes the HERO box, not
+  // catalogue[0]: when the custom design wins they differ, and the analysis
+  // table would otherwise quote another box's pitch/pattern under the hero.
+  const selected = options.find((l) => l.asset_name === selectedAsset) || heroLayout || options[0] || null
+  const selectedBox = selected?.asset_name === CUSTOM_KEY
+    ? customBox(custom) : packaging.find((p) => p.item_code === selected?.asset_name)
+  const truckBox = truck ? boxForTruckAsset(truck.asset_name, packaging, custom) : null
   // One tab set for whichever box is selected — switching boxes keeps the
   // reader on the same question (e.g. still looking at the truck plan).
   const [tab, setTab] = useState(controlledTab || 'layers')
@@ -501,11 +520,6 @@ function ResultView({ result, part, type, packaging, vehicles, params, run, sele
 
   return (
     <>
-      {/* D8: every warning, verbatim, no filter/slice/first-only — collapsed
-          to one line by default (too many amber labels was the live-use
-          complaint), same .warning class once expanded. */}
-      <WarningsDisclosure warnings={warnings} />
-
       {empty ? (
         <div className="empty-stage" style={{ padding: '24px 0' }}>
           <div className="es-icon">▦</div>
@@ -515,8 +529,7 @@ function ResultView({ result, part, type, packaging, vehicles, params, run, sele
       ) : (
         <>
           {heroLayout && (
-            <HeroSolution layout={heroLayout} box={heroBox} part={part} run={run}
-              clearanceMm={result.clearance_mm}
+            <HeroSolution layout={heroLayout} part={part} run={run}
               label={heroLayout.asset_name === CUSTOM_KEY ? 'Custom design' : undefined}
               beatsCatalogue={beatsCatalogue}
               renderStatus={result.render_status ?? 'done'} renderError={result.render_error} />
@@ -563,18 +576,34 @@ function ResultView({ result, part, type, packaging, vehicles, params, run, sele
   )
 }
 
-/** D8's warning list, collapsed to "N notes ▸" — too many amber labels was
- *  Rahul's live-use complaint. Expands to the exact same .warning rows, one
- *  per backend warning, verbatim (no filter/slice/first-only). */
-function WarningsDisclosure({ warnings }) {
-  if (!warnings || warnings.length === 0) return null
+/** F1 follow-up: the run caption ("Run of 15 Sept · 5 mm clearance · ...")
+ *  and D8's warnings ("N notes") used to be two separate rows above the
+ *  hero, each its own bar — folded into one line to reclaim the vertical
+ *  space the hero animation needed back. Same `.warning` rows, verbatim, no
+ *  filter/slice/first-only, once opened — only the trigger moved from its
+ *  own bordered bar to inline text at the end of the caption. */
+function RunCaptionRow({ caption, warnings }) {
+  const [open, setOpen] = useState(false)
+  const hasWarnings = warnings && warnings.length > 0
+  if (!caption && !hasWarnings) return null
   return (
-    <details className="disclosure warnings-disclosure">
-      <summary>{warnings.length} note{warnings.length !== 1 ? 's' : ''} ▸</summary>
-      {warnings.map((w, i) => (
+    <div className="run-caption-row" style={{ margin: '-8px 0 14px' }}>
+      <p className="muted" style={{ margin: 0, fontSize: 12.5 }}>
+        {caption}
+        {hasWarnings && (
+          <>
+            {caption && ' · '}
+            <button type="button" className="inline-disclosure" aria-expanded={open}
+              onClick={() => setOpen((o) => !o)}>
+              {warnings.length} note{warnings.length !== 1 ? 's' : ''} {open ? '▾' : '▸'}
+            </button>
+          </>
+        )}
+      </p>
+      {hasWarnings && open && warnings.map((w, i) => (
         <div key={i} className="warning">⚠ <span>{w}</span></div>
       ))}
-    </details>
+    </div>
   )
 }
 
@@ -656,7 +685,7 @@ function SolutionImage({ layout, part, renderStatus = 'done', renderError }) {
       {views.length > 0 ? (
         <>
           <ImageStage views={views} view={view} onViewChange={setView}
-            onImageClick={() => setZoomOpen(true)} />
+            onImageClick={() => setZoomOpen(true)} animHeight={320} />
           {zoomOpen && (
             <ExplodeModal views={views} initial={view} onClose={() => setZoomOpen(false)} />
           )}
@@ -680,51 +709,26 @@ function SolutionImage({ layout, part, renderStatus = 'done', renderError }) {
   )
 }
 
-/** Label:value rows for the hero layout, Fira Code / tabular via the
- *  existing `.mono` + `.result-facts` classes — nothing computed here
- *  (CLAUDE.md hard rule 9), every value already on `layout`/`box`/`result`. */
-function CertificateCard({ layout, box, clearanceMm }) {
-  const fit = useMemo(() => layoutToFit(layout), [layout])
-  return (
-    <div className="cert-card">
-      <dl className="result-facts">
-        <div><dt>Calculated count</dt><dd className="mono">{layout.count}</dd></div>
-        <div><dt>Geometric upper bound</dt><dd className="mono">{layout.count_upper}</dd></div>
-        <div><dt>Pattern / grid</dt><dd className="mono">
-          {layout.grid.join(' × ')} · {fit.fill.desc}</dd></div>
-        <div><dt>Layers</dt><dd className="mono">{fit.layers}</dd></div>
-        <div><dt>Pitch</dt><dd className="mono">
-          {fmtMm(layout.pitch_lbh[0])} × {fmtMm(layout.pitch_lbh[1])} × {fmtMm(layout.pitch_lbh[2])} mm</dd></div>
-        {clearanceMm != null && (
-          <div><dt>Clearance</dt><dd className="mono">{clearanceMm} mm</dd></div>
-        )}
-        {layout.limited_by && (
-          <div><dt>Limited by</dt><dd className="mono">{layout.limited_by}</dd></div>
-        )}
-        {box?.max_weight_kg > 0 && (
-          <div><dt>Weight cap</dt><dd className="mono">{box.max_weight_kg} kg</dd></div>
-        )}
-      </dl>
-      {layout.reasons?.length > 0 && (
-        <details className="disclosure">
-          <summary>Why ▸</summary>
-          <ul className="reasons-list">
-            {layout.reasons.map((r, i) => <li key={i}>{r}</li>)}
-          </ul>
-        </details>
-      )}
-    </div>
-  )
-}
-
 /**
  * First-viewport hero for the top-ranked solution — Rahul's live-use
  * feedback: "the user's first screen should be the solution, not what boxes
  * have what configuration". `layout` is options[0] (ResultView), never
  * re-picked here; clicking a different card below only changes LayoutDetail,
  * not this block.
+ *
+ * F1 (Gemini UX audit): the right-hand details grid (calculated count, upper
+ * bound, pattern, layers, pitch, clearance, limited-by, weight cap) used to
+ * sit here as `CertificateCard`, pushing the ranked cards below the fold.
+ * Every one of those rows already exists elsewhere on this screen — the
+ * detail-summary chips, the Box Packing Analysis table (which gained
+ * "Geometric upper bound" and the grid dims in the Pattern row), or the
+ * clearance footer note below LayoutDetail — so removing the grid here loses
+ * nothing (CLAUDE.md rule 9: hide/move, never drop). The WHY disclosure has
+ * no other home for the hero layout specifically, so it moves down here,
+ * under the viewer, verbatim (same `layout.reasons` list CertificateCard
+ * rendered).
  */
-function HeroSolution({ layout, box, part, run, label, beatsCatalogue, clearanceMm, renderStatus, renderError }) {
+function HeroSolution({ layout, part, run, label, beatsCatalogue, renderStatus, renderError }) {
   const runLabel = run?.solve_job_id
     ? `Run #${String(run.solve_job_id).slice(0, 8)} · ${fmtRunDate(run.created_at) || 'stored run'}`
     : null
@@ -735,6 +739,14 @@ function HeroSolution({ layout, box, part, run, label, beatsCatalogue, clearance
     ? `${layout.count} vs ${run.customer_count} today${run.gain_vs_customer_pct != null
       ? ` (${run.gain_vs_customer_pct >= 0 ? '+' : ''}${run.gain_vs_customer_pct}%)` : ''}`
     : null
+  const metaText = [runLabel, cuboidLine, customerLine].filter(Boolean).join(' · ')
+  const hasReasons = layout.reasons?.length > 0
+  // F1 follow-up: the WHY trigger used to be its own bordered bar below the
+  // viewer — folded inline into the meta line instead to give the space
+  // back to the animation; plain state (not <details>) because the expanded
+  // list still renders below the viewer, i.e. NOT right after this trigger
+  // in the DOM, which <details>/<summary> can't do on its own.
+  const [whyOpen, setWhyOpen] = useState(false)
 
   return (
     <div className="hero-solution">
@@ -747,15 +759,27 @@ function HeroSolution({ layout, box, part, run, label, beatsCatalogue, clearance
             <span className="muted hero-pose"> · {layout.pose_label}</span>
           </div>
           <div className="muted hero-meta">
-            {[runLabel, cuboidLine, customerLine].filter(Boolean).join(' · ')}
+            {metaText}
+            {hasReasons && (
+              <>
+                {metaText && ' · '}
+                <button type="button" className="inline-disclosure" aria-expanded={whyOpen}
+                  onClick={() => setWhyOpen((o) => !o)}>
+                  {whyOpen ? '▾' : '▸'} why
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>
 
-      <div className="hero-grid">
-        <SolutionImage layout={layout} part={part} renderStatus={renderStatus} renderError={renderError} />
-        <CertificateCard layout={layout} box={box} clearanceMm={clearanceMm} />
-      </div>
+      <SolutionImage layout={layout} part={part} renderStatus={renderStatus} renderError={renderError} />
+
+      {hasReasons && whyOpen && (
+        <ul className="reasons-list hero-why">
+          {layout.reasons.map((r, i) => <li key={i}>{r}</li>)}
+        </ul>
+      )}
     </div>
   )
 }
@@ -909,7 +933,11 @@ function LayoutDetail({ layout, box, part, type, tab, onTabChange, truck, truckB
             <div><dt>Insert</dt><dd>{type}{type === 'comb/slot'
               ? ' — slotted supports + PP/EVA bottom sheet'
               : ' — divider walls forming pockets'}</dd></div>
-            <div><dt>Pattern</dt><dd>{fit.fill.desc}, {fit.layers} high</dd></div>
+            {/* F1: was the hero's own "Geometric upper bound" row
+                (CertificateCard) — moved here verbatim, same field. */}
+            <div><dt>Geometric upper bound</dt><dd className="mono">{layout.count_upper}</dd></div>
+            <div><dt>Pattern</dt><dd className="mono">
+              {layout.grid.join(' × ')} · {fit.fill.desc}, {fit.layers} high</dd></div>
             <div><dt>Measured pitch</dt><dd className="mono">
               {fmtMm(layout.pitch_lbh[0])} × {fmtMm(layout.pitch_lbh[1])} × {fmtMm(layout.pitch_lbh[2])} mm</dd></div>
             {layout.interleave && (
