@@ -210,6 +210,40 @@ class DunnageOut(BaseModel):
     caveat: str
 
 
+class SequenceCuboidOut(BaseModel):
+    """One dunnage cuboid placed at a build step, mm, box inner corner at
+    (0,0,0)."""
+    name: str
+    colour: str
+    alpha: float
+    origin: tuple[float, float, float]
+    size: tuple[float, float, float]
+
+
+class SequenceStepOut(BaseModel):
+    """One step of the packing order. `i`, the order and the three caption
+    strings are the packing GIF's own (`insert_drawing._captions`), off the
+    same `_place` call -- the animation and the GIF cannot disagree."""
+    i: int
+    kind: Literal["dunnage", "parts"]
+    title: str
+    text: str
+    meta: str
+    cuboids: list[SequenceCuboidOut] = []
+    # Min corner of each posed part's AABB, mm.
+    parts: list[dict] = []
+
+
+class BuildSequenceOut(BaseModel):
+    """F4: the packing order as data, for the 3D animation. `pose_matrix` is
+    the layout's candidate rotation (4x4 row-major, mesh mm -> resting pose),
+    the same one the drawing voxelised with."""
+    inner: tuple[float, float, float]
+    pose_matrix: Optional[list[list[float]]] = None
+    part_extent: tuple[float, float, float]
+    steps: list[SequenceStepOut] = []
+
+
 class LayoutOut(BaseModel):
     asset_name: str
     pose_label: str
@@ -246,6 +280,11 @@ class LayoutOut(BaseModel):
     # see after a solve; null wherever no GIF was built (same discipline as
     # gif_url -- declare it here or pydantic drops it, hard rule 9).
     packed_url: Optional[str] = None
+    # The same build the GIF animates, as data for the 3D animation. Present
+    # wherever a GIF was built; same failure discipline (a sequence failure
+    # never fails the solve) and the same declare-it-or-pydantic-drops-it
+    # rule as gif_url above.
+    sequence: Optional[BuildSequenceOut] = None
 
 
 class BoxDesignOut(BaseModel):
@@ -268,6 +307,8 @@ class BoxDesignOut(BaseModel):
     drawing_url: Optional[str] = None
     gif_url: Optional[str] = None
     packed_url: Optional[str] = None
+    # As LayoutOut.sequence -- declared or pydantic drops it (hard rule 9).
+    sequence: Optional[BuildSequenceOut] = None
     # Same as LayoutOut.cuboid_count / reasons (F3/F4), against this box's own
     # inner.
     cuboid_count: int = 0

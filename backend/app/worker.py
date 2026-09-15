@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import numpy as np
 from celery import Celery
+from kombu import Queue
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -47,6 +48,10 @@ celery_app.conf.worker_prefetch_multiplier = 1  # fair dispatch for long tasks
 # solve behind it -- deploy/docker-compose.prod.yml runs a dedicated
 # worker-render (-Q render, concurrency=1) for it.
 celery_app.conf.task_routes = {"render_run": {"queue": "render"}}
+# Declaring both queues makes a worker started with no -Q (the dev command in
+# CLAUDE.md) consume both. Without this, dev renders sat on `render` forever
+# with render_status "pending" and no error anywhere. Prod's -Q still narrows.
+celery_app.conf.task_queues = (Queue("celery"), Queue("render"))
 
 _engine = create_engine(settings.database_url, pool_pre_ping=True)
 
@@ -101,9 +106,12 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
     `build_gif` itself -- is guarded separately again: a failure writing it
     to disk must not cost the GIF that already rendered fine.
 
-    Returns (drawing_urls, gif_urls, packed_urls, custom_drawing_url,
-    custom_gif_url, custom_packed_url) -- the first three keyed by catalogue
-    index.
+    Returns (drawing_urls, gif_urls, packed_urls, sequences,
+    custom_drawing_url, custom_gif_url, custom_packed_url, custom_sequence)
+    -- the first four keyed by catalogue index. `sequences` is F4's JSON
+    packing order, returned BY `build_gif` off the placement it just
+    animated (never a second placement call, hard rule 9), so it exists
+    exactly where a GIF does.
     """
     rotation_by_label = {c.label: c.rotation_matrix for c in candidates}
     inner_by_name = {a.name: a.inner for a in assets}
@@ -138,10 +146,10 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
 
     def render(*, pose_label, extent_lbh, pitch_lbh, grid, inner_lbh,
                asset_name, count, file_stem, want_gif: bool = True
-               ) -> tuple[str | None, str | None, str | None]:
+               ) -> tuple[str | None, str | None, str | None, dict | None]:
         voxels = voxels_for(pose_label)
         if voxels is None:
-            return None, None, None
+            return None, None, None, None
         try:
             # Same pure expression engine.solve used to stamp `layout.dunnage`
             # -- recomputed, not a second opinion, so the drawing cannot
@@ -151,7 +159,7 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
         except Exception:
             logger.exception("dunnage.bom failed for %s (%s)",
                              job_id, file_stem)
-            return None, None, None
+            return None, None, None, None
 
         png_url = None
         try:
@@ -167,12 +175,16 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
 
         gif_url = None
         packed_url = None
+        sequence = None
         if want_gif:
             try:
-                gif, packed = build_gif(voxels=voxels, extent_lbh=extent_lbh,
-                                        pitch_lbh=pitch_lbh, grid=grid,
-                                        inner_lbh=inner_lbh, bom=bom,
-                                        asset_name=asset_name, count=count)
+                # The sequence comes back FROM build_gif -- one `_place`
+                # call for the animation and the GIF (hard rule 9).
+                gif, packed, sequence = build_gif(
+                    voxels=voxels, extent_lbh=extent_lbh,
+                    pitch_lbh=pitch_lbh, grid=grid, inner_lbh=inner_lbh,
+                    bom=bom, asset_name=asset_name, count=count,
+                    pose_matrix=rotation_by_label.get(pose_label))
                 gif_url = _write(gif, f"{file_stem}.gif")
                 render_counts["gif"] += 1
             except Exception:
@@ -188,12 +200,13 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
                     logger.exception("packed frame write failed for %s (%s)",
                                      job_id, file_stem)
 
-        return png_url, gif_url, packed_url
+        return png_url, gif_url, packed_url, sequence
 
     start = time.monotonic()
     drawing_urls: dict = {}
     gif_urls: dict = {}
     packed_urls: dict = {}
+    sequences: dict = {}
     for i, layout in enumerate(result.catalogue):
         inner_lbh = inner_by_name.get(layout.asset_name)
         if inner_lbh is None:
@@ -203,7 +216,7 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
         # (see GIF_FOR_TOP_CATALOGUE_ONLY) -- and so no packed_url either,
         # since it is the GIF's own final frame.
         want_gif = (not GIF_FOR_TOP_CATALOGUE_ONLY) or i == 0
-        png_url, gif_url, packed_url = render(
+        png_url, gif_url, packed_url, sequence = render(
             pose_label=layout.pose_label, extent_lbh=layout.extent_lbh,
             pitch_lbh=layout.pitch_lbh, grid=layout.grid,
             inner_lbh=inner_lbh, asset_name=layout.asset_name,
@@ -215,10 +228,14 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
             gif_urls[i] = gif_url
         if packed_url is not None:
             packed_urls[i] = packed_url
+        if sequence is not None:
+            sequences[i] = sequence
 
     custom_drawing_url = custom_gif_url = custom_packed_url = None
+    custom_sequence = None
     if result.custom is not None:
-        custom_drawing_url, custom_gif_url, custom_packed_url = render(
+        (custom_drawing_url, custom_gif_url, custom_packed_url,
+         custom_sequence) = render(
             pose_label=result.custom.pose_label,
             extent_lbh=result.custom.extent_lbh,
             pitch_lbh=result.custom.pitch_lbh, grid=result.custom.grid,
@@ -229,8 +246,9 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
     logger.info("rendered %d png + %d gif in %.1fs for %s",
                 render_counts["png"], render_counts["gif"],
                 time.monotonic() - start, job_id)
-    return (drawing_urls, gif_urls, packed_urls,
-            custom_drawing_url, custom_gif_url, custom_packed_url)
+    return (drawing_urls, gif_urls, packed_urls, sequences,
+            custom_drawing_url, custom_gif_url, custom_packed_url,
+            custom_sequence)
 
 
 @celery_app.task(name="solve_part", time_limit=600, soft_time_limit=570)
@@ -526,10 +544,11 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
 
             job.result_json = {
                 "catalogue": [
-                    # drawing_url/gif_url/packed_url start null -- render_run
-                    # fills them in place once the pictures exist.
+                    # drawing_url/gif_url/packed_url/sequence start null --
+                    # render_run fills them in place once the pictures exist.
                     {**dataclasses.asdict(l), "interleave": l.interleave,
-                     "drawing_url": None, "gif_url": None, "packed_url": None}
+                     "drawing_url": None, "gif_url": None, "packed_url": None,
+                     "sequence": None}
                     for i, l in enumerate(result.catalogue)
                 ],
                 "poses_searched": [c.label for c in candidates],
@@ -537,7 +556,8 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
                 "custom": (
                     {**dataclasses.asdict(result.custom),
                      "layers": result.custom.layers,
-                     "drawing_url": None, "gif_url": None, "packed_url": None}
+                     "drawing_url": None, "gif_url": None, "packed_url": None,
+                     "sequence": None}
                     if result.custom is not None else None
                 ),
                 "custom_beats_catalogue": result.custom_beats_catalogue(),
@@ -636,18 +656,21 @@ def run_render(job_id: str) -> None:
             ) if custom_dict is not None else None)
             result = SimpleNamespace(catalogue=catalogue, custom=custom)
 
-            (drawing_urls, gif_urls, packed_urls, custom_drawing_url,
-             custom_gif_url, custom_packed_url) = _render_drawings(
+            (drawing_urls, gif_urls, packed_urls, sequences,
+             custom_drawing_url, custom_gif_url, custom_packed_url,
+             custom_sequence) = _render_drawings(
                 job_id, mesh, candidates, assets, result, clearance_lbh)
 
             for i, layout in enumerate(r.get("catalogue") or []):
                 layout["drawing_url"] = drawing_urls.get(i)
                 layout["gif_url"] = gif_urls.get(i)
                 layout["packed_url"] = packed_urls.get(i)
+                layout["sequence"] = sequences.get(i)
             if r.get("custom") is not None:
                 r["custom"]["drawing_url"] = custom_drawing_url
                 r["custom"]["gif_url"] = custom_gif_url
                 r["custom"]["packed_url"] = custom_packed_url
+                r["custom"]["sequence"] = custom_sequence
             r["render_status"] = "done"
             r["render_error"] = None
         except Exception as exc:  # noqa: BLE001 — surface, never fail silently

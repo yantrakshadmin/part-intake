@@ -149,12 +149,18 @@ def pose_voxels(mesh: trimesh.Trimesh, rotation_matrix,
     the reseat. Same subdivide voxeliser as the engine measured the pitch with
     -- it works on the open shells every customer file is.
     """
-    r = np.asarray(rotation_matrix, dtype=float)
+    return occupancy(mesh, _as_4x4(rotation_matrix), voxel_mm=cell_mm)
+
+
+def _as_4x4(matrix) -> np.ndarray:
+    """A 3x3 or 4x4 rotation as a 4x4. The sequence JSON ships the same
+    matrix `pose_voxels` posed the part with, in one shape (F4)."""
+    r = np.asarray(matrix, dtype=float)
     if r.shape == (3, 3):
         t = np.eye(4)
         t[:3, :3] = r
         r = t
-    return occupancy(mesh, r, voxel_mm=cell_mm)
+    return r
 
 
 def _fill(vol: np.ndarray, origin, size, label: int, cell_mm: float,
@@ -590,6 +596,12 @@ class _Placement:
     # {step index: {row index: instance count}}, dunnage only -- build_gif's
     # caption source. Parts steps are `2k+1`, computed from `layers` directly.
     dun_at_step: dict
+    # The same placements in mm, for the JSON build sequence (F4): the voxel
+    # volumes above are a raster OF these, so neither can disagree with the
+    # other. {step: [(row index, origin_mm, size_mm)]} for the dunnage,
+    # {step: [origin_mm]} for the part instances.
+    dun_solids_at_step: dict
+    parts_at_step: dict
 
 
 def _place(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
@@ -648,6 +660,7 @@ def _place(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     per_part = int(np.count_nonzero(voxels))    # cells one part should occupy
     cells = 0                                   # cells the parts actually got
     counts: dict = {}
+    parts_at_step: dict = {}
     cuboids: list = []          # (volume, row, solids, voids), filled smallest-first
     parts_z0 = next(r.z0 for r in rows if r.is_parts)
     for i, row in enumerate(rows):
@@ -681,6 +694,12 @@ def _place(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
                         got = int(np.count_nonzero(sub[src]))
                         cells += got
                         n += got > 0
+                        # mm origin of this instance: the min corner of the
+                        # posed part's AABB, the same lattice expression the
+                        # cell indices above were rounded from.
+                        parts_at_step.setdefault(pstep, []).append(
+                            (ox + a * pitch[0], oy + b * pitch[1],
+                             row.z0 + k * pitch[2]))
             counts[None] = n
             continue
         if row.geo is None:
@@ -699,6 +718,7 @@ def _place(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     # not off the pixels. Same for a layer bar lying inside the bottom
     # separator assembly.
     dun_at_step: dict = {}
+    dun_solids_at_step: dict = {}
     for _v, i, solids, voids in sorted(cuboids, key=lambda c: c[0]):
         for o, sz in solids:
             dstep = _dun_step(o[2], parts_z0, pitch[2], layers)
@@ -706,6 +726,8 @@ def _place(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
                   step=dstep)
             dun_at_step.setdefault(dstep, {})
             dun_at_step[dstep][i] = dun_at_step[dstep].get(i, 0) + 1
+            dun_solids_at_step.setdefault(dstep, []).append(
+                (i, tuple(float(v) for v in o), tuple(float(v) for v in sz)))
         for o, sz in voids:                 # the tray's pockets, cut out
             _fill(dun, o, sz, 0, cell_mm, over=True)
         if not (dun == LABEL0 + i).any():
@@ -737,7 +759,9 @@ def _place(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     return _Placement(rows=rows, el=el, extent=extent, pitch=pitch,
                       inner=inner, grid=grid, dun=dun, prt=prt,
                       dun_step=dun_step, prt_step=prt_step, alt=alt, top=top,
-                      layers=layers, counts=counts, dun_at_step=dun_at_step)
+                      layers=layers, counts=counts, dun_at_step=dun_at_step,
+                      dun_solids_at_step=dun_solids_at_step,
+                      parts_at_step=parts_at_step)
 
 
 # ---------------------------------------------------------------------------
@@ -957,6 +981,80 @@ def _dun_caption(dun_at_step: dict, step: int, rows: list, el: dict) -> str:
     return "Place " + ", ".join(parts) if parts else ""
 
 
+def _captions(p: "_Placement", bom: dunnage.Bom, asset_name: str, count: int,
+              step: int | None) -> tuple:
+    """`(title, text, meta, parts placed so far)` for one build step.
+
+    `step is None` is the GIF's final hold frame (not a sequence step).
+    Shared by `build_gif`'s frames and the JSON `sequence` built off the same
+    `_place`, so the animation can never caption a step differently from the
+    GIF it replaces (hard rule 9).
+    """
+    per_layer = p.grid[0] * p.grid[1]
+    if step is None:
+        line1 = "Packed: %d parts" % count
+        line2 = ("build %g of %g mm inner - %s"
+                 % (round(bom.build_height_mm, 1), bom.inner_h_mm,
+                    "FITS" if bom.fits else "DOES NOT FIT"))
+        cum = count
+    elif step % 2:                                  # parts step
+        k = (step - 1) // 2
+        line1 = "Layer %d of %d" % (k + 1, p.layers)
+        line2 = "Place %d x Part" % per_layer
+        cum = per_layer * (k + 1)
+    else:
+        j = step // 2
+        line1 = ("Top dunnage" if step == 2 * p.layers else
+                 "Layer %d of %d" % (j + 1, p.layers) if step else
+                 # Step 0 is "empty" only when nothing actually lands
+                 # there -- some archetypes/poses have no bottom
+                 # dunnage at all (no vertical nest), so it can be.
+                 "Base dunnage" if p.dun_at_step.get(0) else "Empty box")
+        line2 = _dun_caption(p.dun_at_step, step, p.rows, p.el)
+        cum = per_layer * j
+    line3 = ("%d of %d parts placed  \u00b7  %s  \u00b7  %s insert"
+             % (cum, count, asset_name, bom.archetype.replace("_", "-")))
+    return line1, line2, line3, cum
+
+
+def _sequence(p: "_Placement", bom: dunnage.Bom, asset_name: str, count: int,
+              steps: list, pose_matrix) -> dict:
+    """The packing order as JSON, off the placement `build_gif` just replayed.
+
+    Same step indices, same order, same caption strings as the GIF's frames
+    (`_captions`) and the same mm origins the voxels were rasterised from --
+    there is no second placement expression for the 3D animation to drift
+    from (hard rule 9). The final hold frame is not a step.
+
+    A part `origin` is the min corner of the posed part's AABB. The voxel
+    volume `pose_voxels` returns is seated up to one `cell_mm` BELOW that
+    (trimesh snaps the raster to its own pitch lattice), which is a render
+    artifact of the GIF only: the lattice, the pitch and this sequence all
+    use the true AABB.
+    """
+    return {
+        "inner": [float(v) for v in p.inner],
+        "pose_matrix": (None if pose_matrix is None
+                        else [[float(v) for v in row]
+                              for row in _as_4x4(pose_matrix)]),
+        "part_extent": [float(v) for v in p.extent],
+        "steps": [
+            {"i": int(s),
+             "kind": "parts" if s % 2 else "dunnage",
+             "title": t, "text": txt, "meta": meta,
+             "cuboids": [{"name": p.rows[i].name, "colour": p.rows[i].colour,
+                          "alpha": float(p.rows[i].alpha),
+                          "origin": [round(v, 3) for v in o],
+                          "size": [round(v, 3) for v in sz]}
+                         for i, o, sz in p.dun_solids_at_step.get(s, [])],
+             "parts": [{"origin": [round(float(v), 3) for v in o]}
+                       for o in p.parts_at_step.get(s, [])]}
+            for s, (t, txt, meta, _cum)
+            in ((s, _captions(p, bom, asset_name, count, s)) for s in steps)
+        ],
+    }
+
+
 def _step_masks(dun: np.ndarray, dun_step: np.ndarray, prt: np.ndarray,
                 prt_step: np.ndarray, step: int) -> tuple:
     """Cells whose per-cell step index == `step` -- gated on the LABEL volume
@@ -972,15 +1070,22 @@ def _step_masks(dun: np.ndarray, dun_step: np.ndarray, prt: np.ndarray,
 def build_gif(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
              bom: dunnage.Bom, asset_name: str, count: int,
              cell_mm: float = CELL_MM, dunnage_ms: int = 600,
-             parts_ms: int = 1500, hold_ms: int = 3000
-             ) -> tuple[bytes, bytes]:
+             parts_ms: int = 1500, hold_ms: int = 3000, pose_matrix=None
+             ) -> tuple[bytes, bytes, dict]:
     """The packing sequence as an animated GIF: the empty asset, then per
     layer the dunnage that goes in before it and that layer's parts, then the
     top dunnage, then a hold on the finished box before it loops.
 
-    Returns `(gif_bytes, packed_png_bytes)` -- the second is the GIF's own
-    hold frame (the fully packed box, `frame(None, ...)`) re-encoded as a
-    standalone PNG, so the complete-solution image is never a second
+    Returns `(gif_bytes, packed_png_bytes, sequence)`. `sequence` is the same
+    build, step for step, as JSON for the 3D animation (`_sequence`): built
+    here rather than in a `build_sequence()` of its own so the two come off
+    ONE `_place` call and cannot drift. `pose_matrix` is the candidate
+    rotation the caller posed `voxels` with, passed through for the animation
+    to pose the GLB the same way.
+
+    The second returned value is the GIF's own hold frame (the fully packed
+    box, `frame(None, ...)`) re-encoded as a standalone PNG, so the
+    complete-solution image is never a second
     rendering pass that could disagree with the GIF (hard rule 9).
 
     Off the SAME placement `explode_png` draws (`_place`): the geometry is
@@ -991,11 +1096,9 @@ def build_gif(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     p = _place(voxels=voxels, extent_lbh=extent_lbh, pitch_lbh=pitch_lbh,
               grid=grid, inner_lbh=inner_lbh, bom=bom, count=count,
               cell_mm=cell_mm)
-    rows, el, inner, layers = p.rows, p.el, p.inner, p.layers
+    rows, inner, layers = p.rows, p.inner, p.layers
     dun, prt, dun_step, prt_step, alt = (p.dun, p.prt, p.dun_step,
                                          p.prt_step, p.alt)
-    per_layer = p.grid[0] * p.grid[1]
-    archetype = bom.archetype.replace("_", "-")
 
     # Highlight labels, one per dunnage row (its own alpha, recoloured to
     # accent) plus one shared opaque one for parts -- appended after every
@@ -1034,29 +1137,7 @@ def build_gif(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
             if pm.any():
                 pv[pm] = parts_hl
 
-        if final:
-            line1, line2 = "Packed: %d parts" % count, (
-                "build %g of %g mm inner - %s"
-                % (round(bom.build_height_mm, 1), bom.inner_h_mm,
-                   "FITS" if bom.fits else "DOES NOT FIT"))
-            cum = count
-        elif step % 2:                                  # parts step
-            k = (step - 1) // 2
-            line1 = "Layer %d of %d" % (k + 1, layers)
-            line2 = "Place %d x Part" % per_layer
-            cum = per_layer * (k + 1)
-        else:
-            j = step // 2
-            line1 = ("Top dunnage" if step == 2 * layers else
-                     "Layer %d of %d" % (j + 1, layers) if step else
-                     # Step 0 is "empty" only when nothing actually lands
-                     # there -- some archetypes/poses have no bottom
-                     # dunnage at all (no vertical nest), so it can be.
-                     "Base dunnage" if p.dun_at_step.get(0) else "Empty box")
-            line2 = _dun_caption(p.dun_at_step, step, rows, el)
-            cum = per_layer * j
-        line3 = ("%d of %d parts placed  ·  %s  ·  %s insert"
-                % (cum, count, asset_name, archetype))
+        line1, line2, line3, _cum = _captions(p, bom, asset_name, count, step)
 
         fig, ax = plt.subplots(figsize=(9.2, 6.6), dpi=80)
         _draw_asset(ax, inner, bom.build_height_mm if final else None)
@@ -1110,7 +1191,8 @@ def build_gif(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     logger.info("built %s %s gif: %d frames (%d content + hold), %d bytes",
                 asset_name, bom.archetype, len(frames), len(non_empty),
                 buf.tell())
-    return buf.getvalue(), packed_buf.getvalue()
+    return (buf.getvalue(), packed_buf.getvalue(),
+            _sequence(p, bom, asset_name, count, non_empty, pose_matrix))
 
 
 # ---------------------------------------------------------------------------
@@ -1402,6 +1484,76 @@ def _check_undrawn_warns(case, catch) -> None:
     print("PASS  undrawn element still warns: %s" % new[0])
 
 
+def _check_sequence(seq: dict, placement: _Placement, bom: dunnage.Bom,
+                    asset_name: str, count: int, non_empty: list, inner,
+                    ref: str) -> None:
+    """F4: the JSON build sequence agrees with the BOM, the count and the GIF.
+
+    Everything here is checked against a source OUTSIDE the sequence -- the
+    BOM's own `qty`, the engine's `count`, the step set the GIF rendered --
+    so it cannot pass by comparing the sequence with itself.
+    """
+    import json
+    json.dumps(seq)                     # it has to survive result_json
+    # ...and the response model (hard rule 9: pydantic drops undeclared keys
+    # silently). Round-trip through the wire schema and compare to the
+    # JSON form -- a key missing from schemas.py fails here, not in the UI.
+    from .schemas import BuildSequenceOut
+    wire = BuildSequenceOut(**seq).model_dump()
+    assert json.loads(json.dumps(wire)) == json.loads(json.dumps(seq)), \
+        "sequence lost or changed a field through BuildSequenceOut"
+    assert [s["i"] for s in seq["steps"]] == list(non_empty), \
+        "%s: sequence steps %s, non-empty steps %s (the gif frame count is " \
+        "asserted against the same list)" \
+        % (ref, [s["i"] for s in seq["steps"]], non_empty)
+    drawn: dict = {}
+    for step in seq["steps"]:
+        assert step["kind"] == ("parts" if step["i"] % 2 else "dunnage"), step
+        t, txt, meta, _c = _captions(placement, bom, asset_name, count,
+                                     step["i"])
+        assert (step["title"], step["text"], step["meta"]) == (t, txt, meta), \
+            "%s: step %d caption was altered after _captions built it" % (ref, step["i"])
+        for c in step["cuboids"]:
+            drawn[c["name"]] = drawn.get(c["name"], 0) + 1
+    for name, n in drawn.items():
+        assert n == placement.el[name].qty, \
+            "%s: sequence has %d x %r, BOM says qty %s" \
+            % (ref, n, name, placement.el[name].qty)
+    # Every element the picture draws must reach the sequence too, or a
+    # missing row would pass the loop above vacuously.
+    assert drawn.keys() == {r.name for r in placement.rows
+                            if not r.is_parts and r.geo is not None}, \
+        "%s: sequence draws %s, placement draws %s" \
+        % (ref, sorted(drawn), sorted(r.name for r in placement.rows
+                                      if not r.is_parts and r.geo is not None))
+    origins = [o["origin"] for st in seq["steps"] for o in st["parts"]]
+    assert len(origins) == count, \
+        "%s: %d part origins, engine says %d" % (ref, len(origins), count)
+    # The origins must BE the engine's lattice, in mm -- an implementation
+    # emitting cell indices, metres, swapped axes or one repeated corner
+    # stays inside the box and would pass the bound below.
+    ox, oy = _origins(placement.extent, placement.pitch, placement.grid,
+                      placement.inner)
+    px, py, pz = placement.pitch
+    z0 = next(r.z0 for r in placement.rows if r.is_parts)
+    ga, gb, gk = placement.grid
+    want = {(round(ox + a * px, 3), round(oy + b * py, 3), round(z0 + k * pz, 3))
+            for k in range(gk) for a in range(ga) for b in range(gb)}
+    assert {tuple(round(v, 3) for v in o) for o in origins} == want, \
+        "%s: part origins are not the engine's lattice" % ref
+    per_step = [len(st["parts"]) for st in seq["steps"] if st["kind"] == "parts"]
+    assert per_step == [ga * gb] * gk, \
+        "%s: parts per step %s, grid says %d x %d layers" % (ref, per_step, ga * gb, gk)
+    for o in origins + [c["origin"] for st in seq["steps"]
+                        for c in st["cuboids"]]:
+        assert all(-1e-6 <= v <= inner[a] + 1e-6 for a, v in enumerate(o)), \
+            "%s: origin %s is outside the %s inner" % (ref, o, tuple(inner))
+    assert seq["pose_matrix"] is not None, "%s: sequence without a pose" % ref
+    assert len(seq["pose_matrix"]) == 4 and all(
+        len(r) == 4 for r in seq["pose_matrix"]), seq["pose_matrix"]
+    assert seq["inner"] == [float(v) for v in inner], seq["inner"]
+
+
 def _selfcheck(outdir) -> int:
     import sys
     import time
@@ -1502,10 +1654,10 @@ def _selfcheck(outdir) -> int:
         expected = 1 + len(non_empty)
 
         t0 = time.perf_counter()
-        gif, packed = build_gif(voxels=_demo_voxels(extent, CELL_MM, kind),
-                                extent_lbh=extent, pitch_lbh=pitch, grid=grid,
-                                inner_lbh=inner, bom=bom, asset_name=asset,
-                                count=count)
+        gif, packed, seq = build_gif(
+            voxels=_demo_voxels(extent, CELL_MM, kind), extent_lbh=extent,
+            pitch_lbh=pitch, grid=grid, inner_lbh=inner, bom=bom,
+            asset_name=asset, count=count, pose_matrix=np.eye(4))
         gdt = time.perf_counter() - t0
         gimg = Image.open(BytesIO(gif))
         assert gimg.n_frames == expected, \
@@ -1562,6 +1714,13 @@ def _selfcheck(outdir) -> int:
                           int(np.nonzero(a.any(1))[0].min())))
         assert len(set(edges)) == 1, \
             "%s: box edge moves between gif frames (x, y): %s" % (ref, edges)
+        _check_sequence(seq, placement, bom, asset, count, non_empty, inner,
+                        ref)
+        print("PASS  %-14s %-9s %s  sequence: %d steps, %d part origins, "
+              "%d dunnage cuboids"
+              % (bom.archetype, asset, ref, len(seq["steps"]),
+                 sum(len(s["parts"]) for s in seq["steps"]),
+                 sum(len(s["cuboids"]) for s in seq["steps"])))
         gpath = outdir / ("build_%s_%s.gif"
                           % (bom.archetype, ref.replace("/", "_").replace(" ", "_")))
         gpath.write_bytes(gif)
