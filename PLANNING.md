@@ -401,7 +401,7 @@ Triage — accepted where the screenshot backs it, rejected where it does not:
 - *Rejected: duplicate "Generate proposal" inside the empty state.* The
   button is on the same screen, top right, 130 px away.
 
-**F6 — Truck tab renders the Packaging screen.** `ProjectPage.jsx`
+**F6 — DONE 2026-09-15. Truck tab renders the Packaging screen.** `ProjectPage.jsx`
 renders the same `PackagingTruckTab` for both tabs and only steers the
 sub-tab (`resultTab='truck'`) inside `LayoutDetail`, which is below the
 fold — so the Truck tab's first viewport is byte-identical to Packaging's

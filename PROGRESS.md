@@ -2505,9 +2505,12 @@ Gemini-driven UI/UX audit with honest triage.
   ranked heading at the 1440×900 fold with the viewer at 320 px. Lesson:
   the first pass hit the fold by shrinking the animation to 200 px — the
   hero viewer is the product, reclaim space from chrome, never from it.
-- F6 (Truck tab shows the truck plan first) in progress at session end.
+- **F6 shipped** (commit "ui: Truck tab opens on the truck plan"): same
+  mounted PackingResults, hero hidden not unmounted, TruckSection reused
+  in its place, sub-tab dropped while it would repeat. CDP: canvas count
+  1 across the round trip, timeline keeps advancing, no refetch.
 
-Open: F6 (running); GIF caption card overlaps the box top edge in frame 1
+Open: GIF caption card overlaps the box top edge in frame 1
 (GIF now only in the self-check, so low priority); `voids` not in the
 sequence (tray reads as a translucent slab, alpha 0.30); the animation's
 "Empty box" caption card touches the box top edge at t=0 (cosmetic).
