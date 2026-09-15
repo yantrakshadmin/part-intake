@@ -2520,3 +2520,49 @@ Prod workers keep explicit `-Q celery` / `-Q render`, so the dev-only
 `task_queues` declaration in worker.py changes nothing on the VM. gcloud auth
 on this Mac has expired (`gcloud auth login` needed to read build logs); the
 GitHub check run on the commit is the deploy signal meanwhile.
+
+## 2026-09-15 (later) — SX4 cover "what a failure": F7/F8/F10 landed, sweep built
+
+Rahul picked one random STEP file (Maruti SX4 floor side cover, NDA, local
+only) and the animation laid parts across each other and out of the box.
+Root cause F7: layouts that win footprint order (1,0,2) were posed with the
+raw resting rotation. Landed today, in order:
+
+- 4db3277 drawing: F7 — `Layout.turned`, `IN_PLANE_TURN` (Rz+90, paired
+  with `np.rot90` silhouette; the old transpose was a mirror), one
+  `rotation_for` expression behind voxels and `pose_matrix`. Posed AABB ==
+  turned extent; no "clipped by the volume" on the cover.
+- 779813b ui: F8 — camera fits projected corners at any aspect. Review
+  caught the two-pass fit oscillating; damped fix verified in a three.js sim
+  on all 17 catalogue boxes at three stage sizes.
+- 941d67d ui: F10 — client-derived insert tray and the "slotted comb" note
+  deleted; Insert tab shows the worker's BOM only.
+- 5adecb2 backend: `tests/sweep.py` — every CAD file (16 in ../Rahul + 9
+  fixtures), engine + drawings, flags table. First full run, on the F7 tree:
+  0 extract/engine/render failures, GT 40/48 hold, 16 of 25 winners are
+  TURNED (so F7 affected most real parts, not one), 1 CLIPPED (F12), 4
+  BELOW_CUBOID (E2), 5 NO_NEST. Table at the session scratchpad
+  `sweep/sweep.md`; ~25 min wall on this Mac.
+
+Re-judged F9 after F7: geometry right, still unreadable at 13 layers —
+respec'd in §10. New tickets F11 (pocket BOM narrower than the part on
+interleaved poses), F12, E2, S2 (sweep is part of the cycle). E1 stays open.
+
+Ground truth: 40/PLS12801, 48/PLS1280, Tata decks PASS. Frontend build and
+six lib checks pass.
+
+Process notes: four parallel agents plus headless Chrome overran the 8 GB
+Mac (1.1 GB test process, 580 % CPU swiftshader) — two agents at a time from
+now. The session hit the API limit at ~15:20 (reset 15:30); the geometry
+reviewer and sweep agent died mid-flight and the PM finished both reviews
+by hand. Research: Fraunhofer/scapos PackAssistant already does our core
+problem including nested stacks (E1) with a JSON API — recommend a trial
+benchmark on the 16 files before more engine work. Rahul also shared
+`Pack_Studio_UI_UX_Workflow_Analysis.docx` (competitor demo analysis):
+their differentiator is the connected chain part → orientation → box →
+protection → pallet → shipment → cost → report with a binding-constraint
+explanation; we have most of the chain except economics and pallets, and
+their "recommendation card + binding constraint in plain words" matches
+Rahul's taste memory exactly.
+
+Not pushed (Rahul pushes on request; f3b018c onward unpushed).

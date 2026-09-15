@@ -413,3 +413,81 @@ re-solve, no re-mount of `PackingResults` (the F4 animation lives there).
 Acceptance: at 1440×900 the Truck tab's first viewport shows the truck
 drawing and no "PACKAGING FIT" heading; switching Packaging ↔ Truck does
 not refetch `/solve-jobs`. S.
+
+**F7 — DONE 2026-09-15 (4db3277). Turned-footprint layouts are drawn and animated un-turned.** Found
+2026-09-15 on a Maruti floor side cover (NDA, local only): resting pose
+875 x 327 x 72, winner PLS12103 in footprint order (1,0,2) — extent
+(332, 876, 76), pitch (177, 833, 72), grid (5,1,13), 65/box. `Layout` never
+records which of `Pose.footprint_orders()` won, so `worker._render_drawings`
+poses the voxels and ships `sequence.pose_matrix` with the raw resting
+rotation. The drawing stamps 875-mm voxels at 177-mm steps into an 1150
+volume (all five overlap, clipped at the far wall — the yellow smear on one
+side), logs `parts clipped by the volume` and carries on; the 3D animation
+lays the same 875-mm parts across each other and out of the box. TRW/Mubea
+never showed it: both win in order (0,1,2). Fix: `Layout.turned`; the worker
+composes Rz(90°) into ONE rotation used for both `pose_voxels` and
+`pose_matrix`; the second silhouette becomes `rot90`, not the transpose (a
+transpose is a mirror). Check: turned layout's posed AABB == turned extent;
+no clipped-cells warning on the cover; 40/48 hold.
+
+**F8 — DONE 2026-09-15 (779813b). Animation camera crops the box in the
+portrait modal.** Radius was `diag * 2.05` regardless of aspect. Now a
+damped fit on the eight projected corners; code review caught the first
+two-pass version oscillating (camera height is fixed while r moves, so the
+response is not linear) — cropped first frames on 11 of 17 catalogue boxes.
+Hero box 289 → 363 px wide at 900 x 320; modal uncropped.
+
+**F9 — OPEN, re-judged after F7. Packed/exploded drawing still illegible on
+a 13-layer stack.** With the parts in the right pose the SX4 cover drawing
+is now correct (5 across x 13 high, nothing clipped) but 65 voxel parts and
+13 translucent trays still read as one block; you cannot tell one part from
+the next. Spec: draw the top layer's parts in full and the layers below as
+ghost slabs with a "x 13" callout; the packed view likewise. Rahul's taste
+memory: one clear picture beats a complete one.
+
+**F10 — DONE 2026-09-15 (941d67d). Browser-derived insert tray deleted.**
+The "parts interleave … slotted comb … not built yet" note meant nothing to
+Rahul, and the tray it replaced re-derived geometry client-side (hard rule
+9). Insert tab = the worker's DunnageBom only.
+
+**F11 — Interleaved pose gets a pocket BOM with pockets narrower than the
+part.** SX4 cover: pitch 177 < extent 332 in plane, yet the BOM says
+"5 x 1 pockets, 177 x 833 x 69 mm each". A 177-mm pocket cannot hold a
+332-mm part; it is the comb problem F10 deleted from the browser, now in
+`dunnage._pocket_tray`. When pitch < extent on an in-plane axis the
+archetype must be a slotted comb (slot = part thickness + clearance, count =
+grid) or plain layer sheets — not pockets. Check: no BOM element whose cell
+is smaller than the part extent on an in-plane axis; sweep asserts it.
+
+**F12 — Drawing clips 1.2 % of cells on a 35-column lattice.** Sweep:
+Y2V_YK9_Rack, PLS12803, pitch 33 mm x 35 columns = 8.25 cells per step;
+`_place` rounds each column start, so the drift reaches one cell at the far
+wall and 2 940 of 246 120 cells fall outside. Accumulate positions in mm
+and round once per column, or round the pitch to whole cells before
+`lattice_count` so the count and the picture use the same lattice. S.
+
+**E2 — Cuboid baseline is unfair to the engine on small parts.** Sweep
+BELOW_CUBOID on 4 of 25 files (TVS tray 12 vs 15, headstock collar 1575 vs
+1640, YK9 IBJ 1368 vs 1386, P125 intercooler). `engine.cuboid_count` packs
+raw CAD dims with no clearance and no voxel rounding; the engine packs 4-mm
+voxels plus 5 mm clearance. The UI then shows "engine < boxes", the one
+number that destroys trust in a nesting tool. Either the baseline takes the
+same clearance (honest comparison) or `cuboid_count` is labelled "no
+clearance". The sweep exits 1 on this until it is settled. S.
+
+**S2 — Sweep is part of the process.** `python backend/tests/sweep.py`
+(≈ 25 min on this Mac; P118 radiator alone is 8 min in the engine) runs
+after any engine or drawing change, before the commit. Rahul: "I randomly
+picked this and see the bug" — the sweep exists so he never has to. Follow-
+up: `worker.rotation_for` and the sweep both compose `IN_PLANE_TURN @
+rotation`; lift it into `nesting` so there is one expression.
+
+**E1 — Engine cannot see shell spooning.** Same cover standing on edge
+("Alternative 1", extent 876 x 76 x 332) measures pitch 77 along the 76-mm
+axis: zero nesting. Real trim panels are packed on edge, face-to-face,
+nested to thickness + rib height, which is where the count would come from
+(950 / ~25 mm x 3 rows is 100+ vs 65 flat). The voxel pitch search shifts a
+whole occupancy grid along one axis and finds the arch of one shell
+colliding with the arch of the next — correct for these voxels at 4 mm, but
+a shell 2–3 mm thick with 4 mm cells is solid. Needs a finer voxel on the
+thin axis or a surface-offset test. Not a drawing bug; a count ceiling.
