@@ -526,7 +526,29 @@ in the proposal PDF with three orthographic views from the placed
 silhouettes (`silhouette_runs` already carries the plan view; the side views
 are the pitch lattice × part extent). F9 closes into this.
 
-**F16 — Cost and pallet layer (functional gap, after F13–F15).** They rank by
+**F17 — The insert manufacturing drawing is the deliverable, and we do not
+have one.** Rahul, 2026-09-15, on the Insert tab: "What is the use of this
+whole process if I am not able to tell the person what insert to get
+manufactured — he won't get the dimensions by looking at the animation."
+Correct. The Insert tab shows a BOM table (element, size, qty) and the packed
+voxel picture; nothing a tray supplier can cut from. F10 deleted the
+browser-drawn tray because it re-derived geometry; the backend never grew a
+replacement. Build, in `insert_drawing.py` from `layout.dunnage` + the
+lattice (one expression with the count, hard rule 9): **one sheet per
+distinct dunnage element** — plan view of the tray outline with every pocket
+/ slot drawn and dimensioned (outer L x B, pocket L x B, pitch, wall, edge
+margin), a section showing pocket depth, sheet thickness and the part
+sitting in it, material + spec + qty per box in a title block. White, black
+lines, dimension arrows, nothing decorative. Shown on the Insert tab in place
+of the packed picture, and in the proposal PDF. Depends on **F11**: for
+interleaved poses (pitch < part extent in plane, the SX4 cover) the element
+must be a slotted comb or plain sheets before it can be drawn — a 177-mm
+pocket for a 332-mm part cannot be dimensioned because it cannot exist.
+Acceptance: TRW wheel → a pocket-tray sheet a supplier could quote from,
+every number traceable to `dunnage`; SX4 cover → comb or sheets, never a
+pocket narrower than the part; Mubea bar → its separator/bar elements.
+
+**F16 — Cost and pallet layer (functional gap, after F13–F15, F17).** They rank by
 landed cost: box unit cost + dunnage cost + delivery (fixed + per km) →
 cost per part / box / pallet / shipment; and a pallet unit load sits
 between box and truck. We have neither. Needs box and dunnage prices in the
