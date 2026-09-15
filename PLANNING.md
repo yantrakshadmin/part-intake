@@ -455,8 +455,9 @@ The "parts interleave … slotted comb … not built yet" note meant nothing to
 Rahul, and the tray it replaced re-derived geometry client-side (hard rule
 9). Insert tab = the worker's DunnageBom only.
 
-**F11 — Interleaved pose gets a pocket BOM with pockets narrower than the
-part.** SX4 cover: pitch 177 < extent 332 in plane, yet the BOM says
+**F11 — DONE 2026-09-15 (8d7fc9a). Interleaved pose gets a pocket BOM with pockets narrower than the
+part.** Landed as the `layer_sheets` archetype plus `Bom.layer_step_mm`: sheets the parts do not nest into are charged per layer, the engine solves layers on that step, and the drawing stacks at it (reviewer's 300/150/1003 input: 420 → 378 parts, fits). SX4 65, Mubea 40, TRW 48 unchanged.
+ SX4 cover: pitch 177 < extent 332 in plane, yet the BOM says
 "5 x 1 pockets, 177 x 833 x 69 mm each". A 177-mm pocket cannot hold a
 332-mm part; it is the comb problem F10 deleted from the browser, now in
 `dunnage._pocket_tray`. When pitch < extent on an in-plane axis the
@@ -501,7 +502,7 @@ Twenty-four stills in `~/Downloads/Pack_Studio_UI_UX_Workflow_Analysis.docx`
 page the gap is not features, it is how little they put on screen and how
 real the picture looks. Four tickets, in the order they pay back:
 
-**F13 — Results page = one 3D picture + a key/value list.** Their result
+**F13 — DONE 2026-09-15 (aa4eb70). Results page = one 3D picture + a key/value list.** Their result
 panel is ~15 rows, label left, value right, nothing else: outer/inner dims,
 fluting, tare, capacity, crush strength, box cost, dunnage cost, num parts,
 vertical clearance, pack density. Ours has stat chips, MEASURED/DERIVED
@@ -524,7 +525,7 @@ edit; frontend shows it as the one info line; nothing else on the screen
 explains anything. Check: the sentence is null for a geometry-limited layout
 and names the number for a weight/height-limited one, over real HTTP.
 
-**F14 — Packed view drawn from the real mesh in cardboard, on white.** Their
+**F14 — DONE 2026-09-15 (115bcd0). Packed view drawn from the real mesh in cardboard, on white.** Their
 viewport shows shaded solid parts sitting in thin brown partitions and
 layer sheets on a white ground; you can count parts per row. Ours shows
 voxel blobs in translucent blue slabs on dark blue. We already have the GLB
@@ -535,7 +536,7 @@ scrubs the stack and a Hide-dunnage toggle. The matplotlib voxel PNGs stay
 for the PDF only. Acceptance: SX4 cover hero shows 5 distinct parts per
 layer and 13 countable layers; TRW/Mubea still correct.
 
-**F15 — Report drawings are orthographic Front / Side / Top, not iso.** Their
+**F15 — DONE 2026-09-15 (343c4e1). Report drawings are orthographic Front / Side / Top, not iso.** Their
 pack report shows the packed box as three flat views with parts as
 silhouettes, then the pallet the same way, then the truck. That is the
 legible version of what F9 is trying to fix in iso. Replace the exploded iso
