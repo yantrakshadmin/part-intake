@@ -65,7 +65,7 @@ import matplotlib
 matplotlib.use("Agg")               # Celery worker, no display. Before pyplot.
 import matplotlib.pyplot as plt     # noqa: E402
 from matplotlib.collections import LineCollection, PolyCollection   # noqa: E402
-from matplotlib.patches import Rectangle                            # noqa: E402
+from matplotlib.patches import Circle, Rectangle                    # noqa: E402
 from matplotlib import font_manager                                # noqa: E402
 from PIL import Image                                               # noqa: E402
 
@@ -1021,6 +1021,31 @@ def _runs(flags: np.ndarray) -> list:
     return list(zip(idx[0::2], idx[1::2]))
 
 
+def _smooth_sil(ax, mask, cell_mm: float, x0: float = 0.0, y0: float = 0.0,
+                *, alpha: float = 1.0, z: float = 2.0) -> None:
+    """One part silhouette: `_place`'s OWN mask, upsampled x4 bilinear and
+    thresholded at 0.5, stroked on that same 0.5 contour.
+
+    The shape is unchanged -- this is a resample of the mask, not a different
+    mask -- but the edge reads as drawn instead of as 12mm pixels. Shared by
+    `ortho_png` and F17's SECTION A-A so the two drawings cannot drift apart
+    in style; `_check_ortho_panels` measures the area this produces.
+    """
+    field = ndimage.zoom(mask.astype(float), SMOOTH, order=1,
+                         grid_mode=True, mode="nearest")
+    fill = field > 0.5
+    rgba = np.zeros(fill.shape[::-1] + (4,))
+    rgba[fill.T] = matplotlib.colors.to_rgba(C_SIL, alpha)
+    ax.imshow(rgba, origin="lower", interpolation="nearest", zorder=z,
+              extent=(x0, x0 + mask.shape[0] * cell_mm,
+                      y0, y0 + mask.shape[1] * cell_mm))
+    sub = cell_mm / SMOOTH
+    ax.contour(x0 + (np.arange(field.shape[0]) + 0.5) * sub,
+               y0 + (np.arange(field.shape[1]) + 0.5) * sub, field.T,
+               levels=[0.5], colors=[C_SIL_EDGE], linewidths=0.6,
+               zorder=z + 0.5, alpha=alpha)
+
+
 def ortho_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
               bom: dunnage.Bom, asset_name: str, count: int,
               cell_mm: float = CELL_MM) -> bytes:
@@ -1054,24 +1079,12 @@ def ortho_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
 
     for ax, (name, drop, h, v) in zip(axes, ORTHO_VIEWS):
         mask = (p.prt > 0).any(axis=drop)           # (horizontal, vertical)
-        # `grid_mode=True` resamples CELLS, not sample points, so the smoothed
-        # field covers exactly the same mm extent as `mask` -- endpoint-aligned
-        # zoom would stretch it by half a cell at each end. `> 0.5` (strict)
-        # keeps a one-cell gap between two parts open: bilinear reads exactly
-        # 0.5 across it.
-        field = ndimage.zoom(mask.astype(float), SMOOTH, order=1,
-                             grid_mode=True, mode="nearest")
-        fill = field > 0.5
-        rgba = np.zeros(fill.shape[::-1] + (4,))
-        rgba[fill.T] = matplotlib.colors.to_rgba(C_SIL)
-        span_h, span_v = mask.shape[0] * cell_mm, mask.shape[1] * cell_mm
-        ax.imshow(rgba, origin="lower", interpolation="nearest", zorder=2,
-                  extent=(0.0, span_h, 0.0, span_v))
-        sub = cell_mm / SMOOTH
-        ax.contour((np.arange(field.shape[0]) + 0.5) * sub,
-                   (np.arange(field.shape[1]) + 0.5) * sub, field.T,
-                   levels=[0.5], colors=[C_SIL_EDGE], linewidths=0.6,
-                   zorder=2.5)
+        # `grid_mode=True` (inside `_smooth_sil`) resamples CELLS, not sample
+        # points, so the smoothed field covers exactly the same mm extent as
+        # `mask` -- endpoint-aligned zoom would stretch it by half a cell at
+        # each end. `> 0.5` (strict) keeps a one-cell gap between two parts
+        # open: bilinear reads exactly 0.5 across it.
+        _smooth_sil(ax, mask, cell_mm)
         for row in p.rows:
             if row.geo is None:
                 continue
@@ -1143,6 +1156,341 @@ def ortho_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     logger.info("ortho %s %s: grid %s, %d parts", asset_name, bom.archetype,
                 p.grid, count)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# F17: the manufacturing sheets -- one dimensioned drawing per BOM element
+# ---------------------------------------------------------------------------
+# "What is the use of this whole process if I am not able to tell the person
+# what insert to get manufactured -- he won't get the dimensions by looking at
+# the animation." (Rahul, 2026-09-15). Everything above this line is a picture
+# of the packed box; this is what a tray supplier quotes and cuts from.
+#
+# The rule that makes it trustworthy is hard rule 9 taken literally: every
+# number printed on a sheet is a `dunnage.Bom` field, an `inner_lbh`, or an
+# origin `_place` already computed -- with exactly two arithmetic results, the
+# wall (pitch - pocket) and the edge margin (the first row origin), both
+# LABELLED as such on the drawing. `_check_sheet_numbers` harvests the drawn
+# text back out of the figure and asserts it.
+SHEET_IN = (11.0, 8.5)           # landscape letter -- what a supplier prints
+
+
+def _mm(v) -> str:
+    return "%g" % round(float(v), 1)
+
+
+def _dim_text(ax, x, y, text, *, rot=0.0) -> None:
+    """A dimension number, tagged `gid="dim"`.
+
+    The tag IS the contract: `_check_sheet_numbers` harvests exactly these
+    texts, off EVERY sheet, and every number in them has to be a field of
+    that element, a layout number or an origin `_place` computed.
+
+    The title block's `size ... mm` line is tagged too -- it is a per-element
+    dimension like any other, and untagged it was a hole in the harvest
+    ("size 999.9 mm" passed). The only untagged numbers left on a sheet are
+    the qty, the part count and the drawing index k/N, none of which is a
+    dimension of anything.
+    """
+    ax.text(x, y, text, fontsize=8, color=C_INK, family=SANS, ha="center",
+            va="center", rotation=rot, gid="dim", zorder=6,
+            bbox=dict(facecolor="#FFFFFF", edgecolor="none", pad=0.8))
+
+
+def _arrow(ax, p0, p1) -> None:
+    ax.annotate("", xy=p1, xytext=p0, zorder=5,
+                arrowprops=dict(arrowstyle="<|-|>", color=C_INK, lw=0.7,
+                                shrinkA=0, shrinkB=0, mutation_scale=6))
+
+
+def _hdim(ax, x0, x1, y, text, *, ext=None) -> None:
+    _arrow(ax, (x0, y), (x1, y))
+    if ext is not None:
+        for x in (x0, x1):
+            ax.plot([x, x], [ext, y], color=C_MUTE, lw=0.4, zorder=4)
+    _dim_text(ax, (x0 + x1) / 2, y, text)
+
+
+def _vdim(ax, y0, y1, x, text, *, ext=None) -> None:
+    _arrow(ax, (x, y0), (x, y1))
+    if ext is not None:
+        for y in (y0, y1):
+            ax.plot([ext, x], [y, y], color=C_MUTE, lw=0.4, zorder=4)
+    _dim_text(ax, x, (y0 + y1) / 2, text, rot=90)
+
+
+def _leader(ax, x, y, tx, ty, text) -> None:
+    """Text off to one side with a leader back to the feature -- for a
+    dimension with no length to put an arrow inside (a zero wall)."""
+    ax.plot([x, tx], [y, ty], color=C_MUTE, lw=0.4, zorder=4)
+    _dim_text(ax, tx, ty, text)
+
+
+def _dax(fig, rect, xlim, ylim, title):
+    ax = fig.add_axes(rect)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    ax.set_aspect("equal")
+    ax.set_axis_off()
+    if title:
+        ax.set_title(title, fontsize=10, color=C_INK, family=SANS,
+                     weight="bold")
+    return ax
+
+
+def _outline(ax, o, s, *, lw=1.2, fc="none", gid=None, z=3) -> None:
+    ax.add_patch(Rectangle(o, s[0], s[1], facecolor=fc, fill=fc != "none",
+                           edgecolor=C_INK, lw=lw, zorder=z, gid=gid))
+
+
+def _tray_pockets(p) -> list:
+    """The tray's pockets in plan, ONE layer, off `_place`'s own voids.
+
+    `_pocket_tray_rows` insets every void by `POCKET_WALL_MM`/2 per side so
+    the wall survives a 12mm raster -- DRAW-ONLY, see the constant. A
+    dimensioned sheet cannot carry that inset: the number beside the pocket
+    is the BOM's `cell_mm`, so the same inset comes straight back out here
+    and the drawn rectangle is the pocket the BOM states, at the position
+    `_place` put it.
+    """
+    row = next((r for r in p.rows
+                if r.name and r.geo is not None and p.el[r.name].matrix), None)
+    if row is None:
+        return []
+    _solids, voids = row.geo()
+    if not voids:
+        return []
+    z0 = min(o[2] for o, _s in voids)
+    w = POCKET_WALL_MM
+    return sorted(((o[0] - w / 2, o[1] - w / 2), (s[0] + w, s[1] + w))
+                  for o, s in voids if abs(o[2] - z0) < 1e-6)
+
+
+def _tray_sheet(fig, p, e, bom, voxels, cell_mm) -> None:
+    """PLAN of the tray with every pocket, plus SECTION A-A through one row."""
+    l, b = float(e.dims_mm[0]), float(e.dims_mm[1])
+    pl, pb, pd = (float(v) for v in e.cell_mm)
+    cols, nrows = e.matrix
+    pockets = _tray_pockets(p)
+    sheet_t = next((float(s.dims_mm[2]) for s in bom.elements
+                    if s.cell_mm is None and s.dims_mm[2] is not None), 0.0)
+
+    # ---- PLAN -------------------------------------------------------------
+    ax = _dax(fig, (0.05, 0.53, 0.90, 0.40),
+              (-0.26 * l, 1.16 * l), (-0.36 * b, 1.20 * b),
+              "PLAN  -  %d x %d pockets" % (cols, nrows))
+    _outline(ax, (0.0, 0.0), (l, b), lw=1.4)
+    for o, s in pockets:
+        _outline(ax, o, s, lw=0.9, gid="pocket")
+    _hdim(ax, 0.0, l, -0.20 * b, _mm(l), ext=0.0)
+    _vdim(ax, 0.0, b, -0.18 * l, _mm(b), ext=0.0)
+    if pockets:
+        (px, py), _s = pockets[0]
+        _hdim(ax, px, px + pl, py + 0.62 * pb, _mm(pl))
+        _vdim(ax, py, py + pb, px + 0.28 * pl, _mm(pb))
+        # Edge margin: the first pocket's own origin. One of the two numbers
+        # on this sheet that is not read straight off a field -- labelled.
+        _hdim(ax, 0.0, px, -0.125 * b, "edge %s" % _mm(px), ext=0.0)
+        _vdim(ax, 0.0, py, -0.11 * l, "edge %s" % _mm(py), ext=0.0)
+        # Pitch: between two adjacent pocket origins, which is the measured
+        # in-plane pitch the count came off.
+        cxs = sorted({round(o[0], 3) for o, _s in pockets})
+        cys = sorted({round(o[1], 3) for o, _s in pockets})
+        walls = []
+        if len(cxs) > 1:
+            _hdim(ax, cxs[0], cxs[1], 1.08 * b, "pitch %s" % _mm(p.pitch[0]),
+                  ext=b)
+            walls.append(("L", cxs[0] + pl, py + 0.5 * pb,
+                          p.pitch[0] - pl))
+        if len(cys) > 1:
+            _vdim(ax, cys[0], cys[1], 1.06 * l, "pitch %s" % _mm(p.pitch[1]),
+                  ext=l)
+            walls.append(("B", px + 0.5 * pl, cys[0] + pb,
+                          p.pitch[1] - pb))
+        # The wall is the other number this sheet computes rather than reads
+        # -- pitch minus pocket, labelled as such, on one leader (there is no
+        # room for an arrow inside a partition). Dimensioned only where there
+        # IS one: at the shipped TRW pitch the pockets meet and the wall is 0
+        # on both axes, and a zero on a manufacturing sheet reads as a
+        # mistake. The pocket and pitch dimensions already say they meet, so
+        # the line simply does not appear.
+        walls = [w for w in walls if round(w[3], 1) > 0]
+        if walls:
+            _leader(ax, walls[0][1], walls[0][2], 0.5 * l, -0.30 * b,
+                    "wall (pitch - pocket)  " + "  ".join(
+                        "%s %s" % (ax_name, _mm(v))
+                        for ax_name, _x, _y, v in walls))
+
+    # ---- SECTION A-A ------------------------------------------------------
+    step = p.pitch[2]
+    ext_h = p.extent[2]
+    top = max(step + sheet_t + ext_h, sheet_t + pd)
+    sx = _dax(fig, (0.05, 0.17, 0.90, 0.33),
+              (-0.26 * l, 1.16 * l), (-0.55 * top, 1.30 * top),
+              "SECTION A-A  -  one pocket row, two layers")
+    _outline(sx, (0.0, 0.0), (l, sheet_t), lw=0.9, fc="#E2E8F0")
+    _outline(sx, (0.0, step), (l, sheet_t), lw=0.9, fc="#E2E8F0")
+    _outline(sx, (0.0, sheet_t), (l, pd), lw=1.2)
+    row_pockets = [(o, s) for o, s in pockets
+                   if abs(o[1] - min(q[1] for q, _ in pockets)) < 1e-6]
+    for o, s in row_pockets:                    # the pockets, cut through
+        _outline(sx, (o[0], sheet_t), (s[0], pd), lw=0.9, fc="#FFFFFF",
+                 gid="pocket-section", z=3.5)
+    # The part in the pocket: `_place`'s own occupancy, flattened along B --
+    # the same `.any(axis)` projection `ortho_png` draws -- stamped at the
+    # part origins `_place` recorded for layer 0 (step 1) and layer 1 (step 3).
+    mask = np.asarray(voxels).any(axis=1)
+    def _front_row(step):
+        got = p.parts_at_step.get(step) or []
+        if not got:
+            return []
+        y0 = min(o[1] for o in got)
+        return sorted(o for o in got if abs(o[1] - y0) < 1e-6)
+    for x, _y, z in _front_row(1):
+        _smooth_sil(sx, mask, cell_mm, x, z, z=4.0)
+    for x, _y, z in _front_row(3):          # the layer above, to show the nest
+        _smooth_sil(sx, mask, cell_mm, x, z, alpha=0.30, z=4.0)
+    _vdim(sx, 0.0, sheet_t, -0.05 * l, "sheet %s" % _mm(sheet_t), ext=0.0)
+    _vdim(sx, sheet_t, sheet_t + pd, -0.15 * l, "depth %s" % _mm(pd), ext=0.0)
+    _vdim(sx, 0.0, step, 1.10 * l, "layer step %s" % _mm(step), ext=l)
+    if bom.nest_depth_mm > 0:
+        z_top = p.parts_at_step[1][0][2] + ext_h
+        _leader(sx, 0.5 * l, z_top, 0.5 * l, -0.40 * top,
+                "part nests %s into the layer above" % _mm(bom.nest_depth_mm))
+
+
+def _bar_sheet(fig, p, e) -> None:
+    """A bar: plan + end view, and where it lands in one layer."""
+    row = next((r for r in p.rows if r.name == e.name), None)
+    solids = row.geo()[0] if row is not None and row.geo is not None else []
+    if not solids:
+        _plain_sheet(fig, e)
+        return
+    length, w, h = (float(v) for v in e.dims_mm)
+    ax = _dax(fig, (0.06, 0.62, 0.52, 0.30),
+              (-0.14 * length, 1.10 * length), (-0.9 * w, 2.4 * w), "PLAN")
+    _outline(ax, (0.0, 0.0), (length, w), lw=1.2)
+    _hdim(ax, 0.0, length, -0.55 * w, _mm(length), ext=0.0)
+    _vdim(ax, 0.0, w, -0.09 * length, _mm(w), ext=0.0)
+    ex = _dax(fig, (0.64, 0.62, 0.30, 0.30),
+              (-0.8 * w, 2.2 * w), (-0.8 * h, 1.9 * h), "END VIEW")
+    _outline(ex, (0.0, 0.0), (w, h), lw=1.2)
+    _hdim(ex, 0.0, w, -0.35 * h, _mm(w), ext=0.0)
+    _vdim(ex, 0.0, h, -0.30 * w, _mm(h), ext=0.0)
+
+    inner_l, inner_b = p.inner[0], p.inner[1]
+    z0 = min(o[2] for o, _s in solids)
+    layer = sorted((o, s) for o, s in solids if abs(o[2] - z0) < 1e-6)
+    lx = _dax(fig, (0.06, 0.19, 0.88, 0.30),
+              (-0.14 * inner_l, 1.10 * inner_l),
+              (-0.62 * inner_b, 1.24 * inner_b),
+              "LAYER PLAN  -  %d per layer boundary, from the inner edge"
+              % len(layer))
+    _outline(lx, (0.0, 0.0), (inner_l, inner_b), lw=1.4)
+    for i, (o, s) in enumerate(layer):
+        _outline(lx, (o[0], o[1]), (s[0], s[1]), lw=1.0, fc="#FDE68A")
+        _hdim(lx, 0.0, o[0], -(0.10 + 0.13 * i) * inner_b, _mm(o[0]), ext=0.0)
+    _hdim(lx, 0.0, inner_l, 1.14 * inner_b, "inner %s" % _mm(inner_l), ext=inner_b)
+    _vdim(lx, 0.0, inner_b, 1.04 * inner_l, "inner %s" % _mm(inner_b), ext=inner_l)
+
+
+def _rod_sheet(fig, e) -> None:
+    """Round stock: d x L, side view and end view."""
+    d, length = (float(v) for v in e.dims_mm)
+    ax = _dax(fig, (0.06, 0.40, 0.70, 0.45),
+              (-0.10 * length, 1.10 * length), (-0.16 * length, 0.16 * length),
+              "SIDE VIEW")
+    _outline(ax, (0.0, -d / 2), (length, d), lw=1.2, fc="#E2E8F0")
+    _hdim(ax, 0.0, length, -0.07 * length, _mm(length), ext=-d / 2)
+    _leader(ax, length / 2, d / 2, length / 2, 0.08 * length, "d%s" % _mm(d))
+    ex = _dax(fig, (0.80, 0.40, 0.16, 0.45), (-1.4 * d, 1.4 * d),
+              (-1.4 * d, 1.4 * d), "END VIEW")
+    ex.add_patch(Circle((0.0, 0.0), d / 2, facecolor="#E2E8F0",
+                        edgecolor=C_INK, lw=1.2, zorder=3))
+    _dim_text(ex, 0.0, -1.0 * d, "d%s" % _mm(d))
+
+
+def _plain_sheet(fig, e) -> None:
+    """A flat sheet: plan outline with L and B, and a thickness callout."""
+    dims = [None if v is None else float(v) for v in e.dims_mm]
+    if len(dims) < 2 or dims[0] is None or dims[1] is None:
+        fig.text(0.5, 0.55, "size not derivable from the lattice -- needs deck",
+                 fontsize=13, color=C_MUTE, ha="center", family=SANS)
+        return
+    l, b = dims[0], dims[1]
+    ax = _dax(fig, (0.06, 0.22, 0.88, 0.68),
+              (-0.22 * l, 1.14 * l), (-0.26 * b, 1.12 * b), "PLAN")
+    _outline(ax, (0.0, 0.0), (l, b), lw=1.4, fc="#F1F5F9")
+    _hdim(ax, 0.0, l, -0.14 * b, _mm(l), ext=0.0)
+    _vdim(ax, 0.0, b, -0.12 * l, _mm(b), ext=0.0)
+    if len(dims) > 2 and dims[2] is not None:
+        _leader(ax, 0.82 * l, 0.5 * b, 1.06 * l, 0.80 * b,
+                "thickness %s" % _mm(dims[2]))
+
+
+def _title_block(fig, e, asset_name: str, count: int, k: int, n: int) -> None:
+    fig.add_artist(Rectangle((0.04, 0.035), 0.92, 0.115,
+                             transform=fig.transFigure, fill=False,
+                             edgecolor=C_INK, lw=1.0, zorder=5))
+    fig.add_artist(plt.Line2D([0.62, 0.62], [0.035, 0.15], color=C_INK,
+                              lw=0.8, transform=fig.transFigure, zorder=5))
+    fig.text(0.06, 0.123, e.name, fontsize=12, weight="bold", color=C_INK,
+             family=SANS, va="center")
+    fig.text(0.06, 0.092, e.spec or "spec: needs deck", fontsize=9,
+             color=C_MUTE, family=SANS, va="center")
+    fig.text(0.06, 0.062, "size %s mm" % (e.size or "not derivable"),
+             fontsize=9, color=C_INK, family=SANS, va="center", gid="dim")
+    fig.text(0.64, 0.123, "qty %s per box"
+             % (e.qty if e.qty is not None else "?"),
+             fontsize=11, weight="bold", color=C_INK, family=SANS, va="center")
+    fig.text(0.64, 0.092, "%s  -  %d parts per box" % (asset_name, count),
+             fontsize=9, color=C_MUTE, family=SANS, va="center")
+    fig.text(0.64, 0.062, "all dimensions mm      drawing %d/%d" % (k, n),
+             fontsize=9, color=C_INK, family=SANS, va="center")
+
+
+def _sheet_figs(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
+                bom: dunnage.Bom, asset_name: str, count: int,
+                cell_mm: float = CELL_MM):
+    """Yield (element, matplotlib figure) per BOM element, in `bom.elements`
+    order. `insert_sheets_png` is this, saved; the self-check is this, with
+    the drawn text and the drawn pockets read back off the figure."""
+    p = _place(voxels=voxels, extent_lbh=extent_lbh, pitch_lbh=pitch_lbh,
+               grid=grid, inner_lbh=inner_lbh, bom=bom, count=count,
+               cell_mm=cell_mm)
+    n = len(bom.elements)
+    for k, e in enumerate(bom.elements, start=1):
+        fig = plt.figure(figsize=SHEET_IN, dpi=110, facecolor="#FFFFFF")
+        if e.matrix and e.cell_mm:
+            _tray_sheet(fig, p, e, bom, voxels, cell_mm)
+        elif "d" in e.labels:
+            _rod_sheet(fig, e)
+        elif "Bar" in e.name:
+            _bar_sheet(fig, p, e)
+        else:
+            _plain_sheet(fig, e)
+        _title_block(fig, e, asset_name, count, k, n)
+        yield e, fig
+
+
+def insert_sheets_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid,
+                      inner_lbh, bom: dunnage.Bom, asset_name: str,
+                      count: int, cell_mm: float = CELL_MM) -> list:
+    """One dimensioned manufacturing sheet per BOM element, as PNG bytes, in
+    `bom.elements` order -- what the tray supplier quotes and cuts from."""
+    out = []
+    for _e, fig in _sheet_figs(voxels=voxels, extent_lbh=extent_lbh,
+                               pitch_lbh=pitch_lbh, grid=grid,
+                               inner_lbh=inner_lbh, bom=bom,
+                               asset_name=asset_name, count=count,
+                               cell_mm=cell_mm):
+        buf = BytesIO()
+        fig.savefig(buf, format="png", facecolor="#FFFFFF")
+        plt.close(fig)
+        out.append(buf.getvalue())
+    logger.info("insert sheets %s %s: %d elements", asset_name, bom.archetype,
+                len(out))
+    return out
 
 
 def _dun_caption(dun_at_step: dict, step: int, rows: list, el: dict) -> str:
@@ -1804,6 +2152,162 @@ def _check_layer_step_is_drawn() -> None:
              bom.layer_step_mm - pitch[2], grid[2], top))
 
 
+def _sheets_for(case):
+    """(bom, [(element, figure)]) for one self-check case. One expression, so
+    a check cannot render a different drawing from the one shipped."""
+    _ref, asset, extent, pitch, grid, inner, count, kind = case
+    bom = dunnage.bom(extent, pitch, grid, inner)
+    got = list(_sheet_figs(voxels=_demo_voxels(extent, CELL_MM, kind),
+                           extent_lbh=extent, pitch_lbh=pitch, grid=grid,
+                           inner_lbh=inner, bom=bom, asset_name=asset,
+                           count=count))
+    return bom, got
+
+
+def _dim_strings(fig) -> list:
+    """Every dimension text on a sheet -- `gid="dim"`, so the title block's
+    part count and drawing index are out of scope."""
+    import matplotlib.text as mtext
+    return [t.get_text() for t in fig.findobj(mtext.Text)
+            if t.get_gid() == "dim"]
+
+
+def _pocket_patches(fig) -> list:
+    return [r for r in fig.findobj(Rectangle)
+            if str(r.get_gid() or "").startswith("pocket")]
+
+
+def _sheet_allowed(bom, e, p, inner, pitch) -> set:
+    """Every number the sheet for element `e` is ALLOWED to print.
+
+    Its own `dims_mm`, `cell_mm` and `qty`; the layout numbers a drawing of it
+    legitimately carries (the asset inner it sits in, the lattice pitch, the
+    vertical nest depth and layer step); the origins `_place` computed for
+    THIS element -- and, on a tray, the two results the sheet computes and
+    labels as such: the wall (pitch - pocket) and the edge margin (which is
+    the first pocket's own origin, so already in the origin set).
+    """
+    vals = {float(v) for v in inner} | {float(v) for v in pitch}
+    vals |= {float(bom.nest_depth_mm), float(bom.layer_step_mm)}
+    vals |= {float(v) for v in e.dims_mm if v is not None}
+    vals |= {float(v) for v in (e.cell_mm or ())}
+    if e.qty is not None:
+        vals.add(float(e.qty))
+    row = next((r for r in p.rows if r.name == e.name), None)
+    if row is not None and row.geo is not None:
+        solids, _voids = row.geo()
+        vals |= {round(float(o[a]), 1) for o, _s in solids for a in (0, 1, 2)}
+    if e.matrix and e.cell_mm:
+        vals |= {round(float(o[a]), 1) for o, _s in _tray_pockets(p)
+                 for a in (0, 1)}
+        vals |= {float(pitch[a]) - float(e.cell_mm[a]) for a in (0, 1)}
+        # SECTION A-A has to show what the tray sits ON, and the sheet
+        # thickness belongs to the other element.
+        vals |= {float(x.dims_mm[2]) for x in bom.elements
+                 if x.cell_mm is None and x.dims_mm[2] is not None}
+    return vals
+
+
+def _check_sheet_numbers(case) -> None:
+    """F17, the whole point: a supplier sheet may print no number we did not
+    measure -- on EVERY sheet, not just the tray.
+
+    Harvested back OUT of the figure, exactly like `_check_spec_column` does
+    for the exploded view. A number formatted from a DRAW-ONLY constant
+    (`POCKET_WALL_MM` is 36mm and is inset into every drawn void), or a
+    coordinate typed into a builder instead of read off `_place`, reads as
+    entirely plausible on the page. Scoping this to the tray left exactly
+    that hole on the bar and rod sheets.
+
+    The pocket count rides along: a tray draws `matrix[0] x matrix[1]`
+    pockets and nothing else draws any.
+    """
+    import re
+
+    _ref, _asset, extent, pitch, grid, inner, count, kind = case
+    bom, got = _sheets_for(case)
+    try:
+        assert len(got) == len(bom.elements), (len(got), len(bom.elements))
+        p = _place(voxels=_demo_voxels(extent, CELL_MM, kind),
+                   extent_lbh=extent, pitch_lbh=pitch, grid=grid,
+                   inner_lbh=inner, bom=bom, count=count, cell_mm=CELL_MM)
+        seen = 0
+        pockets = 0
+        for e, fig in got:
+            allowed = _sheet_allowed(bom, e, p, inner, pitch)
+            for t in _dim_strings(fig):
+                for v in (float(x) for x in re.findall(r"\d+(?:\.\d+)?", t)):
+                    seen += 1
+                    assert any(abs(v - a) <= 0.05 for a in allowed), \
+                        "the %r sheet prints %r, and %g is no dimension of " \
+                        "that element, no inner/pitch/nest/step, and no " \
+                        "origin _place computed" % (e.name, t, v)
+            plan = [r for r in _pocket_patches(fig)
+                    if r.get_gid() == "pocket"]
+            want = e.matrix[0] * e.matrix[1] if e.matrix else 0
+            assert len(plan) == want, \
+                "the %r sheet draws %d pockets, expected %d" \
+                % (e.name, len(plan), want)
+            pockets += len(plan)
+        assert seen >= 3 * len(got), seen    # every sheet states its own size
+    finally:
+        for _e, f in got:
+            plt.close(f)
+    print("PASS  %-13s %d sheets, %d pockets, %d dimension numbers, all off "
+          "the BOM / inner / an origin" % (bom.archetype, len(got), pockets,
+                                           seen))
+
+
+def _check_layer_sheets_draw_no_pocket(case) -> None:
+    """F11's third archetype has no tray, so no sheet may show a pocket --
+    and there is still one drawing per BOM element."""
+    bom, got = _sheets_for(case)
+    try:
+        assert bom.archetype == "layer_sheets", bom.archetype
+        assert len(got) == len(bom.elements), (len(got), len(bom.elements))
+        drawn = {e.name: len(_pocket_patches(f)) for e, f in got}
+        assert not any(drawn.values()), \
+            "a layer-sheet drawing shows pockets: %s" % drawn
+    finally:
+        for _e, f in got:
+            plt.close(f)
+    print("PASS  layer_sheets: %d sheets, %d elements, no pockets drawn"
+          % (len(got), len(bom.elements)))
+
+
+def _check_rod_sheet(case) -> None:
+    """Mubea: one PNG per element, and the rod's own d x L reaches the page."""
+    _ref, asset, extent, pitch, grid, inner, count, kind = case
+    bom = dunnage.bom(extent, pitch, grid, inner)
+    pngs = insert_sheets_png(voxels=_demo_voxels(extent, CELL_MM, kind),
+                             extent_lbh=extent, pitch_lbh=pitch, grid=grid,
+                             inner_lbh=inner, bom=bom, asset_name=asset,
+                             count=count)
+    assert len(pngs) == len(bom.elements), (len(pngs), len(bom.elements))
+    assert all(Image.open(BytesIO(b)).format == "PNG" for b in pngs)
+    import re
+
+    _bom, got = _sheets_for(case)
+    try:
+        rod = next(e for e in bom.elements if "d" in e.labels)
+        fig = next(f for e, f in got if e.name == rod.name)
+        # Same harvest as `_check_sheet_numbers`, asked the other way round:
+        # not "is every number allowed" but "did the two numbers that ARE the
+        # rod actually reach the page". A substring test on the raw strings
+        # passed while a second copy of the label carried it.
+        drawn = {float(x) for t in _dim_strings(fig)
+                 for x in re.findall(r"\d+(?:\.\d+)?", t)}
+        missing = [v for v in rod.dims_mm if not any(abs(v - d) <= 0.05
+                                                     for d in drawn)]
+        assert not missing, "the rod sheet never prints %s (it prints %s)" \
+            % (missing, sorted(drawn))
+    finally:
+        for _e, f in got:
+            plt.close(f)
+    print("PASS  bar_and_rod: %d sheets for %d elements, rod sheet carries "
+          "d%g and %g" % (len(pngs), len(bom.elements), *rod.dims_mm))
+
+
 def _check_ortho_panels(outdir) -> None:
     """The orthographic report drawing must actually SEPARATE parts (F15).
 
@@ -1968,6 +2472,16 @@ def _selfcheck(outdir) -> int:
             pitch_lbh=pitch, grid=grid, inner_lbh=inner, bom=bom,
             asset_name=asset, count=count))
         print("        ortho  ->  %s" % opath)
+        safe = ref.replace("/", "_").replace(" ", "_")
+        for k, blob in enumerate(insert_sheets_png(
+                voxels=_demo_voxels(extent, CELL_MM, kind), extent_lbh=extent,
+                pitch_lbh=pitch, grid=grid, inner_lbh=inner, bom=bom,
+                asset_name=asset, count=count), start=1):
+            (outdir / ("insert_%s_%s_%d.png"
+                       % (bom.archetype, safe, k))).write_bytes(blob)
+        print("        %d insert sheets  ->  %s"
+              % (len(bom.elements), outdir / ("insert_%s_%s_*.png"
+                                              % (bom.archetype, safe))))
         for e in bom.elements:
             print("        %-46s qty %-5s %s"
                   % (e.name, e.qty,
@@ -2081,6 +2595,11 @@ def _selfcheck(outdir) -> int:
     _check_undrawn_warns(cases[0], catch)
     assert not catch.msgs, catch.msgs
     _check_frames_false(cases[0])
+    _check_sheet_numbers(cases[1])              # F17: the TRW pocket tray
+    _check_sheet_numbers(cases[0])              # ...the Mubea bars and rod
+    _check_sheet_numbers(cases[-1])             # ...and the plain sheets
+    _check_layer_sheets_draw_no_pocket(cases[-1])   # "interleaved in plan"
+    _check_rod_sheet(cases[0])                  # F17: the Mubea bar and rod
     _check_ortho_panels(outdir)
     _check_layer_step_is_drawn()
     logger.removeHandler(catch)

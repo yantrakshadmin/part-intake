@@ -27,6 +27,9 @@ os.environ.setdefault("INTAKE_REDIS_URL", "redis://localhost:6379/0")
 
 import copy  # noqa: E402
 import dataclasses  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+import matplotlib.pyplot as plt  # noqa: E402
 
 from fastapi import HTTPException  # noqa: E402
 
@@ -34,7 +37,7 @@ from app import main as app_main  # noqa: E402
 from app.geometry import extract_part  # noqa: E402
 from app.models import (ExtractionJob, Packaging, PartProfile, Project,  # noqa: E402
                         SolveJob)
-from app.proposal import build_pdf  # noqa: E402
+from app.proposal import _insert_sheet_pages, build_pdf  # noqa: E402
 from app.runs import _best_object, _run_out, proposal_run_for  # noqa: E402
 from app.schemas import PartProfileIn, ProjectIn, ProjectPatch, SolveIn  # noqa: E402
 from app.worker import render_run, run_proposal, run_render, run_solve  # noqa: E402
@@ -191,6 +194,40 @@ def main() -> int:
                            _TMP / "verify.pdf")
         check(result["pages"] >= 6,
               "build_pdf's own page count is >= 6", f": {result['pages']}")
+
+        # --- F17: one page per insert manufacturing sheet -------------------
+        # The BOM page alone tells a supplier nothing to cut from. Counted
+        # against the SAME PDF with `insert_urls` stripped, so this cannot
+        # pass on a constant: the difference has to be exactly the number of
+        # sheets the render produced.
+        best = _best_object(run_row.result_json or {}) or {}
+        sheets = best.get("insert_urls") or []
+        stripped = copy.deepcopy(run_row.result_json or {})
+        for layout in stripped.get("catalogue") or []:
+            layout["insert_urls"] = []
+        if stripped.get("custom"):
+            stripped["custom"]["insert_urls"] = []
+        base = build_pdf(project_row, part_row,
+                         SimpleNamespace(result_json=stripped), run_out,
+                         _TMP / "no_sheets.pdf")
+        check(len(sheets) > 0, "the best option carries insert drawings",
+              f": {len(sheets)}")
+        check(result["pages"] == base["pages"] + len(sheets),
+              "PDF gains exactly one page per insert sheet",
+              f": {result['pages']} vs {base['pages']} + {len(sheets)}")
+
+        # ...and each added page names the element it draws. The header is
+        # the first text `_header` puts on the page.
+        figs = _insert_sheet_pages(best, run_out)
+        names = [e.get("name") for e in
+                 (best.get("dunnage") or {}).get("elements") or []]
+        headers = [f.axes[0].texts[0].get_text() for f in figs]
+        for fig in figs:
+            plt.close(fig)
+        check(len(headers) == len(sheets)
+              and all(n in h for n, h in zip(names, headers)),
+              "every insert page header names its BOM element",
+              f": {headers}")
 
         numbers = result["numbers"]
         r = run_row.result_json or {}

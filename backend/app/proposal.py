@@ -330,6 +330,33 @@ def _bom_page(best_obj: dict | None, run_out: RunOut):
     return fig
 
 
+def _insert_sheet_pages(best_obj: dict | None, run_out: RunOut) -> list:
+    """F17: one page per insert manufacturing sheet, straight off the URLs the
+    worker rendered -- never a second drawing call (hard rule 9).
+
+    `insert_urls` is one PNG per BOM element in `dunnage.elements` order, so
+    the element name in each header comes off the same list index.
+    """
+    urls = (best_obj or {}).get("insert_urls") or []
+    names = [e.get("name", "") for e in
+             ((best_obj or {}).get("dunnage") or {}).get("elements") or []]
+    figs = []
+    for k, url in enumerate(urls, start=1):
+        png = _local_path(url)
+        if png is None:
+            continue
+        fig, ax = _page()
+        name = names[k - 1] if k <= len(names) else ""
+        _header(ax, f"Insert drawing {k}/{len(urls)} - {name}",
+                run_out.best_asset or "")
+        iax = fig.add_axes((0.06, 0.06, 0.88, 0.76))
+        iax.imshow(Image.open(png))
+        iax.axis("off")
+        _footer(ax, f"Run {run_out.solve_job_id}")
+        figs.append(fig)
+    return figs
+
+
 def _exploded_page(best_obj: dict | None, run_out: RunOut):
     fig, ax = _page()
     _header(ax, "Packed box - Front / Side / Top", run_out.best_asset or "")
@@ -574,6 +601,7 @@ def build_pdf(project: Project, part: PartProfile, run: SolveJob,
         _part_pose_page(part, run_out, best_obj),
         _comparison_page(run, run_out),
         _bom_page(best_obj, run_out),
+        *_insert_sheet_pages(best_obj, run_out),
         _exploded_page(best_obj, run_out),
         _sequence_page(best_obj, run_out),
         _truck_page(run, run_out, outer, db),

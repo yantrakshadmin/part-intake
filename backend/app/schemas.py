@@ -287,6 +287,12 @@ class LayoutOut(BaseModel):
     # what the proposal PDF embeds. Same file/failure discipline as
     # drawing_url -- declare it here or pydantic drops it silently.
     ortho_url: Optional[str] = None
+    # F17: one dimensioned manufacturing sheet per insert BOM element, in
+    # `dunnage.elements` order -- what the tray supplier quotes and cuts
+    # from. [] when the sheets did not render (the reason lands in
+    # `render_error`); declare it here or pydantic drops it silently and the
+    # Insert tab is back to a picture with no dimensions on it.
+    insert_urls: list[str] = []
     # The packing-sequence GIF, same file/failure discipline as drawing_url.
     gif_url: Optional[str] = None
     # The complete, fully packed box -- the GIF's own final frame, so it can
@@ -323,6 +329,7 @@ class BoxDesignOut(BaseModel):
     dunnage: Optional[DunnageOut] = None
     drawing_url: Optional[str] = None
     ortho_url: Optional[str] = None     # as LayoutOut.ortho_url (F15)
+    insert_urls: list[str] = []         # as LayoutOut.insert_urls (F17)
     gif_url: Optional[str] = None
     packed_url: Optional[str] = None
     # As LayoutOut.sequence -- declared or pydantic drops it (hard rule 9).
