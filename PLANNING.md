@@ -544,8 +544,8 @@ in the proposal PDF with three orthographic views from the placed
 silhouettes (`silhouette_runs` already carries the plan view; the side views
 are the pitch lattice × part extent). F9 closes into this.
 
-**F17 — The insert manufacturing drawing is the deliverable, and we do not
-have one.** Rahul, 2026-09-15, on the Insert tab: "What is the use of this
+**F17 — DONE 2026-09-16 (f2a5660 backend, 179d23a ui). The insert manufacturing drawing is the deliverable, and we did not
+have one.** Landed as `insert_sheets_png`: one dimensioned sheet per BOM element (plan, section, title block), on the Insert BOM rows and in the PDF. Open domain question for Rahul: interleaved poses (SX4 cover, 8 of 25 swept parts) ship separator sheets only — whether they need a slotted comb is E1. Rahul, 2026-09-15, on the Insert tab: "What is the use of this
 whole process if I am not able to tell the person what insert to get
 manufactured — he won't get the dimensions by looking at the animation."
 Correct. The Insert tab shows a BOM table (element, size, qty) and the packed

@@ -2566,3 +2566,53 @@ their "recommendation card + binding constraint in plain words" matches
 Rahul's taste memory exactly.
 
 Not pushed (Rahul pushes on request; f3b018c onward unpushed).
+
+## 2026-09-15/16 — F11/F13/F14/F15/F17 landed: legible pictures, no-prose results page, the insert drawing
+
+Rahul's verdict on the packed/exploded voxel PNGs ("looks like shit … I am
+not able to understand anything") and on the Insert tab ("what is the use of
+this whole process if I am not able to tell the person what insert to get
+manufactured") set the day. Landed, in order:
+
+- 115bcd0 ui: F14 — packed box from the real mesh, cardboard on white,
+  layer slider, hide-dunnage, Play-from-rest fix.
+- 343c4e1 drawing: F15 — Front/Side/Top silhouettes for the report. Snap of
+  dunnage rectangles to the cell lattice was the root fix for the stray line
+  (four coincident edges per layer); review added a clamp to the box.
+- aa4eb70 ui: F13 — results page = 3D view + key/value list from
+  `resultRows()` + cards with three numbers + plain BOM table. Every chip,
+  badge, caption, tab and sentence deleted (two rounds; round two removed
+  the 3D step overlay, the misleading `warnings[0]` line, the BOM caveat and
+  the parameter-panel helper text). Screens at scratchpad `f13/*_r2.png`.
+- d5c9115 ui: render_error shown whenever set.
+- 8d7fc9a backend: F11 — `layer_sheets` archetype for interleaved poses,
+  invariant `_assert_cells_hold_the_part` inside `bom()`. Review (three
+  rounds) found the real defect: sheets the parts do not nest into cost
+  height nothing charged, so a 420-part layout shipped where 378 fit. Now
+  `Bom.layer_step_mm` is what the engine solves layers on, the BOM charges
+  and the drawing stacks at (one field, three consumers). Full 25-file
+  sweep: byte-identical winners, 8 parts now `layer_sheets`, 40/48 hold.
+- 940a44b docs. f2a5660 drawing + 179d23a ui: F17 — `insert_sheets_png`,
+  one sheet per BOM element (plan with pockets at `_place`'s positions,
+  section with depth/step/nest, title block), on the BOM rows and in the
+  PDF (+2 pages for TRW). Self-check harvests every dimension text on every
+  sheet and refuses any number not from the BOM / inner / an origin.
+
+Ground truth 40/PLS12801, 48/PLS1280, Tata PASS on every run. Frontend
+build + 6 lib checks pass.
+
+Tickets added: F11a (bom() raising fails the whole solve — should degrade
+the BOM), F11b (no noise floor on the interleave test; the implementer
+argues against one), F13a (backend emits the per-layout binding-constraint
+sentence). Open for Rahul: E1 (do interleaved parts need a comb, or are
+sheets enough?), E2 (cuboid baseline clearance), PackAssistant trial, push.
+
+Process: two agents at a time held; every ticket got a scoped review and
+every confirmed finding a bite proof before landing. One agent stalled on
+its last item (harness watchdog) — the item was already on disk and passing,
+PM proved the bite and committed. One agent created `scratchpad/` inside the
+repo (353 MB incl. a dev.db with an NDA upload) — moved out to the session
+scratchpad before commit; give agents the absolute scratchpad path and say
+"never inside the repo".
+
+Not pushed (Rahul pushes on request; f3b018c onward unpushed, 15 commits).
