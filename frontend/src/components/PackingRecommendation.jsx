@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { resultRows } from '../lib/packing.js'
 import { runSolve, floorPlanFromTruck, errorDetail } from '../lib/solve.js'
-import { fmtQty, fmtSize } from '../lib/bom.js'
+import { fmtQty, fmtSize, insertUrlFor } from '../lib/bom.js'
 import { downloadFigure } from '../lib/download.js'
 import TruckLoadIso from './TruckLoadIso.jsx'
 import PackAnimation from './PackAnimation.jsx'
@@ -560,7 +560,7 @@ function ResultView({ result, part, packaging, vehicles, params, selectedAsset, 
           </div>
 
           {/* The generated insert BOM — a plain section, not a tab (F13). */}
-          {selected?.dunnage && <DunnageBom dunnage={selected.dunnage} />}
+          {selected?.dunnage && <DunnageBom dunnage={selected.dunnage} insertUrls={selected.insert_urls} />}
         </>
       )}
     </>
@@ -795,9 +795,18 @@ function TruckSection({ truck, vehicles, dropdownVehicleId, box }) {
  * its unknown-fields sub-note / the caveat paragraph are the proposal
  * PDF's own reading, not this screen's — Rahul does not want badges or
  * that sub-note back on this screen.
+ *
+ * F17: `insertUrls[i]` is the dimensioned manufacturing sheet for
+ * `dunnage.elements[i]` (same index, paired by `insertUrlFor` — CLAUDE.md
+ * hard rule 9, never filtered/re-derived). A thumbnail column only appears
+ * once at least one sheet exists; a row with no sheet at its index gets an
+ * empty cell, not a placeholder. Clicking a thumbnail opens the same
+ * ExplodeModal/ImageStage everything else on this screen zooms into.
  */
-function DunnageBom({ dunnage }) {
+function DunnageBom({ dunnage, insertUrls }) {
   if (!dunnage) return null
+  const hasThumbs = insertUrls && insertUrls.length > 0
+  const [zoomViews, setZoomViews] = useState(null)
 
   return (
     <div className="detail-block dunnage-block">
@@ -806,21 +815,39 @@ function DunnageBom({ dunnage }) {
       <table className="parts-table bom-table">
         <thead>
           <tr>
+            {hasThumbs && <th />}
             <th>Element</th><th className="num">Size (mm)</th>
             <th className="num">Qty</th><th>Spec</th>
           </tr>
         </thead>
         <tbody>
-          {dunnage.elements.map((el, i) => (
-            <tr key={i}>
-              <td>{el.name}</td>
-              <td className="num mono">{fmtSize(el.size)}</td>
-              <td className="num mono">{fmtQty(el.qty)}</td>
-              <td className="mono">{el.spec ?? '—'}</td>
-            </tr>
-          ))}
+          {dunnage.elements.map((el, i) => {
+            const url = insertUrlFor(insertUrls, i)
+            return (
+              <tr key={i}>
+                {hasThumbs && (
+                  <td>
+                    {url && (
+                      <button type="button" className="bom-thumb"
+                        onClick={() => setZoomViews([{ key: 'insert', label: el.name, url }])}>
+                        <img src={url} alt={el.name} />
+                      </button>
+                    )}
+                  </td>
+                )}
+                <td>{el.name}</td>
+                <td className="num mono">{fmtSize(el.size)}</td>
+                <td className="num mono">{fmtQty(el.qty)}</td>
+                <td className="mono">{el.spec ?? '—'}</td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
+
+      {zoomViews && (
+        <ExplodeModal views={zoomViews} initial={zoomViews[0].key} onClose={() => setZoomViews(null)} />
+      )}
     </div>
   )
 }

@@ -31,6 +31,15 @@ export function unknownNote(unknown) {
   return unknown && unknown.length ? `needs deck: ${unknown.join(', ')}` : null
 }
 
+/** F17: `layout.insert_urls[i]` is the dimensioned manufacturing sheet for
+ *  `dunnage.elements[i]` — same index, no other correspondence (CLAUDE.md
+ *  hard rule 9: pair by index only, never filter/re-derive). Undefined/short
+ *  arrays are the ordinary case (render not requested yet, or it failed for
+ *  just that element) and must read as "no thumbnail", never an error. */
+export function insertUrlFor(insertUrls, i) {
+  return insertUrls?.[i] || null
+}
+
 /** `drawing_url` is optional: the worker renders the exploded PNG at solve
  *  time and a render failure deliberately leaves the field absent rather than
  *  failing the solve. So the Explode button must never appear on a stub,

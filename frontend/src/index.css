@@ -988,6 +988,21 @@ body {
 .height-budget.fail { background: #fef2f2; border-color: #fecaca; }
 .height-budget.fail strong { color: var(--red); }
 
+/* F17: manufacturing-sheet thumbnail, first cell of a BOM row when the
+   backend rendered one — zooms into the same modal as everything else. */
+.bom-thumb {
+  display: block;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+  overflow: hidden;
+  width: 96px;
+}
+.bom-thumb img { display: block; width: 100%; height: auto; }
+.bom-thumb:hover { border-color: var(--accent-border); }
+
 .bom-table td, .bom-table th { vertical-align: top; }
 /* F13: at the 400px stack floor the BOM table's own columns are wider than
    the viewport — scope the scroll to the table only (display:block lets
