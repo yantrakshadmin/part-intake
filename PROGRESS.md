@@ -2615,4 +2615,4 @@ repo (353 MB incl. a dev.db with an NDA upload) — moved out to the session
 scratchpad before commit; give agents the absolute scratchpad path and say
 "never inside the repo".
 
-Not pushed (Rahul pushes on request; f3b018c onward unpushed, 15 commits).
+Not pushed (Rahul pushes on request; 4982a9f deployed; 10 commits unpushed).
