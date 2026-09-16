@@ -2616,3 +2616,80 @@ scratchpad before commit; give agents the absolute scratchpad path and say
 "never inside the repo".
 
 Not pushed (Rahul pushes on request; 4982a9f deployed; 10 commits unpushed).
+
+## 2026-09-16 — Three-model packaging debate (Fable / Opus / Gemini), paused before the second sign round
+
+Rahul's ask: archetype 3 (`layer_sheets`) counts parts held by nothing; die-cut
+foam is often too expensive; retention against transit damage must be part of
+the maths. Rather than design it ourselves, a three-agent critique debate
+(Fable 5.1, Opus 5, Gemini 3.1 Pro) ran on a stdlib harness, unlimited
+rounds, PM injecting engine facts as non-debater notes. Steered from material
+pricing back to packaging maths after round 2 on Rahul's instruction.
+
+**Durable copy (session scratchpad will not survive):**
+`~/.claude/projects/-Users-rahulsharma-PycharmProjects-part-intake/debate-2026-09-16/`
+— `debate/` (harness, brief, state.json, transcript.md 213 KB, verdict.md,
+PM notes, `resign.py`, `pm_addendum.md`) and `diag/` (diagonal-collision
+spike: script, report.md, results). Local only; diag names customer CAD.
+
+**Status: converged in round 5, chair Gemini drafted, both signatories
+DISSENTED on drafting defects, not on the design.** Fable: cost column mixes
+per-box and per-element (Row 4 comb is ₹9.7k/box, not ₹350); PU40 slab cannot
+deliver 706 N (needs PU60–80 or the tag must say UNACHIEVABLE), PU compression
+set caps slab life ~20 trips, slab height is 33 mm not 25; HDPE strips cannot
+be welded to a PP base; return-freight footprint count unstated (16 vs 24);
+no per-row outcome table. Opus: friction freeze must be judged at the top
+layer of the stack (min over layers), non-folding inserts raise `h_fold` in
+the return-freight divisor (~₹180/box/trip, not a ₹20 strap), tooled elements
+must be sized at the pessimistic end of the pitch band.
+
+**What the debate settled (all three signed these):**
+- Retention family ordered by DOF removed per mm of stack-up and return cube,
+  not ₹/kit: perimeter pads → preload slab + PP face plate → soft interleaf →
+  follower + 2 straps + hard stop → interrupted-strip comb → (peg board, foot
+  pockets, thermoform outside the six rows). Zero die-cut, zero tooling on
+  all six brief rows.
+- `dunnage.sheet_step_mm = max(0, sheet − nest_depth)` is a CONFIRMED engine
+  defect: a rigid sheet cannot hide in a vertical nest. Flat shell 65 → 60
+  (55 with 5 mm EPE for Class A). Ticket regardless of verdict.
+- Loadability: Δ_proj = p_sil − p_vol; 0 → straight descent, pre-load
+  elements legal; >0 → oblique sweep → tilt sweep → REFUSE "no load path".
+- Retention computed, not assumed: 8-direction 1 g drift relaxation with
+  friction freeze, free-stand test (r_min ≥ 20 mm, tip ≥ 15°), `compact()`
+  displacement-controlled jam test for the follower.
+- Gain-noise gate (refuse gains inside the ±4 mm voxel band: block part
+  150 vs 144 refused), weight gate, missing-input dual branch + `RANKING
+  UNRELIABLE` banner, catalogue needs fold_type / folded_void_h / lid_void.
+- Row verdicts: shell flat 60/55, stamped bracket 60, flat bracket 48 (comb),
+  slender bracket 840–900 band (follower or comb per `compact()`), shell on
+  edge and block part refused.
+
+**Diagonal-neighbour spike (geometry agent, read-only, 24 files):** the
+engine tests only single-axis offsets. 7/24 parts collide on a multi-axis
+offset; 4 are real crashes by a 2 mm re-voxelisation test (cell count grows
+3–3.4×): rear shroud 60→50, front fairing 48→32, visor 408→297, motor cover
+810→675. **Stabiliser bar 40 collides on 28 grazing cells (ratio 1.04×,
+volume falls 8×) — a strict check drops the deck-proven 40 to 30.** The
+mandated full-offset check therefore needs a contact tolerance (collision
+only if it grows under refinement). TRW 48 has no in-plane interleave and is
+immune. Brick bond rescues one part (ZB 3000, s = 128 mm). Written into
+`pm_addendum.md` with the voxeliser-bias confirmation (`occupancy` is
+surface-subdivide → both grids dilated → pitch biased high; settles the
+900-vs-840 dispute in Opus's favour).
+
+**Resume (Rahul paused for token budget):**
+```
+cd ~/.claude/projects/-Users-rahulsharma-PycharmProjects-part-intake/debate-2026-09-16/debate
+/Users/rahulsharma/PycharmProjects/part-intake/backend/venv/bin/python resign.py --max-cycles 3 > resign.log 2>&1 &
+```
+`resign.py` archives verdict.md as verdict_vN.md, has the chair (Gemini)
+redraft from the draft + both dissents + pm_addendum.md, then Fable and Opus
+sign again; loops up to three cycles. Needs Gemini key in env or repo `.env`.
+Then: Rahul reviews verdict.md; tickets T1–T7 (diagonal check with
+tolerance, sheet_step_mm, drift relaxation, free-stand, Δ_proj/oblique/
+compact(), mesh-refined pitch + foot thickness, missing inputs + catalogue
+fields).
+
+Working tree untouched this session except this entry. Still not pushed
+(11 commits). Open: E2, PackAssistant trial, F13a/F11a/F11b/F12/S2/F16,
+PLS fold type / lid void question for Rahul.
