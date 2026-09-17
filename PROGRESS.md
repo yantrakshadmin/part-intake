@@ -2829,3 +2829,17 @@ standing scheme. Not committed; Rahul commits. Next baseline = this sweep
 (`scratchpad/tester345/sweep_t345.md`, local).
 Next: commit; scoring round with the three debaters (§5); T1b; T3b; T7.
 
+## 2026-09-17 (later) — T3/T4/T5 committed 973a6f7; debate scoring round run
+
+Committed the batch as 973a6f7 on Rahul's word. Ran the scoring round from
+`final_verdict.md` §5.2 (`score.py` in the local debate dir, 30 lines over `debate.ask`,
+three calls in parallel, ~1 min). Tally of record (rows each party held or disputed):
+Fable 3 right / 2 wrong / 1 half / 2 open; Opus 1 / 6 / 2 / 3; Gemini 1 / 2 / 0 / 1;
+PM 4 / 0 / 1 / 0. Opus's self-diagnosis: every miss substituted a derivation for a
+measurement that already existed (open shells treated as solids for C1–C3, bounding-box
+Δ_proj for C6). Fable's misses: the tilt rung has no witness in 24 parts (C4) and the
+one-face free body (C7). Gemini's first answer was template text; retried once. No model
+was right against a PM ruling, nothing reopens. Open rows C9, C11–C13 need a heavy part,
+T7 and physical samples. Details in the local `scores.md`; the verdict's §5.1 holds the
+table. Next: T1b (brick bond), T3b (load-path hardening), T7.
+
