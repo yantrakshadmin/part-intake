@@ -30,6 +30,12 @@ class Container:
     kind: str
     # None = no tare on file (C-TARE) -- never 0 standing in for "unknown".
     tare_kg: float | None = None
+    # T6: return-leg inputs for the retention rules (not yet read by the
+    # engine). fold_type defaults "unknown" to match models.Packaging;
+    # folded_h_mm/lid_void_mm are None until someone measures them.
+    fold_type: str = "unknown"
+    folded_h_mm: float | None = None
+    lid_void_mm: float | None = None
 
 
 def excluded_drafts(db: Session | None) -> list[str]:
@@ -71,6 +77,9 @@ def containers_named(db: Session | None, codes: list[str]) -> tuple[list[Contain
                 max_weight_kg=r.max_weight_kg,
                 kind=r.kind,
                 tare_kg=r.tare_kg,
+                fold_type=r.fold_type,
+                folded_h_mm=r.folded_h_mm,
+                lid_void_mm=r.lid_void_mm,
             )
             for r in rows
         }
@@ -115,6 +124,9 @@ def containers(db: Session | None = None) -> list[Container]:
                 max_weight_kg=r.max_weight_kg,
                 kind=r.kind,
                 tare_kg=r.tare_kg,
+                fold_type=r.fold_type,
+                folded_h_mm=r.folded_h_mm,
+                lid_void_mm=r.lid_void_mm,
             )
             for r in rows
         ]

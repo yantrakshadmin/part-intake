@@ -462,6 +462,235 @@ def test_turned_layout_carries_the_rotation_it_won_in():
           f"{shape[0]}x{shape[1]} cells at {CELL_MM}mm")
 
 
+# ---------------------------------------------------------------------------
+# T1: the MIXED lattice vectors. `min_pitch` slides one axis at a time; a 3D
+# lattice also contains (i.pL, j.pB, k.pH), and three 1-D clearances are not a
+# clear 3-D lattice. Both parts below are synthetic on purpose -- no CAD, no
+# NDA, and the contact they make is chosen, not found.
+# ---------------------------------------------------------------------------
+class _FlatCandidate:
+    """The minimum `measure_poses` wants: a label and a 4x4."""
+    label = "flat"
+
+    def __init__(self):
+        import numpy as np
+        self.rotation_matrix = np.eye(4)
+
+
+def _blocks(positions, size=40.0):
+    """One mesh of axis-aligned cubes at `positions` (their min corners)."""
+    import trimesh
+    out = []
+    for x, y, z in positions:
+        b = trimesh.creation.box(extents=(size, size, size))
+        b.apply_translation([x + size / 2, y + size / 2, z + size / 2])
+        out.append(b)
+    return trimesh.util.concatenate(out)
+
+
+def _only_layout(mesh, inner=(2000.0, 2000.0, 2000.0)):
+    from app.catalogue import Container
+    from app.nesting import layouts_for, measure_poses
+    box = Container("BIG", inner, tuple(v + 100 for v in inner),
+                    10000.0, "container")
+    poses = measure_poses(mesh, [_FlatCandidate()], voxel_mm=4.0)
+    return poses[0], layouts_for(poses, box)[0]
+
+
+def test_diagonal_collision_is_fatal_and_repaired():
+    """Two blocks on a diagonal: clear on each axis alone, crashing at (1,1,0).
+
+    This is the whole defect T1 fixes. `min_pitch` proves the x pitch and the
+    y pitch separately and both are genuinely clear -- asserted below on the
+    grid itself -- yet the lattice those two pitches describe puts a copy's
+    first block straight through the original's second one. The 2mm re-check
+    calls it at ~4x (a surface patch), so it is fatal and the layout the
+    engine ships is the REPAIRED one, not the crash with a warning on it.
+    """
+    from app.nesting import DIAG_FATAL_RATIO, _overlap_cells, _shift_voxels
+    pose, best = _only_layout(_blocks([(0, 0, 0), (43, 43, 0)]))
+    check = best.lattice_check
+    assert check is not None, "a voxel-measured pose must carry a lattice check"
+
+    # (a) every axis really is clear on its own -- the bug is not a bad pitch.
+    grid = pose.raster.coarse((0, 1, 2))
+    sx, sy, _ = _shift_voxels(best.pitch_lbh, pose.clearance, pose.voxel_mm)
+    assert _overlap_cells(grid, (sx, 0, 0)) == 0, "x pitch collides on its own"
+    assert _overlap_cells(grid, (0, sy, 0)) == 0, "y pitch collides on its own"
+
+    # (b) ...and the mixed vector does not.
+    diag = [c for c in check["collisions"] if c["offset"] == [1, 1, 0]]
+    assert diag, f"(1,1,0) collision missed: {check}"
+    assert diag[0]["ratio"] >= DIAG_FATAL_RATIO and diag[0]["fatal"], diag
+    assert check["verdict"] == "repaired", check
+    rep = check["repair"]
+    assert rep["count"] == best.count, (rep, best.count)
+    assert "runner_up" in rep, rep
+    # The repair is APPLIED, not just reported: the pitch the layout ships (and
+    # so the drawing and the BOM) is no longer the one `min_pitch` measured.
+    assert rep["branch"] in ("pitch_L", "pitch_B"), \
+        f"only an axis repair may be shipped, got {rep}"
+    assert tuple(best.pitch_lbh) != tuple(pose.pitch), \
+        f"repair {rep} never reached the layout: pitch still {best.pitch_lbh}"
+
+    # (c) the shipped layout is clean on every vector, mixed ones included.
+    from app.nesting import _any_shared_cell, _lattice_offsets
+    shifts = _shift_voxels(
+        (best.pitch_lbh[0], best.pitch_lbh[1], best.pitch_lbh[2]),
+        pose.clearance, pose.voxel_mm)
+    assert not _any_shared_cell(pose.raster, (0, 1, 2), grid.shape, shifts,
+                                best.grid), "repaired lattice still collides"
+    assert _lattice_offsets(grid.shape, shifts, best.grid), \
+        "nothing was enumerated -- the check would pass vacuously"
+    print(f"  (1,1,0) ratio {diag[0]['ratio']} -> {check['verdict']} via "
+          f"{rep['branch']}, {rep['count']} parts (runner-up {rep['runner_up']})")
+
+
+def test_tangency_is_grazing_and_keeps_the_count():
+    """Two copies that only TOUCH must not be treated as a crash.
+
+    A 20mm sphere with a small sphere parked one pitch-diagonal away, so the
+    (0,1,1) copy of the big one is exactly tangent to the small one. Shared
+    cells exist at 4mm, but halving the raster barely changes them -- point
+    contact, not interpenetration -- so this is "grazing" and the count is
+    untouched. It is the synthetic twin of the YXA stabiliser bar, which
+    grazes at (0,1,1) with ratio 1.04 and ships 40 per PLS12801: a strict
+    "any shared cell fails" rule takes that deck to 30.
+    """
+    import math
+    import trimesh
+    from app.nesting import DIAG_FATAL_RATIO
+    u = 40.0 + 28.0 / math.sqrt(2)          # 28mm = 20 + 8, the tangent radius
+    big = trimesh.creation.icosphere(subdivisions=4, radius=20.0)
+    small = trimesh.creation.icosphere(subdivisions=4, radius=8.0)
+    small.apply_translation([0.0, u, u])
+    pose, best = _only_layout(trimesh.util.concatenate([big, small]))
+
+    check = best.lattice_check
+    assert check["offsets_tested"] > 0, f"nothing mixed to test: {check}"
+    touch = [c for c in check["collisions"] if c["offset"] == [0, 1, 1]]
+    assert touch, f"(0,1,1) tangency not seen at all: {check}"
+    assert touch[0]["cells4"] > 0 and touch[0]["ratio"] < DIAG_FATAL_RATIO, touch
+    assert not any(c["fatal"] for c in check["collisions"]), check
+    assert check["verdict"] == "grazing", check
+    assert check["repair"] is None, check
+    # ...and the count is the one the measured pitch alone gives: no pitch was
+    # widened, no row was dropped, nothing was brick-bonded.
+    assert best.count == lattice_count(best.extent_lbh, best.pitch_lbh,
+                                       (2000.0, 2000.0, 2000.0))[0], best.count
+    assert tuple(best.pitch_lbh) == tuple(pose.pitch), \
+        f"a grazing lattice must ship the measured pitch: {best.pitch_lbh}"
+    print(f"  tangent at (0,1,1): {touch[0]['cells4']} cells at 4mm, "
+          f"{touch[0]['cells2']} at 2mm, ratio {touch[0]['ratio']} -> grazing, "
+          f"{best.count} parts kept")
+
+
+def test_fatal_ratio_is_pinned():
+    """`DIAG_FATAL_RATIO` is a measurement, not a taste. Pin it.
+
+    The two checks either side of this one only bracket it to (1.64, 3.99], so
+    a drift to 2.5 would leave them green while flipping the SX4 motor cover
+    (2.35) from a repaired crash back to a shipped one. The calibration table
+    in `nesting.py` was measured with the 2026-09-16 debate's `diag_check.py`,
+    which re-voxelises the WHOLE mesh at 2mm -- not with `Raster.fine_cells`,
+    which crops to the overlap AABB and reads a few percent lower (rear shroud
+    3.16 vs 2.98). Motor cover 2.35 is the nearest real case to the line, and
+    it is above it. Re-measure before you move this number.
+    """
+    from app import nesting
+    assert nesting.DIAG_FATAL_RATIO == 2.0, nesting.DIAG_FATAL_RATIO
+    assert nesting.FINE_MM == 2.0, nesting.FINE_MM
+    print(f"  DIAG_FATAL_RATIO {nesting.DIAG_FATAL_RATIO} at "
+          f"FINE_MM {nesting.FINE_MM}mm (motor cover 2.35 is the nearest "
+          f"real case above the line)")
+
+
+def test_fatal_without_repair_is_not_shipped():
+    """A crash nothing repairs must produce NO layout, not the crash itself.
+
+    Three cubes on the three face diagonals: every mixed vector the lattice
+    contains drives one copy through another, growing either floor pitch keeps
+    the (0,1,1) and (1,0,1) collisions (they are vertical), and the code
+    review found the engine ranking 70,400 interpenetrating parts first with
+    `verdict: "fatal"`, `repair: null` and no reason attached. Ranking a known
+    crash is worse than returning nothing: nothing is visibly a non-answer.
+    """
+    mesh = _blocks([(0, 0, 0), (43, 0, 43), (0, 43, 43)])
+    from app.catalogue import Container
+    from app.nesting import layouts_for, measure_poses
+    box = Container("BIG", (2000.0, 2000.0, 2000.0), (2100.0, 2100.0, 2100.0),
+                    10000.0, "container")
+    poses = measure_poses(mesh, [_FlatCandidate()], voxel_mm=4.0)
+    layouts = layouts_for(poses, box)
+    assert layouts == [], \
+        ("a fatal lattice was ranked: "
+         f"{[(l.count, l.lattice_check['verdict']) for l in layouts]}")
+    print("  3-cube corner fixture: fatal on every branch -> no layout offered")
+
+
+def _brick_fixture():
+    """A lattice the BRICK bond clears and no pitch growth clears as cheaply.
+
+    Hand-built raster, not CAD: what is under test is which repair branch gets
+    SHIPPED, not the voxeliser. Cells sit at L 0 and 6 on two (B, H) corners,
+    so the (0,1,1) vector drives one corner through the other, growing pitch_B
+    costs a third of the rows, and sliding alternate rows one cell along L
+    clears it for almost nothing. ZB 3000 M2 is the one real part that lands
+    here; this is its shape in miniature.
+    """
+    import trimesh
+    import numpy as np
+    from app.nesting import Raster, lattice_count
+    cell = 4.0
+    g = np.zeros((7, 3, 3), dtype=bool)
+    for l in (0, 6):
+        g[l, 0, 0] = True
+        g[l, 2, 2] = True
+    boxes = []
+    for idx in np.argwhere(g):
+        b = trimesh.creation.box(extents=(cell, cell, cell))
+        b.apply_translation((idx + 0.5) * cell)
+        boxes.append(b)
+    raster = Raster(g, (0.0, 0.0, 0.0), cell,
+                    trimesh.util.concatenate(boxes), None)
+    extent = tuple(n * cell for n in g.shape)
+    inner = (1000.0, 1000.0, 1000.0)
+
+    def fit(pitch, shrink_l_mm=0.0):
+        n, grid, _ = lattice_count(extent, pitch,
+                                   (inner[0] - shrink_l_mm, inner[1], inner[2]))
+        return n, grid, pitch
+
+    return raster, fit, (16.0, 8.0, 8.0)
+
+
+def test_brick_bond_is_reported_but_never_shipped():
+    """The brick branch is data, not a design. It must not win the argmax.
+
+    A brick bond staggers alternate rows, and `Layout` carries no row offset:
+    `insert_drawing._place`, `dunnage.bom` and the animation would all draw
+    the ALIGNED grid this check just proved crashes, and the BOM would call it
+    a fit. So the branch is still computed and reported under `brick_bond` --
+    the debate needs the number -- and the SHIPPED repair is an axis branch,
+    even when the brick count is higher. Unpark it in a drawing ticket that
+    teaches `_place` and `bom` about staggered rows, not here.
+    """
+    from app.nesting import lattice_check
+    raster, fit, pitch = _brick_fixture()
+    check = lattice_check(raster, (0, 1, 2), pitch, (0.0, 0.0, 0.0), fit)
+    assert check["verdict"] == "repaired", check
+    rep, brick = check["repair"], check["brick_bond"]
+    assert brick is not None and brick["count"] > 0, check
+    assert brick["count"] > rep["count"], \
+        f"fixture is pointless unless brick beats the axis branch: {check}"
+    assert rep["branch"] in ("pitch_L", "pitch_B"), \
+        f"a brick bond was shipped as the repair: {rep}"
+    assert "s_mm" not in rep, f"the shipped repair carries no row offset: {rep}"
+    print(f"  brick_bond s={brick['s_mm']}mm would give {brick['count']}; "
+          f"shipped {rep['branch']} at {rep['count']} instead")
+
+
+
 if __name__ == "__main__":
     for fn in (test_ground_truth, test_exact_fit_is_not_off_by_one, test_weight_cap,
                test_count_upper_is_the_quantisation_ceiling,
@@ -471,7 +700,12 @@ if __name__ == "__main__":
                test_turned_layout_carries_the_rotation_it_won_in,
                test_cuboid_silhouette_is_solid, test_bar_silhouette_is_not_solid,
                test_real_bar, test_catalogue_ranking,
-               test_ties_go_to_the_smaller_box):
+               test_ties_go_to_the_smaller_box,
+               test_diagonal_collision_is_fatal_and_repaired,
+               test_tangency_is_grazing_and_keeps_the_count,
+               test_fatal_ratio_is_pinned,
+               test_fatal_without_repair_is_not_shipped,
+               test_brick_bond_is_reported_but_never_shipped):
         print(f"{fn.__name__}:")
         fn()
     print("\nall checks passed")

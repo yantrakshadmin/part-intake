@@ -2120,16 +2120,23 @@ def _check_layer_step_is_drawn() -> None:
     """The picture must stack at the step the count and the BOM charged (F11).
 
     With layer separators under the parts (no tray to share the pitch with)
-    the vertical step is `pitch_H + sheet`, which is what `nesting.layouts_for`
-    solved the layer count on. Stacking the drawing at the raw pitch put every
-    layer inside the sheet above it and topped the insert out below its own
-    `build_height_mm` -- 912 against 930 on the numbers below, and 24mm short
-    on a real FLC12101 layout. Bar and tray archetypes step by the measured
-    pitch (`layer_step_mm` returns it unchanged), so their pictures cannot
-    move; this is the case that can.
+    the vertical step is `extent_H + sheet` (T2: a rigid sheet defeats a
+    vertical nest rather than sinking into it), which is what
+    `nesting.layouts_for` solved the layer count on. Stacking the drawing at
+    the raw pitch put every layer inside the sheet above it and topped the
+    insert out below its own `build_height_mm` -- 24mm short on a real
+    FLC12101 layout. Bar and tray archetypes step by the measured pitch
+    (`layer_step_mm` returns it unchanged), so their pictures cannot move;
+    this is the case that can.
+
+    The fixture carries a REAL vertical nest -- extent_H 104 on a 100 pitch,
+    4mm of nest depth. With extent_H == pitch_H the nest depth is zero, T2's
+    `extent_H + sheet` and the rule it replaced (`pitch_H + max(0, sheet -
+    nest_depth)`) both return 103, and this check cannot tell them apart; at
+    104 they return 107 and 100, so it can.
     """
     from .nesting import lattice_count
-    extent, pitch, inner = (300.0, 100.0, 100.0), (150.0, 100.0, 100.0), (1150.0, 750.0, 1003.0)
+    extent, pitch, inner = (300.0, 100.0, 104.0), (150.0, 100.0, 100.0), (1150.0, 750.0, 1003.0)
     _flat, in_plane, _ = lattice_count(extent, pitch, (inner[0], inner[1], extent[2]))
     dead = dunnage.dead_height_mm(extent, pitch, grid=in_plane)
     step = dunnage.layer_step_mm(extent, pitch, grid=in_plane)
@@ -2146,8 +2153,8 @@ def _check_layer_step_is_drawn() -> None:
               if r.geo is not None and not r.is_parts for o, s in r.geo()[0])
     assert abs(top - bom.build_height_mm) < 1e-6, \
         "insert drawn %g mm tall, BOM says %g" % (top, bom.build_height_mm)
-    print("PASS  %-14s step %g mm (pitch %g + %g sheet): %d layers drawn, "
-          "insert tops out at %g mm == BOM build height"
+    print("PASS  %-14s step %g mm (pitch %g + %g nest depth and sheet): "
+          "%d layers drawn, insert tops out at %g mm == BOM build height"
           % (bom.archetype, bom.layer_step_mm, pitch[2],
              bom.layer_step_mm - pitch[2], grid[2], top))
 

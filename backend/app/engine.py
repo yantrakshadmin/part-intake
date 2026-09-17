@@ -222,8 +222,15 @@ def measure_distinct_poses(mesh, candidates,
     ponytail: exact reuse, not a tolerance on the measurement. Twins differ by
     up to one voxel on the raster (`nesting.occupancy` snaps the grid origin
     per transform) -- that band is what `Layout.count_upper` already reports.
-    Upgrade path if a twin ever needs its own raster: drop this and lift the
-    worker's time limit.
+
+    KNOWN LIMITATION, T1: the twin also inherits the ORIGINAL pose's
+    `Pose.raster`, so `nesting.lattice_check` answers the mixed lattice
+    vectors for a flipped pose on the un-flipped grid -- on the YXA bar the
+    twin reports the offset's sign and about 7% of its shared cells wrong
+    (same verdict, and both ground-truth counts are unmoved). Fixing it means
+    giving a twin its own raster, which is the whole voxelisation this
+    function exists to skip; do that, and lift the worker's soft time limit,
+    when a twin's verdict actually differs from its original's.
     """
     from .geometry import dims_match
     poses, measured = [], []       # measured: [(dims_lbh, Pose)]

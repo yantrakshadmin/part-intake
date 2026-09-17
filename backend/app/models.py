@@ -57,6 +57,14 @@ class Packaging(Base):
     # the optimiser packs parts into a warehouse rack.
     kind: Mapped[str] = mapped_column(String(16), default="container",
                                       server_default="container")
+    # T6: retention-rule inputs, None/'unknown' until the team enters real
+    # numbers (hard rule 2 — never auto-filled). fold_type is what the
+    # engine will need to decide whether a return leg can fold the box down;
+    # folded_h_mm/lid_void_mm feed that leg's insert/stack math later.
+    fold_type: Mapped[str] = mapped_column(String(16), default="unknown",
+                                           server_default="unknown")
+    folded_h_mm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lid_void_mm: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime, default=dt.datetime.utcnow
     )
@@ -125,6 +133,9 @@ class PartProfile(Base):
     # F1: which Project this part belongs to, nullable — parts created before
     # projects existed have none. Added via main._ensure_added_columns.
     project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # T6: raw | painted | ecoat | class_a, nullable — the retention rules need
+    # to know when a surface can't touch bare cardboard/foam. Never guessed.
+    surface_class: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime, default=dt.datetime.utcnow
     )

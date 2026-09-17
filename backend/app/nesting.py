@@ -7,6 +7,17 @@ Not "how many boxes fit in a box".
     occupancy(mesh, pose)  ->  3D boolean grid
     min_pitch(grid, axis)  ->  closest collision-free spacing on that axis, mm
     lattice_count(...)     ->  parts per asset
+    lattice_check(...)     ->  is that lattice clear on its MIXED vectors too?
+
+`min_pitch` answers one axis at a time and the lattice contains every
+(i.pL, j.pB, k.pH); three 1-D clearances are not a clear 3-D lattice. On a
+24-file sweep 8 parts collide on an offset like (0,1,1) or (1,1,0): FIVE are
+real crashes (rear shroud, front fairing, headstock cover, visor, ZB 3000),
+one is ambiguous line contact (motor cover, 2.35), one is the deck-proven YXA
+bar grazing at 1.04 -- and the eighth, Y2V_YK9_Rack, collides only on an
+offset its winning lattice does not contain, so it is a phantom and is never
+enumerated. Hence a contact tolerance, not a strict rule -- see
+`DIAG_FATAL_RATIO`.
 
 Why this and not jagua-rs / NFP + bottom-left-fill (PLANNING §4 named both):
 
@@ -118,6 +129,15 @@ class Layout:
     # `app.reasons.reasons_for(...)`, composed in the worker once clearance,
     # poses_searched and warnings are all in scope. Empty until then.
     reasons: list[str] = field(default_factory=list)
+    # `nesting.lattice_check` on THIS layout's own grid and pitch: the 3-D
+    # lattice vectors `min_pitch` never looks at (it slides one axis at a
+    # time). None for a pose measured from bare numbers, which carries no
+    # raster. `count`, `grid` and `pitch_lbh` above are already the REPAIRED
+    # ones when the verdict is "repaired" -- the crash is not shipped and then
+    # annotated, it is fixed, and the drawing reads the same fields it always
+    # did. Declared on `schemas.LayoutOut` in the same edit or pydantic drops
+    # it silently (hard rule 9).
+    lattice_check: dict | None = None
 
     @property
     def interleave(self) -> tuple:
@@ -138,11 +158,24 @@ def occupancy(mesh: trimesh.Trimesh, transform=None,
     shells, which matters -- every customer file so far is one, and a
     fill/ray-based voxeliser needs watertight geometry.
     """
+    return _voxelise(mesh, transform, voxel_mm)[0]
+
+
+def _voxelise(mesh: trimesh.Trimesh, transform, voxel_mm: float) -> tuple:
+    """`occupancy`, plus the grid ORIGIN in posed-mesh mm. -> (grid, origin)
+
+    trimesh snaps the grid origin to a multiple of the pitch, so cell (i, j, k)
+    spans `origin + (i, j, k) * voxel_mm` to one voxel further. `Raster` needs
+    that to turn an overlapping cell back into a millimetre box it can
+    re-voxelise finer; `occupancy` itself never did, which is why this is a
+    separate function and not a second return value on the public one.
+    """
     m = mesh.copy()
     if transform is not None:
         m.apply_transform(np.asarray(transform, dtype=float))
-    grid = m.voxelized(pitch=voxel_mm, method="subdivide").matrix
-    return np.asarray(grid, dtype=bool)
+    vg = m.voxelized(pitch=voxel_mm, method="subdivide")
+    return (np.asarray(vg.matrix, dtype=bool),
+            tuple(float(v) for v in np.asarray(vg.transform)[:3, 3]))
 
 
 def silhouette_runs(mask: np.ndarray, cell_mm: float = VOXEL_MM) -> dict:
@@ -243,6 +276,380 @@ def min_pitch(grid: np.ndarray, axis: int, voxel_mm: float = VOXEL_MM,
     return n * voxel_mm + clearance_mm
 
 
+# Voxel edge for the collision re-check. Halving the raster multiplies the
+# shared-cell count by ~8 for a solid interpenetration, ~4 for a surface patch,
+# ~2 for a line contact and ~1 for a tangency that is only there because the
+# coarse raster rounded outward.
+FINE_MM = 2.0
+
+# Above this ratio a multi-axis lattice collision is a real crash, below it the
+# two copies are only grazing and the design ships.
+#
+# CALIBRATION -- these are open SURFACE shells (CLAUDE.md: no solids), so a real
+# interpenetration shows up as a surface patch and scales ~4x, not the 8x a
+# filled solid would give. Measured 2026-09-16 over 24 customer files, cells at
+# 2mm / cells at 4mm on the offset that collides:
+#
+#   rear shroud     3.16   front fairing 3.43   headstock cover 3.06
+#   visor           3.12   ZB 3000 M2    2.70      -> real crashes
+#   motor cover     2.35                           -> line contact, ambiguous
+#   YXA stabiliser  1.04                           -> tangency, and this design
+#                                                     SHIPPED 40/PLS12801
+#
+# 2.0 is the gap between the bar and everything else, with the motor cover on
+# the crash side of it. A strict "any shared cell fails" rule takes the bar to
+# 30 and breaks CLAUDE.md's one non-negotiable fact.
+DIAG_FATAL_RATIO = 2.0
+
+
+def _slices(shape, off):
+    """The two basic-slicing index tuples that align a grid with itself at `off`.
+
+    -> (a, b) such that `grid[a] & grid[b]` is the overlap of the part with a
+    copy translated by `off` voxels, signed, on all three axes at once. Views
+    only -- a range index would copy the grid (see `min_pitch.clear_at`).
+    `grid[a]`'s local index l is global index `l + a[axis].start`.
+    None when the translated copy is clear of the bounding box outright.
+    """
+    a, b = [], []
+    for n, d in zip(shape, off):
+        if abs(d) >= n:
+            return None
+        a.append(slice(d, n) if d >= 0 else slice(0, n + d))
+        b.append(slice(0, n - d) if d >= 0 else slice(-d, n))
+    return tuple(a), tuple(b)
+
+
+def _overlap_cells(grid: np.ndarray, off) -> int:
+    """Cells shared by `grid` and a copy of itself translated by `off` voxels."""
+    sl = _slices(grid.shape, off)
+    if sl is None:
+        return 0
+    return int(np.count_nonzero(grid[sl[0]] & grid[sl[1]]))
+
+
+class Raster:
+    """The occupancy grid a pose was measured from, and the mesh behind it.
+
+    `min_pitch` answers one axis at a time; a 3D lattice also contains every
+    mixed vector (i.pL, j.pB, k.pH), and three 1-D clearances do not imply a
+    clear lattice (`lattice_check`). Answering the mixed ones needs the grid
+    itself, so `measure_poses` hands it on instead of throwing it away.
+
+    Mutable on purpose: the memos below are what keep the check off the solve's
+    critical path. `rank_catalogue` scores one pose against ~15 assets, and the
+    overlap at a given offset is a property of the POSE, not of the asset.
+
+    ponytail: holds `mesh` + `transform`, not the posed copy -- posing is cheap
+    next to voxelising and most poses never need the fine re-check at all, so a
+    50MB assembly does not get duplicated once per pose for nothing.
+    """
+
+    def __init__(self, grid: np.ndarray, origin, voxel_mm: float,
+                 mesh: trimesh.Trimesh, transform):
+        self.grid = grid
+        self.origin = tuple(float(v) for v in origin)
+        self.voxel_mm = float(voxel_mm)
+        self._mesh = mesh
+        self._transform = transform
+        self._tri = None
+        self._coarse: dict = {}
+        self._fine: dict = {}
+
+    def coarse(self, order) -> np.ndarray:
+        """The grid in a footprint order's (L, B, H) axes. A view, no copy."""
+        return np.transpose(self.grid, order)
+
+    def cells(self, order, off) -> int:
+        """`_overlap_cells` on that view, memoised per (order, offset)."""
+        key = (tuple(order), tuple(off))
+        got = self._coarse.get(key)
+        if got is None:
+            got = _overlap_cells(self.coarse(order), off)
+            self._coarse[key] = got
+        return got
+
+    def triangles(self) -> np.ndarray:
+        """The posed mesh as (F, 3, 3) corner points. Built once, on demand.
+
+        The posed mesh itself is not kept -- the fine re-check only ever wants
+        triangle corners, and holding one copy per pose of a 50MB assembly to
+        re-derive the same array is the cost this class exists to avoid.
+        """
+        if self._tri is None:
+            m = self._mesh.copy()
+            if self._transform is not None:
+                m.apply_transform(np.asarray(self._transform, dtype=float))
+            self._tri = np.asarray(m.triangles, dtype=float)
+        return self._tri
+
+    def fine_cells(self, off) -> int:
+        """Cells the two copies share at `FINE_MM`, over the 4mm overlap AABB.
+
+        `off` is in POSE axes (x, y, z), voxels of `self.voxel_mm`.
+
+        Only the overlap box is re-voxelised, not the part: the whole mesh at
+        2mm is ~8x the cells and ~4x the time of the raster the solve already
+        paid for, once per colliding pose -- which is most of the solve again.
+        Faces are selected by triangle AABB against the box and its
+        counter-translate, so every surface that can land inside the box is
+        kept and nothing else is; cells outside the box are then dropped, so a
+        face that pokes out cannot inflate the count.
+        """
+        key = tuple(off)
+        if key not in self._fine:
+            self._fine[key] = self._compute_fine(off)
+        return self._fine[key]
+
+    def _compute_fine(self, off) -> int:
+        # Every `return 0` below except the last is a path that should not be
+        # reachable from a collision, and each one silently downgrades a crash
+        # to "grazing" (ratio 0). They are guards, so they log. The LAST one --
+        # no shared cell at 2mm -- is the real answer, not a guard: it is what
+        # a pure raster artefact looks like (SX4 headstock cover, (1,0,-2),
+        # 4 cells at 4mm and 0 at 2mm).
+        sl = _slices(self.grid.shape, off)
+        if sl is None:
+            logger.warning("fine re-check: offset %s is clear of the bounding "
+                           "box, so there was nothing to re-check", off)
+            return 0
+        idx = np.nonzero(self.grid[sl[0]] & self.grid[sl[1]])
+        if not len(idx[0]):
+            logger.warning("fine re-check: offset %s shares no coarse cell -- "
+                           "called for a collision that is not there", off)
+            return 0
+        v = self.voxel_mm
+        lo = np.array([self.origin[a] + (int(idx[a].min()) + sl[0][a].start) * v
+                       for a in range(3)])
+        hi = np.array([self.origin[a] + (int(idx[a].max()) + sl[0][a].start + 1) * v
+                       for a in range(3)])
+        delta = np.asarray(off, dtype=float) * v          # the offset in mm
+
+        tri = self.triangles()
+        if not len(tri):
+            logger.warning("fine re-check: posed mesh has no triangles; "
+                           "offset %s reported as grazing by default", off)
+            return 0
+        t_lo, t_hi = tri.min(axis=1), tri.max(axis=1)
+        keep = np.zeros(len(tri), dtype=bool)
+        for box_lo, box_hi in ((lo, hi), (lo - delta, hi - delta)):
+            sel = np.ones(len(tri), dtype=bool)
+            for a in range(3):
+                sel &= (t_hi[:, a] >= box_lo[a]) & (t_lo[:, a] <= box_hi[a])
+            keep |= sel
+        if not keep.any():
+            logger.warning("fine re-check: no triangle reaches the overlap box "
+                           "%s..%s at offset %s; reported as grazing", lo, hi, off)
+            return 0
+        verts = tri[keep].reshape(-1, 3)
+        crop = trimesh.Trimesh(vertices=verts,
+                               faces=np.arange(len(verts)).reshape(-1, 3),
+                               process=False)
+        fvg = crop.voxelized(pitch=FINE_MM, method="subdivide")
+        fine = np.asarray(fvg.matrix, dtype=bool)
+        f_origin = np.asarray(fvg.transform)[:3, 3]
+        f_off = tuple(int(round(c * v / FINE_MM)) for c in off)
+        f_sl = _slices(fine.shape, f_off)
+        if f_sl is None:
+            logger.warning("fine re-check: the %gmm crop is smaller than the "
+                           "offset %s, so nothing could overlap in it",
+                           FINE_MM, off)
+            return 0
+        f_idx = np.nonzero(fine[f_sl[0]] & fine[f_sl[1]])
+        if not len(f_idx[0]):
+            return 0                    # the real answer: a raster artefact
+        inside = np.ones(len(f_idx[0]), dtype=bool)
+        for a in range(3):
+            g = f_idx[a] + f_sl[0][a].start
+            inside &= (f_origin[a] + (g + 1) * FINE_MM > lo[a]) \
+                & (f_origin[a] + g * FINE_MM < hi[a])
+        return int(inside.sum())
+
+
+def _shift_voxels(pitch_lbh, clearance_lbh, voxel_mm) -> tuple:
+    """Lattice pitch in mm -> the shift in voxels the two copies sit at.
+
+    `min_pitch` returns `shift * voxel + clearance`, so the geometry the grid
+    can speak about is at `(pitch - clearance) / voxel`. Clearance is air the
+    engine ADDED, not something it measured, so taking it back out here tests
+    the copies at their touching spacing -- and it is the same integer
+    `min_pitch` proved clear on each axis on its own.
+
+    That error runs one way, on purpose: the check runs at the TOUCHING pitch,
+    up to `DEFAULT_CLEARANCE_MM` (5mm) tighter on each floor axis than the
+    lattice the parts actually sit in, so it can over-report penetration and
+    never under-report it. Rounding the real pitch instead is not the safer
+    option -- it is a different answer: 145mm / 4mm rounds to a 36-voxel shift
+    instead of 35, and the YXA bar's deck-proven (0,1,1) contact disappears
+    entirely, verdict "clear", which is exactly the false negative this
+    function exists to prevent.
+    """
+    return tuple(max(1, int(round((p - c) / voxel_mm)))
+                 for p, c in zip(pitch_lbh, clearance_lbh))
+
+
+def _lattice_offsets(shape, shifts, bounds, brick_s: int = 0) -> list:
+    """Difference vectors of the lattice, half-space. -> [(voxels, (i, j, k))]
+
+    A lattice of `bounds` = (n_L, n_B, n_H) copies contains the vector
+    (i.pL, j.pB, k.pH) for |i| < n_L and so on; anything further apart than the
+    part's own bounding box cannot collide, so the enumeration is bounded by
+    BOTH. Offsets outside the winning lattice are phantom -- they belong to
+    some other asset's grid, not this one -- and are not enumerated at all.
+
+    v and -v test the same pair, so only half the space is walked.
+
+    `brick_s`: a brick bond displaces odd B-rows by `brick_s` voxels along L,
+    so an odd `j` carries +-brick_s and the plain (0, j, 0) column vectors stop
+    being single-axis. That is why this returns single-axis vectors too -- the
+    repair search has to re-test everything, only the base verdict is about the
+    mixed ones.
+    """
+    lim = [min((n - 1) // s, max(b - 1, 0)) if s else 0
+           for n, s, b in zip(shape, shifts, bounds)]
+    if brick_s:
+        lim[0] += 1
+    out: dict = {}
+
+    def add(v_l, i, j, k):
+        v = (v_l, j * shifts[1], k * shifts[2])
+        if v == (0, 0, 0):
+            return
+        if all(abs(c) < n for c, n in zip(v, shape)):
+            out.setdefault(v, (i, j, k))
+
+    for i in range(0, lim[0] + 1):                 # j == 0 plane, half-space
+        for k in range(-lim[2] if i else 1, lim[2] + 1):
+            add(i * shifts[0], i, 0, k)
+    for j in range(1, lim[1] + 1):                 # j > 0: both signs on i, k
+        for i in range(-lim[0], lim[0] + 1):
+            for k in range(-lim[2], lim[2] + 1):
+                if brick_s and j % 2:
+                    add(i * shifts[0] + brick_s, i, j, k)
+                    add(i * shifts[0] - brick_s, i, j, k)
+                else:
+                    add(i * shifts[0], i, j, k)
+    return sorted(out.items())
+
+
+def _to_pose_axes(off_lbh, order) -> tuple:
+    """(L, B, H) voxel offset -> the pose's own (x, y, z) axes.
+
+    `order` maps pose axis -> layout axis, so undoing it is its inverse
+    permutation, which is what `argsort` of a permutation is.
+    """
+    return tuple(off_lbh[i] for i in np.argsort(order))
+
+
+def _any_shared_cell(raster, order, shape, shifts, bounds, brick_s: int = 0) -> bool:
+    """Strict: does ANY lattice vector put two copies in the same voxel?
+
+    Used only to accept a REPAIR. The tolerance (`DIAG_FATAL_RATIO`) is for
+    judging the design the engine measured; once a design is already known to
+    crash, the thing that replaces it has to be clean, and a pitch the part
+    never proved clear on (the repair grows past `min_pitch`'s answer, and a
+    comb part is not monotonic in pitch) has to be re-tested on every vector,
+    single-axis ones included.
+    """
+    for v, _ in _lattice_offsets(shape, shifts, bounds, brick_s):
+        if raster.cells(order, v):
+            return True
+    return False
+
+
+def lattice_check(raster, order, pitch_lbh, clearance_lbh, fit) -> dict | None:
+    """Is the 3-D lattice this layout implies actually collision-free?
+
+    `fit(pitch_lbh, shrink_l_mm)` -> `(count, grid, pitch_fit)` is the caller's
+    OWN counting expression (`layouts_for`'s), so the grid this walks and the
+    count the engine ships are one expression, never two (CLAUDE.md hard rule
+    9). `shrink_l_mm` is the floor length a brick bond gives up.
+
+    Returns the `Layout.lattice_check` payload, or None for a pose measured
+    from bare numbers (synthesis), which carries no raster to check.
+
+    Verdicts: "clear" (nothing shared), "grazing" (shared cells, every ratio
+    under `DIAG_FATAL_RATIO` -- the YXA bar), "repaired" (a crash, and growing
+    one floor pitch clears it), "fatal" (a crash nothing here clears -- see
+    `layouts_for`, which drops the layout rather than ranking it).
+
+    `brick_bond` is reported and never applied; see the comment on that branch.
+    """
+    if raster is None or raster.voxel_mm <= 0:
+        return None
+    grid = raster.coarse(order)
+    _, bounds, pitch_fit = fit(pitch_lbh, 0.0)
+    shifts = _shift_voxels(pitch_fit, clearance_lbh, raster.voxel_mm)
+    mixed = [(v, ijk) for v, ijk in _lattice_offsets(grid.shape, shifts, bounds)
+             if sum(1 for c in ijk if c) >= 2]
+
+    collisions, fatal = [], False
+    for v, ijk in mixed:
+        cells4 = raster.cells(order, v)
+        if not cells4:
+            continue
+        cells2 = raster.fine_cells(_to_pose_axes(v, order))
+        ratio = cells2 / cells4
+        is_fatal = ratio >= DIAG_FATAL_RATIO
+        fatal = fatal or is_fatal
+        collisions.append({"offset": list(ijk), "cells4": cells4,
+                           "cells2": cells2, "ratio": round(ratio, 2),
+                           "fatal": is_fatal})
+    out = {"offsets_tested": len(mixed), "collisions": collisions,
+           "verdict": "clear" if not collisions
+                      else ("fatal" if fatal else "grazing"),
+           "repair": None, "brick_bond": None}
+    if not fatal:
+        return out
+
+    v_mm = raster.voxel_mm
+    branches = []
+    # Growing a pitch is also how a row or a column gets DELETED -- the count
+    # `fit` returns at the wider pitch already has one fewer of them. There is
+    # no separate deletion branch, and there should not be: deleting a row at
+    # the old pitch leaves the surviving neighbours still colliding.
+    for axis, name in ((1, "pitch_B"), (0, "pitch_L")):
+        for step in range(1, grid.shape[axis] - shifts[axis] + 1):
+            wider = list(pitch_lbh)
+            wider[axis] += step * v_mm
+            count, bounds2, p_fit2 = fit(tuple(wider), 0.0)
+            if not count:
+                break
+            s2 = _shift_voxels(p_fit2, clearance_lbh, v_mm)
+            if not _any_shared_cell(raster, order, grid.shape, s2, bounds2):
+                branches.append({"branch": name, "count": count,
+                                 "pitch_lbh": tuple(round(p, 2) for p in wider)})
+                break
+    # Brick bond: same pitches, odd rows slid along L, costing `s` of the floor
+    # length. PARKED -- computed and reported, never shipped.
+    #
+    # It is the cheapest repair on paper and it is not a design this codebase
+    # can draw: `Layout` has nowhere to put a row offset, so `insert_drawing`
+    # and `dunnage.bom` would both build the ALIGNED grid the check just
+    # proved crashes, and the BOM would report it as a fit (ZB 3000 M2: 74mm
+    # of reported slack against a real 54mm overflow). Reporting the number
+    # keeps the option visible for the packaging debate; shipping it would
+    # ship a drawing that disagrees with its own count (hard rule 9).
+    #
+    # Unpark it in a drawing ticket that teaches `_place` and `bom` about
+    # staggered rows -- then move this into `branches` and delete the comment.
+    for s in range(1, shifts[0] + 1):
+        if _any_shared_cell(raster, order, grid.shape, shifts, bounds, brick_s=s):
+            continue
+        count, _, _ = fit(pitch_lbh, s * v_mm)
+        if count:
+            out["brick_bond"] = {"s_mm": s * v_mm, "count": count}
+        break
+
+    if branches:
+        branches.sort(key=lambda b: -b["count"])
+        out["verdict"] = "repaired"
+        out["repair"] = dict(branches[0],
+                             runner_up=branches[1]["count"] if len(branches) > 1
+                             else 0)
+    return out
+
+
 def lattice_count(extent_lbh, pitch_lbh, inner_lbh,
                   part_kg: float = 0.0, max_weight_kg: float = 0.0) -> tuple:
     """Parts per asset for a regular lattice. -> (count, (nx, ny, nz), limited_by)
@@ -325,6 +732,11 @@ class Pose:
     # bare-number poses (a deck's pitch is taken as given). The dunnage
     # archetype needs it back out -- see `dunnage.archetype_of`.
     clearance: tuple = (0.0, 0.0, 0.0)
+    # The `Raster` the extent and pitch were measured from, so `lattice_check`
+    # can ask about the MIXED lattice vectors `min_pitch` cannot see. None for
+    # bare-number poses. Out of `eq`/`repr`: it holds a numpy grid, and a
+    # frozen dataclass would otherwise compare it elementwise and raise.
+    raster: object | None = field(default=None, compare=False, repr=False)
 
     def footprint_orders(self):
         """The two 90-degree in-plane assignments, per the §4 angle ladder.
@@ -366,7 +778,7 @@ def measure_poses(mesh: trimesh.Trimesh, candidates,
     """
     poses = []
     for cand in candidates:
-        grid = occupancy(mesh, cand.rotation_matrix, voxel_mm)
+        grid, origin = _voxelise(mesh, cand.rotation_matrix, voxel_mm)
         poses.append(Pose(
             label=cand.label,
             extent=tuple(s * voxel_mm for s in grid.shape),
@@ -384,6 +796,9 @@ def measure_poses(mesh: trimesh.Trimesh, candidates,
             silhouettes=plan_silhouettes(grid.any(axis=2), voxel_mm),
             voxel_mm=voxel_mm,
             clearance=(clearance_mm, clearance_mm, stack_clearance_mm),
+            # Free -- the grid is already built, and `Raster` keeps the mesh by
+            # reference, not by copy. `lattice_check` needs both.
+            raster=Raster(grid, origin, voxel_mm, mesh, cand.rotation_matrix),
         ))
         logger.debug("pose %r extent=%s pitch=%s", cand.label,
                      poses[-1].extent, poses[-1].pitch)
@@ -410,48 +825,99 @@ def layouts_for(poses, asset, part_kg: float = 0.0) -> list:
     """
     from . import dunnage   # dunnage imports nothing from here; local to be safe
     out = []
+    max_kg = getattr(asset, "max_weight_kg", 0.0)
     for pose in poses:
         # `footprint_orders` yields (0,1,2) then (1,0,2); index 1 IS the turn.
         for turned, (extent, pitch, silhouette, clearance) in enumerate(
                 pose.footprint_orders()):
-            # F11: the insert -- and so the height each layer costs -- turns
-            # on whether the parts interleave IN PLAN, which needs the in-plane
-            # grid. One flat layer in the real footprint is that grid, from
-            # this same function rather than a second copy of the formula.
-            flat, in_plane, _ = lattice_count(
-                extent, pitch, (asset.inner[0], asset.inner[1], extent[2]))
-            # Geometric grid on purpose: no `part_kg`, so the weight cap
-            # cannot shrink it here. The cap only ever REMOVES parts from a
-            # layer, and a smaller in-plane grid can only turn the interleave
-            # off, so this over-reserves height at worst -- never under.
-            in_plane = in_plane if flat else (1, 1, 1)
-            dead = dunnage.dead_height_mm(extent, pitch, clearance,
-                                          grid=in_plane)
-            # Layer separators that the parts do NOT nest into are part of the
-            # step, not of `dead`: 10 layers need 11 sheets, and charging them
-            # once promised a layer the insert cannot carry.
-            step = dunnage.layer_step_mm(extent, pitch, clearance,
-                                         grid=in_plane)
-            pitch_fit = (pitch[0], pitch[1], step)
-            inner = (asset.inner[0], asset.inner[1], asset.inner[2] - dead)
-            count, grid_counts, limited_by = lattice_count(
-                extent, pitch_fit, inner, part_kg,
-                getattr(asset, "max_weight_kg", 0.0),
-            )
-            if count:
-                upper = count
-                if pose.voxel_mm > 0:
-                    v = pose.voxel_mm
-                    upper = max(count, lattice_count(
-                        tuple(e - v for e in extent),
-                        tuple(p - v for p in pitch_fit),
-                        inner, part_kg, getattr(asset, "max_weight_kg", 0.0),
-                    )[0])
-                out.append(Layout(asset.name, pose.label, count, grid_counts,
-                                  tuple(round(v, 2) for v in extent),
-                                  tuple(round(v, 2) for v in pitch), limited_by,
-                                  turned=bool(turned),
-                                  silhouette=silhouette, count_upper=upper))
+
+            def fit(try_pitch, shrink_l_mm=0.0, _e=extent, _c=clearance):
+                """One candidate in-plane pitch, fully scored.
+
+                -> (count, grid, pitch_fit, limited_by, inner)
+
+                THE counting expression for this (pose x asset): the ranked
+                number, the quantisation ceiling, and every pitch
+                `lattice_check` tries for a repair all come through here, so
+                the grid the check walks can never be a re-derivation of the
+                grid the count came from (CLAUDE.md hard rule 9).
+
+                `shrink_l_mm` is floor length given up along L -- what a brick
+                bond costs, because its odd rows start that much further in.
+                Only `lattice_check`'s PARKED brick branch passes it, to price
+                an option it never ships; nothing here applies it.
+                """
+                inner_l = asset.inner[0] - shrink_l_mm
+                # F11: the insert -- and so the height each layer costs --
+                # turns on whether the parts interleave IN PLAN, which needs
+                # the in-plane grid. One flat layer in the real footprint is
+                # that grid, from this same function rather than a second copy
+                # of the formula.
+                #
+                # Geometric grid on purpose: no `part_kg`, so the weight cap
+                # cannot shrink it here. The cap only ever REMOVES parts from a
+                # layer, and a smaller in-plane grid can only turn the
+                # interleave off, so this over-reserves height at worst.
+                flat, in_plane, _ = lattice_count(
+                    _e, try_pitch, (inner_l, asset.inner[1], _e[2]))
+                in_plane = in_plane if flat else (1, 1, 1)
+                dead = dunnage.dead_height_mm(_e, try_pitch, _c, grid=in_plane)
+                # Layer separators that the parts do NOT nest into are part of
+                # the step, not of `dead`: 10 layers need 11 sheets, and
+                # charging them once promised a layer the insert cannot carry.
+                step = dunnage.layer_step_mm(_e, try_pitch, _c, grid=in_plane)
+                p_fit = (try_pitch[0], try_pitch[1], step)
+                inner = (inner_l, asset.inner[1], asset.inner[2] - dead)
+                n, g, limited = lattice_count(_e, p_fit, inner, part_kg, max_kg)
+                return n, g, p_fit, limited, inner
+
+            count, grid_counts, pitch_fit, limited_by, inner = fit(pitch)
+            if not count:
+                continue
+            # The mixed lattice vectors. `min_pitch` cleared each axis on its
+            # own; three 1-D clearances are not a clear 3-D lattice.
+            check = lattice_check(pose.raster, (1, 0, 2) if turned else (0, 1, 2),
+                                  pitch, clearance,
+                                  lambda try_p, shrink=0.0: fit(try_p, shrink)[:3])
+            if check and check["verdict"] == "fatal":
+                # Nothing clears it, so there is no design here to offer. A
+                # crash MUST NOT be ranked: the review found this branch
+                # shipping 70,400 interpenetrating parts as the top answer,
+                # with a correct-looking count, a drawing, a BOM and no reason
+                # attached. An empty result set is visibly a non-answer; a
+                # confident wrong one is not.
+                logger.warning(
+                    "%s / %r%s: lattice collides on %s at pitch %s and no "
+                    "repair clears it -- layout dropped",
+                    asset.name, pose.label, " turned" if turned else "",
+                    [c["offset"] for c in check["collisions"] if c["fatal"]],
+                    tuple(round(v, 1) for v in pitch))
+                continue
+            repair = (check or {}).get("repair")
+            if repair:
+                # A crash is repaired, not annotated: every number below -- and
+                # so the drawing, the BOM and the truck fit downstream -- is
+                # the repaired lattice's. `lattice_check` says which branch.
+                # Only a pitch branch ever gets here (the brick bond is parked),
+                # so the lattice stays the aligned grid the drawing can build.
+                pitch = tuple(repair["pitch_lbh"])
+                count, grid_counts, pitch_fit, limited_by, inner = fit(pitch)
+                if not count:
+                    continue
+            upper = count
+            if pose.voxel_mm > 0:
+                v = pose.voxel_mm
+                upper = max(count, lattice_count(
+                    tuple(e - v for e in extent),
+                    tuple(p - v for p in pitch_fit),
+                    inner, part_kg, max_kg,
+                )[0])
+            out.append(Layout(asset.name, pose.label, count, grid_counts,
+                              tuple(round(v, 2) for v in extent),
+                              tuple(round(v, 2) for v in pitch), limited_by,
+                              turned=bool(turned),
+                              silhouette=silhouette, count_upper=upper,
+                              lattice_check=check))
     out.sort(key=lambda l: -l.count)
     return out
 

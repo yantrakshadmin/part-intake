@@ -68,8 +68,11 @@ def _ensure_added_columns(eng) -> None:
     `import app.main`. One narrow shim beats that; delete it when Alembic lands.
     """
     added = {"packaging": {"kind": "VARCHAR(16) DEFAULT 'container'",
-                          "tare_kg": "FLOAT", "material": "VARCHAR(16)"},
-             "part_profiles": {"project_id": "INTEGER"},
+                          "tare_kg": "FLOAT", "material": "VARCHAR(16)",
+                          "fold_type": "VARCHAR(16) DEFAULT 'unknown'",
+                          "folded_h_mm": "FLOAT", "lid_void_mm": "FLOAT"},
+             "part_profiles": {"project_id": "INTEGER",
+                              "surface_class": "VARCHAR(16)"},
              "solve_jobs": {"project_id": "INTEGER", "inputs_json": "JSON"}}
     insp = inspect(eng)
     tables = set(insp.get_table_names())
@@ -213,6 +216,7 @@ def create_part(payload: PartProfileIn, db: Session = Depends(get_db)):
         job_id=payload.job_id,
         glb_path=glb_path,
         project_id=payload.project_id,
+        surface_class=payload.surface_class,
         confirmed_orientation=(
             {"matrix": payload.confirmed_orientation}
             if payload.confirmed_orientation else None
@@ -377,6 +381,7 @@ def _to_out(p: PartProfile) -> PartProfileOut:
         weight_kg=p.weight_kg, source=p.source,
         glb_url=f"/api/files/{Path(p.glb_path).name}" if p.glb_path else None,
         project_id=p.project_id,
+        surface_class=p.surface_class,
         created_at=p.created_at,
     )
 

@@ -7,12 +7,25 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine, select  # noqa: E402
+# Check 9 imports app.main, which seeds its DB at import time against the
+# compose default (postgres host "db") unless told otherwise. Point it at a
+# throwaway sqlite BEFORE anything under app/ is imported, as test_solve_api
+# does, so this file still runs bare as the docstring promises.
+import os  # noqa: E402
+import tempfile  # noqa: E402
+
+_TMP = tempfile.mkdtemp(prefix="test_catalogue_")
+os.environ.setdefault("INTAKE_DATABASE_URL", f"sqlite:///{_TMP}/seed.db")
+os.environ.setdefault("INTAKE_LOCAL_STORAGE_DIR", _TMP)
+os.environ.setdefault("INTAKE_REDIS_URL", "redis://127.0.0.1:6379/9")
+
+from sqlalchemy import (Column, Integer, MetaData, String, Table,  # noqa: E402
+                        create_engine, inspect, select, text)
 from sqlalchemy.orm import Session  # noqa: E402
 
 from app.catalogue import Container, containers  # noqa: E402
 from app.engine import parts_per_truck  # noqa: E402
-from app.models import Base, Packaging  # noqa: E402
+from app.models import Base, Packaging, PartProfile  # noqa: E402
 from app.nesting import lattice_count  # noqa: E402
 from app.seed_data import PACKAGING, VEHICLES, seed_master_data  # noqa: E402
 from tests.ground_truth import CASES  # noqa: E402
@@ -136,7 +149,7 @@ def main() -> int:
         id=1, item_code="PLS12801", inner_l_mm=1150, inner_b_mm=750,
         inner_h_mm=790, outer_l_mm=1200, outer_b_mm=800, outer_h_mm=986,
         max_weight_kg=600, status="checked", kind="container",
-        tare_kg=30.0, material="HDPE",
+        tare_kg=30.0, material="HDPE", fold_type="unknown",
     )
     dumped = PackagingOut.model_validate(row).model_dump()
     assert dumped.get("tare_kg") == 30.0, dumped
@@ -153,6 +166,94 @@ def main() -> int:
     except pydantic.ValidationError:
         pass
 
+    # 9. T6 migration check (landmine 5): a db built before fold_type /
+    # folded_h_mm / lid_void_mm / surface_class existed must gain all four
+    # when main._ensure_added_columns runs, and a packaging row written
+    # before the column existed must read back the column's own SQL
+    # DEFAULT, not a Python-side value nobody wrote for it.
+    from app import main as app_main                     # noqa: PLC0415
+    old_engine = create_engine("sqlite:///:memory:")
+    old_meta = MetaData()
+    Table(
+        "packaging", old_meta,
+        Column("id", Integer, primary_key=True),
+        Column("item_code", String(32)),
+        Column("kind", String(16)),
+    )
+    Table(
+        "part_profiles", old_meta,
+        Column("id", Integer, primary_key=True),
+        Column("part_number", String(64)),
+    )
+    old_meta.create_all(old_engine)
+    with old_engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO packaging (id, item_code, kind) "
+            "VALUES (1, 'OLD001', 'container')"
+        ))
+
+    insp_before = inspect(old_engine)
+    pkg_before = {c["name"] for c in insp_before.get_columns("packaging")}
+    pp_before = {c["name"] for c in insp_before.get_columns("part_profiles")}
+    assert not {"fold_type", "folded_h_mm", "lid_void_mm"} & pkg_before, pkg_before
+    assert "surface_class" not in pp_before, pp_before
+
+    app_main._ensure_added_columns(old_engine)
+
+    insp_after = inspect(old_engine)
+    pkg_after = {c["name"] for c in insp_after.get_columns("packaging")}
+    pp_after = {c["name"] for c in insp_after.get_columns("part_profiles")}
+    assert {"fold_type", "folded_h_mm", "lid_void_mm"} <= pkg_after, pkg_after
+    assert "surface_class" in pp_after, pp_after
+
+    with old_engine.begin() as conn:
+        old_fold_type = conn.execute(
+            text("SELECT fold_type FROM packaging WHERE id = 1")
+        ).scalar()
+    assert old_fold_type == "unknown", old_fold_type
+
+    # 10. Serialisation: all four T6 fields actually leave over HTTP (a
+    # PackagingOut/PartProfileOut missing a field drops it SILENTLY -- hard
+    # rule 9), and the catalogue adapter carries them through the DB path too.
+    ser_engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(ser_engine)
+    with Session(ser_engine) as db:
+        db.add(Packaging(
+            item_code="T6-SER", inner_l_mm=500, inner_b_mm=400, inner_h_mm=300,
+            outer_l_mm=520, outer_b_mm=420, outer_h_mm=320, max_weight_kg=50,
+            status="checked", kind="container",
+            fold_type="collapsible", folded_h_mm=150.0, lid_void_mm=40.0,
+        ))
+        db.add(PartProfile(
+            part_number="T6-PART", part_name="T6 test part",
+            length_mm=100, breadth_mm=80, height_mm=50, weight_kg=2.5,
+            source="manual", surface_class="raw",
+        ))
+        db.commit()
+        pkg_row = db.scalars(
+            select(Packaging).where(Packaging.item_code == "T6-SER")
+        ).one()
+        part_row = db.scalars(
+            select(PartProfile).where(PartProfile.part_number == "T6-PART")
+        ).one()
+
+        pkg_dumped = PackagingOut.model_validate(pkg_row).model_dump()
+        assert pkg_dumped.get("fold_type") == "collapsible", pkg_dumped
+        assert pkg_dumped.get("folded_h_mm") == 150.0, pkg_dumped
+        assert pkg_dumped.get("lid_void_mm") == 40.0, pkg_dumped
+
+        # main._to_out is the actual /api/parts serialisation path (PartProfile
+        # has glb_path, not glb_url -- _to_out derives it, so this is not a
+        # plain PartProfileOut.model_validate(row)).
+        part_dumped = app_main._to_out(part_row).model_dump()
+        assert part_dumped.get("surface_class") == "raw", part_dumped
+
+        db_boxes = containers(db)
+        ser_box = next(c for c in db_boxes if c.name == "T6-SER")
+        assert ser_box.fold_type == "collapsible", ser_box.fold_type
+        assert ser_box.folded_h_mm == 150.0, ser_box.folded_h_mm
+        assert ser_box.lid_void_mm == 40.0, ser_box.lid_void_mm
+
     print(f"PASS  containers(): {len(boxes)} rows, all kind=container")
     print(f"PASS  duck-typed for nesting.lattice_count: PLS12801 -> {count} parts")
     print("PASS  PLS12801 inner (1150, 750, 790), PLS12803 inner (1150, 750, 1000)")
@@ -167,6 +268,11 @@ def main() -> int:
           "(PLS12804 in) and overwrites nothing (PLS12801 tare 99.0 kept)")
     print("PASS  PackagingOut ships tare_kg/material (pydantic drops "
           "undeclared fields silently); assets=[] rejected, None unrestricted")
+    print("PASS  _ensure_added_columns adds packaging.fold_type/folded_h_mm/"
+          "lid_void_mm and part_profiles.surface_class to a pre-T6 db; "
+          f"old row reads back fold_type={old_fold_type!r}")
+    print("PASS  PackagingOut/PartProfileOut/catalogue.containers() all ship "
+          "fold_type/folded_h_mm/lid_void_mm/surface_class")
     print()
     print("all checks passed")
     return 0

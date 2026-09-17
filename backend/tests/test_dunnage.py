@@ -442,9 +442,14 @@ def check_layer_sheets_charge_every_boundary(check) -> None:
           "9 layers x 42 = 378, not the 10 x 42 = 420 that does not fit",
           f": grid {grid}, count {count}")
     sheet = next(e for e in got.elements if e.qty == grid[2] + 1)
-    check(sheet.net_height_mm == (grid[2] + 1) * dunnage.LAYER_SHEET_MM,
-          f"all {grid[2] + 1} sheets are charged, not one",
+    check(sheet.net_height_mm == 2 * dunnage.LAYER_SHEET_MM,
+          "only the bottom and top sheets are DEAD height; the other "
+          f"{grid[2] - 1} are inside the layer step",
           f": {sheet.net_height_mm}mm")
+    check(got.build_height_mm
+          == grid[2] * ext[2] + (grid[2] + 1) * dunnage.LAYER_SHEET_MM,
+          f"all {grid[2] + 1} sheets are charged, not one",
+          f": build {got.build_height_mm}mm")
     check(got.fits and got.build_height_mm <= inner[2] + 1e-6,
           "the BOM for the layout the engine emits fits the box",
           f": build {got.build_height_mm} vs {inner[2]}")
@@ -453,13 +458,21 @@ def check_layer_sheets_charge_every_boundary(check) -> None:
     over = dunnage.bom(ext, pitch, (grid[0], grid[1], grid[2] + 1), inner)
     check(not over.fits, "one more layer does not fit (1033 > 1003mm)",
           f": build {over.build_height_mm}")
-    # A vertical interleave deeper than the sheet absorbs it: SX4's own pose
-    # (nest depth 4mm > 3mm sheet) charges nothing per layer, which is why its
-    # counts do not move.
-    check(dunnage.layer_step_mm((332.0, 876.0, 76.0), (177.0, 833.0, 72.0),
-                                grid=(5, 1, 13)) == 72.0,
-          "a 4mm vertical interleave swallows the 3mm sheet: step = pitch",
-          f": {dunnage.layer_step_mm((332.0, 876.0, 76.0), (177.0, 833.0, 72.0), grid=(5, 1, 13))}")
+    # T2. A RIGID sheet cannot hide in a vertical nest: it lies ON the lower
+    # part's top surface, so the upper part rests on the SHEET and the nest is
+    # gone. Was `== 72.0` (pitch_H + max(0, 3 - 4)) -- SX4's own pose, extent_H
+    # 76 / pitch_H 72 / nest depth 4 / 3mm sheet, which cost it a whole layer.
+    sx4 = dunnage.layer_step_mm((332.0, 876.0, 76.0), (177.0, 833.0, 72.0),
+                                grid=(5, 1, 13))
+    check(sx4 == 76.0 + 3.0,
+          "a rigid 3mm sheet defeats the 4mm vertical interleave: "
+          "step = extent_H + sheet, not pitch_H",
+          f": {sx4}")
+    check(dunnage.sheet_step_mm(4.0, 0.0) == 0.0,
+          "no sheet -> nothing to defeat the nest: step stays the pitch",
+          f": {dunnage.sheet_step_mm(4.0, 0.0)}")
+    # The tray is exempt by design: the part nests into the TRAY, not into the
+    # part below, so its step stays pitch_H (TRW, 135mm part on a 120 pitch).
     # Mubea and TRW cannot move: neither is layer_sheets.
     for case in CASES:
         check(dunnage.layer_step_mm(case.pose_lbh, case.pitch_lbh,

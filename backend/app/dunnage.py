@@ -150,7 +150,11 @@ class Bom:
 
     archetype: str                 # "bar_and_rod" | "pocket_tray" | "layer_sheets"
     elements: list = field(default_factory=list)
-    stack_height_mm: float = 0.0   # what the parts themselves occupy
+    # What the lattice itself occupies: extent_H + (layers - 1) x
+    # `layer_step_mm`. That is the parts alone on every archetype but
+    # `layer_sheets`, where the step carries the sheets BETWEEN parts
+    # (T2) and only the bottom and top ones are left as dead height.
+    stack_height_mm: float = 0.0
     build_height_mm: float = 0.0   # stack + dead height from the dunnage
     inner_h_mm: float = 0.0
     nest_depth_mm: float = 0.0     # vertical interleave: extent_H - pitch_H
@@ -226,9 +230,20 @@ def archetype_of(extent_lbh, pitch_lbh, clearance_lbh=NO_CLEARANCE_LBH,
 
 
 def sheet_step_mm(nest_depth: float, layer_sheet_mm: float = LAYER_SHEET_MM) -> float:
-    """Height ONE layer separator adds, mm: its thickness less the vertical
-    interleave the parts nest into it with."""
-    return max(0.0, float(layer_sheet_mm) - float(nest_depth))
+    """Height ONE layer separator adds ON TOP of the measured pitch, mm.
+
+    T2. A rigid PP/EPE sheet cannot hide inside a vertical nest. It lies ON
+    the lower part's top surface, so the upper part rests on the SHEET, not in
+    the part below: the interleave is gone and the boundary costs the whole
+    nest depth back plus the sheet. `layer_step_mm` adds this to pitch_H, so
+    `pitch_H + (extent_H - pitch_H) + t == extent_H + t` -- the rule.
+
+    Zero sheet is the only way to keep the nest, and then the step is the
+    measured pitch. (The pocket TRAY is exempt: there the part nests into the
+    tray, not into the part below, so `layer_step_mm` never calls this.)
+    """
+    t = float(layer_sheet_mm)
+    return 0.0 if t <= EPS else float(nest_depth) + t
 
 
 def archetype_for(extent_lbh, pitch_lbh, grid,
@@ -253,9 +268,14 @@ def layer_step_mm(extent_lbh, pitch_lbh, clearance_lbh=NO_CLEARANCE_LBH,
     pitch by construction, so both step by the measured pitch -- which is why
     Mubea and TRW cannot move. With the tray slab gone the parts rest ON the
     sheets instead, and 10 layers of a flat-stacking part need 11 of them:
-    the engine must step by `pitch_H + sheet` or it promises a layer the
+    the engine must step by `extent_H + sheet` or it promises a layer the
     insert cannot carry (extent 100 / pitch 100 / inner 1003 claimed 10
     layers; the BOM needs 1033mm and only 9 fit).
+
+    T2: `extent_H + sheet`, not `pitch_H + max(0, sheet - nest_depth)`. A
+    rigid sheet defeats a vertical nest rather than sinking into it -- see
+    `sheet_step_mm`. The SX4 floor side cover (extent_H 76 on a 72 pitch, 3mm
+    sheet) stepped by 72 and claimed 13 layers it cannot carry; 12 fit.
     """
     pitch_h = float(pitch_lbh[2])
     if archetype_for(extent_lbh, pitch_lbh, grid, clearance_lbh, **kw) \
@@ -344,7 +364,12 @@ def bom(extent_lbh, pitch_lbh, grid, inner_lbh,
     # Every layer above the first gets that depth free from the parts under it;
     # dunnage lying in a layer boundary is free up to the same depth.
     nest_depth = max(0.0, ext_h - pitch_h)
-    stack = ext_h + (layers - 1) * pitch_h
+    # The stack steps by what the LATTICE steps by, which is the pitch unless
+    # a rigid layer sheet defeats the vertical nest (T2). Identical to pitch_h
+    # for bar_and_rod and pocket_tray, so neither shipped deck moves.
+    step_h = layer_step_mm(extent_lbh, pitch_lbh, clearance_lbh, grid,
+                           layer_sheet_mm)
+    stack = ext_h + (layers - 1) * step_h
 
     # F11. Parts that interleave in plan have no gap between them, so no
     # in-plane divider can exist: the SX4 floor cover measured pitch_L 177
@@ -379,9 +404,7 @@ def bom(extent_lbh, pitch_lbh, grid, inner_lbh,
                  build_height_mm=stack + dead, inner_h_mm=inner_h,
                  nest_depth_mm=nest_depth, slack_lbh=slack,
                  interleaved=interleaved,
-                 layer_step_mm=layer_step_mm(extent_lbh, pitch_lbh,
-                                             clearance_lbh, grid,
-                                             layer_sheet_mm))
+                 layer_step_mm=step_h)
     if result.overflow:
         logger.debug("dunnage BOM overflows the inner on %s (%s)",
                        result.overflow, kind)
@@ -512,26 +535,35 @@ def _layer_sheets(extent_lbh, pitch_lbh, grid, inner_lbh, nest_depth,
 
     These sheets are NOT free the way a tray's are. A tray's sheet shares the
     vertical pitch with the pocket under it, so only the one under the bottom
-    tray is dead height; here there is no tray, the parts rest ON the sheets,
-    and every one of the `layers + 1` boundaries costs its thickness less
-    whatever vertical interleave the parts nest into it with. Charging one
-    sheet (the first version of this generator) promised a layer the insert
-    could not carry: extent 100 / pitch 100 / inner 1003 read 10 layers x 420
-    parts and the BOM's own 11 sheets need 1033mm, so 9 layers fit.
-    `layer_step_mm` is the other half of this -- the engine steps by
-    `pitch_H + sheet` so the count it picks is one this BOM supports.
+    tray is dead height; here there is no tray and the parts rest ON the
+    sheets, so all `layers + 1` are charged -- but only TWO of them outside
+    the lattice step. The `layers - 1` sheets between parts are already in
+    `layer_step_mm` (T2: the step is `extent_H + sheet`); what is left here is
+    the one under the bottom row and the one over the top row, neither of
+    which has a part above or below to share with. Charging one sheet (the
+    first version of this generator) promised a layer the insert could not
+    carry: extent 100 / pitch 100 / inner 1003 read 10 layers x 420 parts and
+    the BOM's own 11 sheets need 1033mm, so 9 layers fit.
+
+    Double-counting warning: `bom` adds this to a stack that already steps by
+    `layer_step_mm`, so charging `(layers + 1) * sheet` here would pay for the
+    interior sheets twice. `tests/test_dunnage.py` asserts the total instead
+    of either half: `build == layers * extent_H + (layers + 1) * sheet`.
 
     ponytail: still `_pocket_tray`'s own sheet element, so the sheet stays
     one expression. The in-plane dunnage for these poses (comb, end stops) is
     a deck question; nothing is invented here.
     """
     layers = int(grid[2])
-    step = sheet_step_mm(nest_depth, kw.get("layer_sheet_mm", LAYER_SHEET_MM))
-    return [replace(e, net_height_mm=(layers + 1) * step,
+    sheet = float(kw.get("layer_sheet_mm", LAYER_SHEET_MM))
+    return [replace(e, net_height_mm=2 * sheet,
                     note=e.note.replace("bottom tray", "bottom layer")
                     + f" No in-plane pockets: the parts interleave in plan, so "
                       f"no divider fits between them, and with no tray under "
-                      f"them every sheet costs {_fmt(step)}mm of height.")
+                      f"them all {layers + 1} sheets are charged: the "
+                      f"{max(layers - 1, 0)} between parts inside the layer "
+                      f"step, the bottom and top ones ({_fmt(2 * sheet)}mm) "
+                      f"above it.")
             for e in _pocket_tray(extent_lbh, pitch_lbh, grid, inner_lbh,
                                   nest_depth, **kw) if e.cell_mm is None]
 

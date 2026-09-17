@@ -2693,3 +2693,92 @@ fields).
 Working tree untouched this session except this entry. Still not pushed
 (11 commits). Open: E2, PackAssistant trial, F13a/F11a/F11b/F12/S2/F16,
 PLS fold type / lid void question for Rahul.
+
+## 2026-09-16 (later) — Re-sign round run to its 3-cycle cap; verdict v4 still carries two dissents
+
+Resumed per the entry above: `resign.py --max-cycles 3` ran 15:12–15:25.
+Gemini redrafted three times (v2, v3, v4); Fable and Opus DISSENTED every
+cycle. `verdict.md` in the durable debate dir is v4 + both cycle-3 dissents;
+v1–v3 archived beside it.
+
+**The design is no longer contested.** Every rule we planned to ticket is
+accepted in writing by both signatories in cycle 3: Δ_proj load-path split,
+oblique sweep, 8-direction drift relaxation with a default μ table printed
+on the drawing, free-stand test, `compact()` jam loop, per-candidate
+n_z loop (no global slab deduction), per-element amortisation, eight-rung
+element cascade, noise gate at pitch+4, weight gate, 66-trip cap, HDPE-on-HDPE
+riveted comb, and — the one that mattered for ground truth — the diagonal
+check with the 2 mm re-voxelisation growth test (collision only if overlap
+grows ≥ 2.0× under refinement), which keeps the stabiliser bar at 40.
+
+**What still dissents is the §7 outcome table the chair fills in by hand:**
+- Row 5 height: comb-every-deck adds 8 mm/deck → n_z 4 not 5 → 540 not 675.
+- Row 3: §4's 15 mm pocket floor contradicts the 5 mm used; both signatories
+  give the same fix (top + bottom 3 mm PP locator decks, no pocket, EPE fill
+  under the top deck → 50 parts legal). The top-deck locator needs a §1 row.
+- Row 1: slab must be slack-sized filler (20 mm floor), not fixed 33 mm →
+  60 not 55; slab cost volumetric.
+- Rows 4/5: diagonal re-solve must be argmax over {row deletion, pitch
+  increase, brick-bond offset s} and print the winning branch — not only the
+  row-deletion branch.
+
+These are numbers the engine will compute once T1–T7 land; the debaters
+hand-computing them is the thing the whole verdict says not to do. PM view:
+stop the debate here, treat v4 body + cycle-3 dissents as the spec, and put
+the four table fixes into the tickets as acceptance checks rather than buy
+another cycle. Rahul decides.
+
+Working tree: this entry only. Still not pushed.
+
+## 2026-09-16 (later still) — Cycle 4 run, debate closed by PM ruling, tickets T1–T7 written and fanned out
+
+Rahul bought one more cycle. v5 drafted 15:29; Fable and Opus DISSENTED again
+(15:34). Debate closed. PM rulings on the residue, with the data:
+- **2.0× diagonal threshold stands.** Opus argued a real intersection scales
+  8× under 4→2 mm refinement so ≥4.8× should be fatal. That is solid-body
+  scaling; our models are open shells. The sweep measured crashes at
+  2.7–3.4× and the deck-proven bar at 1.04×. His rule would pass every
+  observed crash. Constant stays tunable, ratio printed per layout (T1).
+- **Weight gate zeroes the forward gain and continues** to the cost model
+  instead of refusing (Opus, accepted; T5).
+- **66 trips and ₹35,000 become config parameters** with stated defaults
+  (Opus, accepted; T5).
+- **Comb is 6 + 3 = 9 mm** everywhere (Fable, accepted; T7).
+- Row 3 mid-deck (Fable: 6 mm routed HDPE THRU/BLIND; Opus: shared capture
+  deck with land-width check) folded into T7's locator element spec.
+- Everything else in the §6 table is a number the engine will compute.
+
+Tickets in PLANNING §10 ("Retention & loadability, 2026-09-16"). Launched
+now: T1 (geometry, nesting.py), T2 (geometry, dunnage.py), T6 (backend,
+catalogue/part fields). Queued: T3, T4 after T1; T5 after T6; T7 last.
+Final verdict with the debaters' arguments, PM rulings and the open-claims
+scoreboard (C1–C15): local debate dir `debate/final_verdict.md`. Test results
+go into its §3 Result column, then one scoring round per debater (§5).
+
+## 2026-09-16 (later still) — T1/T2/T6 verified, ready to commit
+
+T1 (multi-axis lattice check, `nesting.py`), T2 (rigid sheet step, `dunnage.py`) and
+T6 (fold_type / folded_h_mm / lid_void_mm / surface_class) went through implementer →
+code review → tester as one batch. Review findings fixed: fatal-with-no-repair layouts
+are dropped with a warning, not ranked; brick-bond repair PARKED (reported as
+`lattice_check.brick_bond`, never applied — drawing/BOM cannot draw a staggered row,
+hard rule 9) → new ticket T1b in PLANNING §10; `DIAG_FATAL_RATIO == 2.0` pinned by a
+test; docstrings (module count, flip-twin raster limitation, `_shift_voxels` touching
+pitch); `insert_drawing` self-check fixture given real nest depth so it can see T2.
+Tester (25-file baseline-vs-new sweep from a git worktree at HEAD): exactly seven
+files changed — rear shroud 60→50, floor side cover 65→60, front fairing 48→40,
+motor cover 810→770 (ratio 2.35 at 2 mm, 5.62 at 1 mm: a crash), visor 408→330,
+ZB 3000 36→32 (PLS12103→PLS12101), headstock 66 kept at pitch_L 337→369; front shroud
+rank-2 40→32, winner 40; 18 files bit-identical; flag sets identical; Mubea 40 / TRW
+48; solve +2.0 % wall clock. T6 over real HTTP on :8012 round-trips all four fields,
+422 on a bad fold_type, and boots against a pre-T6 sqlite (four ALTERs, old row reads
+'unknown'). Tester findings fixed by PM: PLANNING T1 acceptance numbers rewritten to
+the verified ones; `tests/test_catalogue.py` sets a hermetic `INTAKE_DATABASE_URL`
+before importing `app.main` so it runs bare again (red/green proven).
+Debate scoreboard (`final_verdict.md` §3, local): C1 supports 2.0×; C2 motor cover is
+a real crash (Gemini/PM); C3 brick bond AGAINST Opus (only ZB 3000 clears); C10 partly
+wrong (one extra rank-2 row moved); C15 +2 %; C8 pending the full 4/2/1 lattice run.
+Rahul's ruling on the lowered counts: quality over quantity — a count ships only when
+physics, drawing and BOM agree. Not committed; Rahul commits.
+Next: commit; T1b written; launch T3 + T4 (geometry) and T5 (backend) in parallel;
+scoring round with the three debaters once C8 has data.

@@ -582,3 +582,160 @@ whole occupancy grid along one axis and finds the arch of one shell
 colliding with the arch of the next — correct for these voxels at 4 mm, but
 a shell 2–3 mm thick with 4 mm cells is solid. Needs a finer voxel on the
 thin axis or a surface-offset test. Not a drawing bug; a count ceiling.
+
+### Retention & loadability, 2026-09-16 — tickets T1–T7 from the three-model debate
+
+Source: verdict v5 + cycle-4 dissents in the local debate dir (PROGRESS
+2026-09-16). The design rules below are accepted by all three models; the
+unsigned residue is per-row table arithmetic and four points the PM ruled on
+(PROGRESS 2026-09-16, later still). Every ticket: ground truth 40/48 must
+still pass; new dataclass field ⇒ same-edit response-model field, checked over
+real HTTP (hard rule 9); agent scratch goes to the session scratchpad, never
+`<repo>/scratchpad/`.
+
+**T1 — Multi-axis lattice validity with contact tolerance (geometry,
+`nesting.py`).** `min_pitch` only tests single-axis offsets; the lattice is
+assumed valid from three 1-D results. For each layout actually ranked, test
+every difference vector `(i·pL, j·pB, k·pH)` with ≥2 non-zero components that
+the lattice contains (`|i| < n_i`, half-space), at the layout pitch (clearance
+included). On any shared 4 mm cell, re-voxelise the two copies at 2 mm over the
+overlap AABB only and compute `ratio = cells2 / cells4`. Fatal iff
+`ratio ≥ DIAG_FATAL_RATIO = 2.0`. Calibration is empirical on the 24-part
+sweep, because these are open surface shells, not solids: measured crashes
+2.7–3.4× (rear shroud, front fairing, headstock, visor, ZB 3000), motor cover
+2.35× (line contact, ambiguous), stabiliser bar 1.04× (tangency, deck-proven
+40). Opus's solid-volume threshold (≥4.8×) would pass every observed crash
+and is rejected on that data; keep the constant tunable and print the ratio.
+When fatal: repair = `argmax(count)` over {pitch_B +4 mm steps, pitch_L +4 mm
+steps, brick-bond row offset `s` ∈ swept values} — deleting a row/column is
+the pitch-increase branch, not a separate one. `Layout.lattice_check` (and
+`LayoutOut.lattice_check`, same edit): offsets tested, each collision
+`(i,j,k, cells4, cells2, ratio)`, verdict, winning repair branch, runner-up
+count. Reference implementation of the enumeration and the 2 mm recheck:
+`~/.claude/projects/-Users-rahulsharma-PycharmProjects-part-intake/debate-2026-09-16/diag/diag_check.py`
+(local, read-only; do not copy into the repo). Acceptance:
+`python tests/ground_truth.py` passes; stabiliser bar reports the (0,1,1)
+collision at ratio ≈1.04 and stays 40 on PLS12801; TRW reports zero
+multi-axis offsets and stays 48; `tests/sweep.py` shows rear shroud 60→≤50 or
+repaired, front fairing 48→≤40 or repaired, visor 408→≤330, headstock
+cover 66 kept, ZB 3000 36→32 (axis repair; the brick bond that would keep 36
+is reported, not applied); `lattice_check` present in
+`GET /api/solve-jobs/{id}` over HTTP; solve wall clock within +10 %.
+*Landed 2026-09-16 (uncommitted at time of writing), with one deviation and
+one parking:* the check runs at the touching pitch `(pitch − clearance)`, not
+the clearance-inflated pitch, because at the inflated pitch the stabiliser
+bar's deck-proven contact vanishes; and the brick-bond branch is PARKED —
+computed and reported as `lattice_check.brick_bond {s_mm, count}` but never
+shipped, because `Layout` carries no row offset so `insert_drawing._place`
+and `dunnage.bom` would draw the aligned grid the check just failed (hard
+rule 9). Unpark under **T1b** below. A fatal lattice with no clearing repair
+is dropped with a `logger.warning`, not ranked. Tester-verified numbers:
+rear shroud 50, floor side cover 60 (T2), front fairing 40, visor 330,
+headstock 66 (pitch_L 337→369), ZB 3000 32 in PLS12101, motor cover 770
+(ratio 2.35 at 2 mm, 5.62 at 1 mm — a crash, not an artefact), front shroud
+40 clear; 18 other sweep files bit-identical; Mubea 40 / TRW 48; solve
++2.0 % wall clock.
+
+**T1b — Unpark the brick bond (geometry + drawing).** `Layout` gains a
+per-row offset `s_mm` along L; `insert_drawing._place`, the F17 sheets,
+`dunnage.bom` pocket positions and the Three.js animation honour it; only
+then does `lattice_check` move the `brick` branch back into the repair
+argmax. Acceptance: on the ZB 3000 M2 `PLS12103 / Alternative 1` pose the
+engine ships 36 with `repair.branch == "brick"`, the drawing shows staggered
+rows, the BOM pocket count equals `count`, and the count/picture check in
+`insert_drawing` self-checks passes red/green on a hand-built staggered
+fixture. Not before T3/T4.
+
+**T2 — Rigid sheet cannot hide in a vertical nest (geometry, `dunnage.py`).**
+`sheet_step_mm = max(0, sheet − nest_depth)` is wrong: a rigid PP/EPE sheet
+between two parts that nest into each other sits ON the lower part's top, so
+the layer step is `extent_H + t_sheet`, not `pitch_H + (sheet − nest_depth)`.
+Rule: `step_H = pitch_H if t_interleaf == 0 else extent_H + t_interleaf`.
+Applies to `layer_sheets` only; `pocket_tray` nests the part into the tray
+(TRW 135 on a 120 pitch is the tray, not the part below) and `bar_and_rod`
+has no sheet. Acceptance: `tests/test_dunnage.py` updated and passing; floor
+side cover (SX4BD010077) 65 → 60 in `sweep.py`; Mubea 40 / TRW 48 unchanged;
+the F17 sheet drawing and the BOM sheet qty still agree with `grid[2]`.
+
+**T3 — Loadability: silhouette pitch and the load path (geometry).**
+`p_sil` = 2-D slide of the plan silhouette (`grid.any(axis=2)`) per floor
+axis; `Δ_proj = p_sil − p_vol`. `Δ_proj == 0` ⇒ straight descent clear,
+pre-load elements legal. `Δ_proj > 0` ⇒ run an oblique translation sweep (40
+directions on the upper hemisphere, voxel step) of one part into its
+neighbours' occupied lattice; if none clears, a tilt sweep gated by
+`inner_H − stack_H` headroom; if all fail ⇒ pose REFUSED with reason
+`no load path`. Fields on `Layout`/`LayoutOut`: `pitch_sil`, `delta_proj`,
+`load_path: {kind: straight|oblique|tilt|none, dir: (u, φ)}`. Acceptance:
+Mubea and TRW report `straight`; floor side cover (shingled, 72 pitch on 76
+extent) reports `Δ_proj > 0` and a sweep result; a REFUSED pose carries the
+reason string in `reasons`; ground truth unchanged.
+
+**T4 — Retention computed, not assumed (geometry).** (a) Free-stand test on
+the foot voxels of one part in pose: inscribed circle `r_min ≥ 20 mm` and tip
+angle `≥ 15°` ⇒ PASS. (b) 8-direction 1 g drift relaxation on the lattice:
+slide every part along each floor direction until contact; a layer is
+`frozen` when `μ·N_p ≥ m_p·a` with `N_p(k) = P_top/n_xy + g·Σ m(layers above k)`
+and the stack verdict is the **minimum over layers**. μ from a default table
+keyed on (surface_class, contact face): raw steel/PP 0.25, raw steel/EPE 0.5,
+painted or oiled/EPE 0.35, e-coat/PP 0.2; printed on the drawing. `m_p` is
+`PartProfile.weight_kg` (user-supplied; never from CAD, hard rule 4). (c)
+`compact()`: displacement-controlled wall (`wall_pos −= 4 mm`) on the chain;
+JAM if lateral drift > 6 mm or tilt > θ_allow. Fields: `retention:
+{free_stand, frozen_layers, drift_mm per direction, compact: ok|jam}`.
+Acceptance: Mubea layout reports held (deck-proven); an upright layer-sheets
+part (rear shroud) reports free-stand FAIL; unit check for each test in
+`tests/test_retention.py` with synthetic grids; ground truth unchanged.
+
+**T5 — Gates and landed cost (backend, `engine.py` + schemas).** Noise gate:
+recompute the count at `pitch + 4 mm`; REFUSE the interleaved candidate iff
+`n(pitch+4) ≤ cuboid_count`. Weight gate: when payload binds, forward-freight
+gain is zero but the candidate **continues** to the cost model (return leg and
+box amortisation still differ) — refusal is the cost model's job only.
+Landed cost per part = forward freight/n + return freight/n + Σ_e C_e/(T_e·n)
++ Σ_e C_tool,e/(K·T_e·n) + labour/n, with `T_e = min(T_material,e,
+T_program, T_pool)` per element (PU slab 20 trips), return freight
+`f_ret / (n_footprints · ⌊stack_H_max / h_eff⌋)`, `h_eff = h_fold + Σ
+h_return` of non-collapsible elements. `f_fwd`, `f_ret`, `n_footprints`,
+`T_pool` (was the debate's 66), wage, `stack_H_max` are config with stated
+defaults in `config.py`, not literals. Compare against the retainable cuboid
+fallback; if the fallback wins, REFUSE with `Δ₹/part`. Missing
+`mass | surface_class | annual_volume | fold_type` ⇒ dual-branch (raw/1 kg vs
+Class A/1 kg) and `ranking_unreliable: true` on `SolveResultOut`. Every gate
+that fires writes one sentence to `reasons` (the Pack Studio binding-constraint
+line). Acceptance: `SolveResultOut.landed_cost_per_part` and the reason
+sentence over HTTP; block-like part (UPP_P212, 150 vs 144) is refused by the
+noise gate; TRW/Mubea counts unchanged; `test_engine.py` covers the weight
+gate continuing rather than refusing.
+
+**T6 — Catalogue and part inputs the rules need (backend).** `Packaging`:
+`fold_type VARCHAR(16)` (`rigid|collapsible|unknown`, default unknown),
+`folded_h_mm FLOAT`, `lid_void_mm FLOAT`. `PartProfile`: `surface_class
+VARCHAR(16)` (`raw|painted|ecoat|class_a`, nullable). Add to
+`main._ensure_added_columns`, `PackagingIn/Out`, the part-profile schemas and
+`seed_data` (None) in the same commit. Dims are never auto-filled (hard rule
+2). Acceptance: `import app.main` against a copy of an existing pre-change
+`dev.db` boots and logs the ALTERs; POST then GET `/api/packaging` round-trips
+all three fields over real HTTP; ground truth unchanged. Frontend edit fields
+follow as T6b once the API is live.
+
+**T7 — Element cascade, new elements, drawings (geometry + backend, after
+T3–T5).** Eight-rung ordered cascade from the verdict §2 (post-load only when
+`Δ_proj > 0`; follower when free-stand PASS and `compact()` OK; pads (+slab)
+on JAM; comb when free-stand FAIL and straight slot wall ≥12 mm over ≥60 % of
+the foot span; peg board; knife-cut pocket `K<6`; die/thermoform `K≥6` or
+>8 kg; else REFUSE). Per candidate: `n_z(e)` from its own deck/top heights
+(no global slab deduction), `slack_H < 4 mm ⇒ n_z −1`, print the near-miss
+when the lost layer is within 10 % of a step. New `dunnage` elements: comb
+(HDPE 6 mm strips on 3 mm base = **9 mm**, `SLOT W / PITCH — VOXEL 4–8 —
+MEASURE SAMPLE`, M5 pop-rivet 150 mm), follower (3 mm HDPE end plate strapped
+to base, HDPE hard stop riveted to base), preload slab sized to `slack_H +
+10` free with 20 mm compressed floor, volumetric cost, PU 60–80, 20 trips,
+locator decks (3 mm PP top/base; a mid-deck between two located layers is
+6 mm routed HDPE with THRU/BLIND per hole and a ≥12 mm land check), tooling
+elements sized at `pitch + 4` with `TOOL SIZED AT PITCH+4 — VERIFY BEFORE
+CUT`. Acceptance: front fairing emits a comb with BOM qty = `n_z` and a
+manufacturing sheet whose slot pitch equals the layout pitch expression (hard
+rule 9); a refused rung prints its reason; ground truth unchanged.
+
+Order: T1, T2, T6 now (independent files). T1b after T3/T4. T3, T4 after T1 (share
+`nesting.py`). T5 after T6. T7 last.

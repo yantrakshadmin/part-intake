@@ -63,6 +63,9 @@ class PartProfileIn(BaseModel):
     # F1: which Project this part belongs to. None keeps today's standalone
     # part-profile behaviour.
     project_id: Optional[int] = None
+    # T6: raw | painted | ecoat | class_a. Nullable — never guessed from CAD
+    # (hard rule 2); the retention rules read it once someone enters it.
+    surface_class: Optional[Literal["raw", "painted", "ecoat", "class_a"]] = None
 
     @field_validator("breadth_mm")
     @classmethod
@@ -91,6 +94,12 @@ class PackagingIn(BaseModel):
     outer_b_mm: float = Field(gt=0, le=3000)
     outer_h_mm: float = Field(gt=0, le=3000)
     max_weight_kg: float = Field(gt=0, le=2000)
+    # T6: return-leg inputs the retention rules need. Nullable/defaulted so a
+    # box added today with none of this still works (hard rule 2 — never
+    # auto-filled).
+    fold_type: Literal["rigid", "collapsible", "unknown"] = "unknown"
+    folded_h_mm: Optional[float] = Field(default=None, gt=0, le=3000)
+    lid_void_mm: Optional[float] = Field(default=None, ge=0, le=3000)
 
 
 class PackagingOut(PackagingIn):
@@ -273,6 +282,13 @@ class LayoutOut(BaseModel):
     # results that predate these fields.
     cuboid_count: int = 0
     reasons: list[str] = []
+    # `nesting.lattice_check`: offsets_tested, collisions (offset, cells4,
+    # cells2, ratio, fatal), verdict, repair. Free-form dict on purpose -- it
+    # is diagnostic detail, not a contract the UI computes from, and the
+    # numbers above are ALREADY the repaired ones when verdict is "repaired".
+    # Null on results stored before this field existed, and on bare-number
+    # poses. Declared here or pydantic drops it silently (hard rule 9).
+    lattice_check: Optional[dict] = None
     # Declared here or pydantic drops them silently and the interleaved insert
     # drawing is back to a bounding rectangle with a BOM the UI cannot show
     # (CLAUDE.md hard rule 9 -- this response model IS the contract).
@@ -406,6 +422,7 @@ class PartProfileOut(BaseModel):
     source: str
     glb_url: Optional[str]
     project_id: Optional[int] = None
+    surface_class: Optional[str] = None
     created_at: datetime
 
     class Config:
