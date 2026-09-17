@@ -2782,3 +2782,50 @@ Rahul's ruling on the lowered counts: quality over quantity — a count ships on
 physics, drawing and BOM agree. Not committed; Rahul commits.
 Next: commit; T1b written; launch T3 + T4 (geometry) and T5 (backend) in parallel;
 scoring round with the three debaters once C8 has data.
+
+## 2026-09-17 — T3/T4/T5 landed and verified, ready to commit
+
+T3 (loadability: `loadability.py`), T4 (retention: `retention.py`) and T5 (gates +
+landed cost: `engine.py`, `config.py`, `worker.py`, schemas) went implementer → geometry
+and backend reviewers → fix rounds → tester tiers 1–3 as one batch. Review findings fixed
+(12 in all, each with a red/green check): `cuboid_count` now `cuboid_layout(...)[0]` so
+count and extent come from one expression; weight branch understated cost 26 %; `T_pool`
+read live from settings; drift probes all 8 neighbours and reports {L, B, L+B, L−B};
+`compact()` re-based on the contact-normal slope against the friction cone (tan θ ≤ μ),
+walked ≤ 3 steps else "unknown" — the first criterion said jam on every real part;
+friction free body corrected to the two-face single-part form with the top layer exempt;
+`surface_class` threaded rank_catalogue → layouts_for → retention; loadability memo key
+includes bounds and shape; tilt copies dilate so a rotated raster is never thinner;
+`_selfcheck` deleted, `probes` renamed. PM rulings: 4 mm noise band kept (UPP P212 150 is
+a real 15 mm interleave, not raster noise); Mubea Δ_proj = (0, 12) is correct and the
+ticket's 0 was wrong; **two-pass load path** — the strict sweep refused ZB 3000's true 32
+(two raster cells of 32,573 blocked every slide-in), pass 2 runs only on a refusal and
+blocks a 4 mm contact only if it survives T1's 2 mm test, 32 is back as oblique on
+u = (0.606, 0.790, 0.090); equal counts rank pass-1 straight before pass-2 oblique
+(`nesting.load_rank`, test in `test_nesting`) so the two-pass could not silently swap
+FLC12102's pose at 27. Follow-up T3b written: `_compute_fine` reads "cannot measure" as
+clear inside a refusing gate; pass 2 walks all 160 probes.
+Verification (PM, one process at a time — 8 GB machine): ground truth 40/48, neither
+file enters pass 2; 18/18 test modules exit 0; fields driver on eight diagnostic parts —
+only ZB 3000 moved (27 → 32), compact verdict now 6 ok / 2 jam (bar tan 0.364, fairing
+0.3) instead of a constant jam, frozen_layers "slides" everywhere without preload,
+free_stand false on the four uprights; full 25-file sweep alone (1027 s wall) against the
+3a670b2 baseline: 24/24 winners identical, one top-3 pose change (ZB 3000 rank 3, the
+tie-break); engine time 723 → 860 s, concentrated on refused-heavy files (headstock
+10 → 102 s, tail panel 5 → 37, TVS tray 131 → 205, ZB 3000 10 → 37) — the price of pass
+2, T3b's (b). Bar `engine.solve` 3 runs 7.58 s mean vs 7.08 at 3a670b2 (+7 %, inside
+C15's 10 %). Hard rule 9 checked over real HTTP for every new field. New Settings:
+f_fwd_per_trip 1094, f_ret_per_trip 35000, n_footprints 16, T_pool 66, wage_per_hour
+50, stack_H_max_mm 2000, K_programs 1. `ranking_unreliable` is True on every real solve
+today because fold_type is "unknown" everywhere — T6 data entry, not a bug.
+Scoreboard (`final_verdict.md` §3, local): C4 neither (floor side cover loads straight);
+C5 against Gemini (motor cover compacts); C6 against Opus (Δ_proj = 0 on none of his
+three parts); C7 half — Fable's μ 0.5 claim holds, μ 0.25 fails under the corrected free
+body; C9 undecidable (no real part binds on payload); C14 supports Fable (rear shroud
+free-stand fails, r_min 12.5). Tally so far: Fable 3 for / ½ against, Gemini 1 for /
+1 against, Opus 0 for / 4 against, PM 4 for. Tiered testing (ground truth + module
+tests per change; six parts pre-commit; one sweep per batch vs a stored baseline) is the
+standing scheme. Not committed; Rahul commits. Next baseline = this sweep
+(`scratchpad/tester345/sweep_t345.md`, local).
+Next: commit; scoring round with the three debaters (§5); T1b; T3b; T7.
+

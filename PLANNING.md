@@ -669,6 +669,30 @@ neighbours' occupied lattice; if none clears, a tilt sweep gated by
 Mubea and TRW report `straight`; floor side cover (shingled, 72 pitch on 76
 extent) reports `Δ_proj > 0` and a sweep result; a REFUSED pose carries the
 reason string in `reasons`; ground truth unchanged.
+*Landed 2026-09-17, two corrections to the acceptance text.* Mubea reports
+`Δ_proj = (0, 12)`, not 0 — the bars overhang 12 mm on B and the figure
+grows to 16 at 1 mm, so it is geometry, not raster; the count exists
+because the z-profiles differ across the overlap, and the load path is
+still `straight` (pass 1). The strict 4 mm sweep also refused a true
+layout (ZB 3000 32 (4,4,2): two raster cells of 32,573 blocked every
+slide-in) so the load path is **two-pass**: pass 2 runs only on a refusal
+and treats a 4 mm contact as blocked only if it survives T1's 2 mm test
+(`fine_cells` ≥ `DIAG_FATAL_RATIO` × cells, or fine cells beyond the fine
+seat). `load_path.pass` is 1 or 2; at equal count a pass-1 straight drop
+outranks a pass-2 oblique (`nesting.load_rank`). Mubea and TRW never enter
+pass 2; ZB 3000 pays +28 s cold for it.
+
+**T3b — Load-path hardening (geometry, after T3).** (a) `Raster._compute_fine`
+returns 0 ("graze") when the 2 mm crop is smaller than the offset or no
+triangle reaches the overlap box; inside a gate whose job is to refuse,
+"cannot measure" must read as blocked, not clear. ZB 3000's 32 was re-checked
+with every unmeasurable contact treated as blocked and held, so no shipped
+count depends on it today. (b) Pass 2 walks all 160 probes; ZB 3000 clears at
+probe 177 of 320 — cap the second pass or order its directions by Δ_proj so
+the refusal price stops scaling with the catalogue. Acceptance: ground truth
+40/48; ZB 3000 keeps 32 (4,4,2) oblique; a synthetic layout whose only
+contacts are unmeasurable is refused; ZB 3000 cold `rank_catalogue` under
+15 s.
 
 **T4 — Retention computed, not assumed (geometry).** (a) Free-stand test on
 the foot voxels of one part in pose: inscribed circle `r_min ≥ 20 mm` and tip

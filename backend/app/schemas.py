@@ -289,6 +289,22 @@ class LayoutOut(BaseModel):
     # Null on results stored before this field existed, and on bare-number
     # poses. Declared here or pydantic drops it silently (hard rule 9).
     lattice_check: Optional[dict] = None
+    # `retention.retention` (T4): free_stand, frozen_layers, drift_mm per
+    # direction, compact ok|jam, the mu it was judged at and whether the mass
+    # was assumed. Free-form dict for the same reason as `lattice_check` --
+    # diagnostic detail, not something the UI computes from. Null on stored
+    # results that predate the field and on bare-number poses.
+    retention: Optional[dict] = None
+    # `loadability.load_path` (T3) and its two inputs: the plan-silhouette
+    # pitch per floor axis, `pitch_sil - pitch_lbh` floored at zero, and the
+    # way in (kind straight|oblique|tilt plus the direction). A layout with no
+    # load path is refused in `nesting.layouts_for` and never serialised, so
+    # `kind` is never "none" here. Null on stored results that predate the
+    # fields and on bare-number poses. Free-form dict for the same reason as
+    # `lattice_check`; declared here or pydantic drops it silently (rule 9).
+    pitch_sil: Optional[tuple[float, float]] = None
+    delta_proj: Optional[tuple[float, float]] = None
+    load_path: Optional[dict] = None
     # Declared here or pydantic drops them silently and the interleaved insert
     # drawing is back to a bounding rectangle with a BOM the UI cannot show
     # (CLAUDE.md hard rule 9 -- this response model IS the contract).
@@ -402,6 +418,17 @@ class SolveResultOut(BaseModel):
     # frontend polls render_status to know when the pictures are ready.
     render_status: Literal["pending", "done", "failed"] = "done"
     render_error: Optional[str] = None
+    # T5: landed Rs/part for the winning option (custom when
+    # custom_beats_catalogue, else catalogue[0] -- same object best_count
+    # describes, CLAUDE.md hard rule 9). None when nothing was solved.
+    landed_cost_per_part: Optional[float] = None
+    # The same figure under the "Class A" branch of the missing-input dual
+    # branch (PLANNING §10 T5/T6) -- see `engine.ResultSet` for why it is
+    # numerically identical today.
+    landed_cost_per_part_class_a: Optional[float] = None
+    # True when mass, surface_class, annual_volume or the winning asset's
+    # fold_type was not given, so the landed cost above used a default.
+    ranking_unreliable: bool = False
 
 
 class SolveJobStatusOut(BaseModel):

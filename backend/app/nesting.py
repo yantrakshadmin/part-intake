@@ -138,6 +138,25 @@ class Layout:
     # did. Declared on `schemas.LayoutOut` in the same edit or pydantic drops
     # it silently (hard rule 9).
     lattice_check: dict | None = None
+    # `retention.retention` on this layout: free stand, 8-direction drift,
+    # the friction freeze per layer and the `compact()` jam test (T4). None
+    # for a bare-number pose, same as `lattice_check`. Declared on
+    # `schemas.LayoutOut` in the same edit or pydantic drops it silently
+    # (hard rule 9).
+    retention: dict | None = None
+    # T3 loadability. `pitch_sil` is the closest spacing of the PLAN
+    # SILHOUETTES per floor axis and `delta_proj` is `pitch_sil - pitch_lbh`
+    # floored at zero: zero means the shadows are disjoint and a straight
+    # descent is provably clear, above zero means the parts overhang and the
+    # count exists only because their z-profiles differ across the overlap.
+    # `load_path` is `loadability.load_path` -- kind straight|oblique|tilt and
+    # the direction it clears on. A layout with kind "none" is REFUSED in
+    # `layouts_for` and never reaches here. None for a bare-number pose, same
+    # as `lattice_check`. Declared on `schemas.LayoutOut` in the same edit or
+    # pydantic drops them silently (hard rule 9).
+    pitch_sil: tuple | None = None
+    delta_proj: tuple | None = None
+    load_path: dict | None = None
 
     @property
     def interleave(self) -> tuple:
@@ -805,8 +824,15 @@ def measure_poses(mesh: trimesh.Trimesh, candidates,
     return poses
 
 
-def layouts_for(poses, asset, part_kg: float = 0.0) -> list:
+def layouts_for(poses, asset, part_kg: float = 0.0,
+                surface_class: str | None = None) -> list:
     """Score already-measured poses against one asset. Best first.
+
+    `surface_class` is `PartProfile.surface_class` (raw|painted|ecoat|class_a)
+    and only feeds the T4 retention friction coefficient; None means the
+    default table's raw row, and the payload says so. `part_kg` is the same
+    user-supplied `PartProfile.weight_kg` the weight cap uses -- retention
+    never derives a mass from the CAD (hard rule 4).
 
     The inner height the lattice gets is the asset's minus the height its
     own insert adds above the stack (`dunnage.dead_height_mm`): a pocket
@@ -824,6 +850,8 @@ def layouts_for(poses, asset, part_kg: float = 0.0) -> list:
     it, and the drawing gets the step off the BOM (`Bom.layer_step_mm`).
     """
     from . import dunnage   # dunnage imports nothing from here; local to be safe
+    from . import retention as retention_mod        # ditto (T4)
+    from . import loadability                       # ditto (T3)
     out = []
     max_kg = getattr(asset, "max_weight_kg", 0.0)
     for pose in poses:
@@ -904,6 +932,36 @@ def layouts_for(poses, asset, part_kg: float = 0.0) -> list:
                 count, grid_counts, pitch_fit, limited_by, inner = fit(pitch)
                 if not count:
                     continue
+            # T4: does the design HOLD the parts once it fits them? Same
+            # raster, same pitch, same grid as the count above (hard rule 9);
+            # the dunnage family decides the face the part rests on, so it
+            # comes from `dunnage.archetype_for` rather than a second guess.
+            held = retention_mod.retention(
+                pose.raster, (1, 0, 2) if turned else (0, 1, 2),
+                pitch_fit, grid_counts,
+                family=dunnage.archetype_for(extent, pitch, grid_counts,
+                                             clearance),
+                surface_class=surface_class, weight_kg=part_kg or None)
+            # T3: can one part be PUT INTO that lattice? Same raster, same
+            # (repaired) pitch, same grid and the same `inner` the count came
+            # out of -- hard rule 9. `kind == "none"` is a refusal, not a
+            # footnote.
+            path = loadability.load_path(
+                pose.raster, (1, 0, 2) if turned else (0, 1, 2),
+                pitch_fit, grid_counts, inner, clearance)
+            if path and path["kind"] == "none":
+                # Same discipline as a fatal lattice above: a design with no
+                # way in is not a design. `Layout` is only built for layouts
+                # that ship, so there are no `reasons` to append the string
+                # to -- it goes to the log and into `load_path["reason"]`.
+                logger.warning(
+                    "%s / %r%s: no load path -- delta_proj %s at pitch %s, "
+                    "%d probes and the tilt rung all blocked by the "
+                    "already-placed neighbours -- layout dropped",
+                    asset.name, pose.label, " turned" if turned else "",
+                    path["delta_proj"], tuple(round(v, 1) for v in pitch_fit),
+                    path["probes"])
+                continue
             upper = count
             if pose.voxel_mm > 0:
                 v = pose.voxel_mm
@@ -917,9 +975,30 @@ def layouts_for(poses, asset, part_kg: float = 0.0) -> list:
                               tuple(round(v, 2) for v in pitch), limited_by,
                               turned=bool(turned),
                               silhouette=silhouette, count_upper=upper,
-                              lattice_check=check))
-    out.sort(key=lambda l: -l.count)
+                              lattice_check=check, retention=held,
+                              pitch_sil=tuple(path["pitch_sil"]) if path else None,
+                              delta_proj=tuple(path["delta_proj"]) if path else None,
+                              load_path=path))
+    out.sort(key=lambda l: (-l.count, load_rank(l)))
     return out
+
+
+_KIND_RANK = {"straight": 0, "oblique": 1, "tilt": 2}
+
+
+def load_rank(layout) -> tuple:
+    """Tie-break for equal counts: the easier load wins.
+
+    Pass 1 (strict sweep) before pass 2 (fine-raster tolerance), then straight
+    descent before oblique before tilt. Without this a stable sort let pose
+    order decide, and the two-pass load path un-refused earlier poses on ZB
+    3000 so FLC12102's 27 silently changed from 'Alternative 1' (straight,
+    pass 1) to 'Largest face down' (oblique, pass 2) -- same count, different
+    drawing, insert and BOM. A bare-number layout carries no load_path and
+    ranks as a pass-1 straight drop.
+    """
+    path = layout.load_path or {}
+    return (path.get("pass", 1), _KIND_RANK.get(path.get("kind", "straight"), 3))
 
 
 def rank_catalogue(mesh: trimesh.Trimesh, candidates, assets,
@@ -927,7 +1006,7 @@ def rank_catalogue(mesh: trimesh.Trimesh, candidates, assets,
                    voxel_mm: float = VOXEL_MM,
                    clearance_mm: float = DEFAULT_CLEARANCE_MM,
                    stack_clearance_mm: float = DEFAULT_STACK_CLEARANCE_MM,
-                   poses=None) -> list:
+                   poses=None, surface_class: str | None = None) -> list:
     """Best layout per asset across the whole catalogue, best first.
 
     One entry per asset -- the engineer compares containers, not the 8 poses of
@@ -943,7 +1022,7 @@ def rank_catalogue(mesh: trimesh.Trimesh, candidates, assets,
                               stack_clearance_mm)
     best = []
     for asset in assets:
-        layouts = layouts_for(poses, asset, part_kg)
+        layouts = layouts_for(poses, asset, part_kg, surface_class)
         if layouts:
             best.append(layouts[0])
     # Ties on count go to the SMALLER box. Equal parts-per-box is NOT equal
@@ -968,7 +1047,7 @@ def nest(mesh: trimesh.Trimesh, candidates, asset,
          voxel_mm: float = VOXEL_MM,
          clearance_mm: float = DEFAULT_CLEARANCE_MM,
          stack_clearance_mm: float = DEFAULT_STACK_CLEARANCE_MM,
-         part_kg: float = 0.0) -> list:
+         part_kg: float = 0.0, surface_class: str | None = None) -> list:
     """Rank every (resting pose x in-plane rotation) for one asset. Best first.
 
     `candidates` are `geometry.OrientationCandidate`s; `asset` needs `.name`,
@@ -984,5 +1063,5 @@ def nest(mesh: trimesh.Trimesh, candidates, asset,
     return layouts_for(
         measure_poses(mesh, candidates, voxel_mm, clearance_mm,
                       stack_clearance_mm),
-        asset, part_kg,
+        asset, part_kg, surface_class,
     )

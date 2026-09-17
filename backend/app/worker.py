@@ -381,6 +381,9 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
             part = db.get(PartProfile, job.part_id)
             if part is None:
                 raise ValueError(f"Part {job.part_id} not found")
+            # T5: landed cost's missing-input check (annual_volume lives on
+            # the Project, not the part).
+            project = db.get(Project, part.project_id) if part.project_id else None
 
             mesh, _solid_count = load_unified_mesh(part.glb_path)
 
@@ -443,7 +446,13 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
             result = engine_mod.solve(
                 mesh, candidates, part_kg=part.weight_kg, assets=assets,
                 top_n=params.get("top_n", 2), clearance_mm=clearance_mm,
+                surface_class=part.surface_class,
+                annual_volume=project.annual_volume if project else None,
+                k_programs=params.get("k_programs"),
             )
+            # T5: one sentence per fired gate (noise gate drop, cost-fallback
+            # refusal) -- same warnings channel every other gate already uses.
+            warnings_from_gates = list(result.gate_notes)
 
             # ticket 2: the exploded insert drawing (G-DRAW) used to render
             # right here, blocking "done" on a ~40s/layout GIF the user is
@@ -461,6 +470,7 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
             # a label attached to it. Open shells and multi-body files are
             # facts, not caveats -- see extract_part; they no longer warn.
             warnings += list(extraction.result_json.get("warnings") or [])
+            warnings += warnings_from_gates
 
             # Dunnage the inner has no room for. In plane, `lattice_count`
             # charges no wall clearance and the side separators stand beside
@@ -667,6 +677,11 @@ def run_solve(job_id: str, params: dict | None = None) -> None:
                 "best_count": result.best_count,
                 "truck": dataclasses.asdict(truck) if truck is not None else None,
                 "warnings": warnings,
+                # T5: landed Rs/part for the winning option, and whether any
+                # of mass/surface_class/annual_volume/fold_type was missing.
+                "landed_cost_per_part": result.landed_cost_per_part,
+                "landed_cost_per_part_class_a": result.landed_cost_per_part_class_a,
+                "ranking_unreliable": result.ranking_unreliable,
                 # ticket 2: the count above is real now; the pictures are a
                 # separate task (render_run). "pending" until it lands.
                 "render_status": "pending",

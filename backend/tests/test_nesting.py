@@ -691,6 +691,25 @@ def test_brick_bond_is_reported_but_never_shipped():
 
 
 
+def test_equal_counts_rank_the_easier_load_first():
+    """A pass-1 straight drop outranks a pass-2 oblique at the same count.
+    Stable sort on -count alone let pose order decide (ZB 3000 FLC12102)."""
+    from app import nesting
+    def mk(label, path):
+        return nesting.Layout("A", label, 27, (3, 3, 3), (1, 1, 1), (1, 1, 1),
+                              "geometry", load_path=path)
+    oblique2 = mk("Largest face down", {"kind": "oblique", "pass": 2})
+    straight1 = mk("Alternative 1", {"kind": "straight", "pass": 1})
+    tilt1 = mk("Alt 2", {"kind": "tilt", "pass": 1})
+    bare = mk("bare", None)
+    ranked = sorted([oblique2, tilt1, straight1, bare],
+                    key=lambda l: (-l.count, nesting.load_rank(l)))
+    labels = [l.pose_label for l in ranked]
+    assert labels[:2] == ["Alternative 1", "bare"] or labels[:2] == ["bare", "Alternative 1"], labels
+    assert labels[2:] == ["Alt 2", "Largest face down"], labels
+    print("  pass-1 straight before pass-1 tilt before pass-2 oblique:", labels)
+
+
 if __name__ == "__main__":
     for fn in (test_ground_truth, test_exact_fit_is_not_off_by_one, test_weight_cap,
                test_count_upper_is_the_quantisation_ceiling,
@@ -705,7 +724,8 @@ if __name__ == "__main__":
                test_tangency_is_grazing_and_keeps_the_count,
                test_fatal_ratio_is_pinned,
                test_fatal_without_repair_is_not_shipped,
-               test_brick_bond_is_reported_but_never_shipped):
+               test_brick_bond_is_reported_but_never_shipped,
+               test_equal_counts_rank_the_easier_load_first):
         print(f"{fn.__name__}:")
         fn()
     print("\nall checks passed")
