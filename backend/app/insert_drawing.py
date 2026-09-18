@@ -53,7 +53,7 @@ Self-check (renders both archetypes off the ground-truth lattices):
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 from typing import Callable
 
@@ -64,8 +64,12 @@ from scipy import ndimage
 import matplotlib
 matplotlib.use("Agg")               # Celery worker, no display. Before pyplot.
 import matplotlib.pyplot as plt     # noqa: E402
+from matplotlib.backends.backend_agg import FigureCanvasAgg        # noqa: E402
 from matplotlib.collections import LineCollection, PolyCollection   # noqa: E402
-from matplotlib.patches import Circle, Rectangle                    # noqa: E402
+from matplotlib.figure import Figure                                # noqa: E402
+from matplotlib.patches import Circle, PathPatch, Rectangle         # noqa: E402
+from matplotlib.path import Path as MplPath                        # noqa: E402
+from matplotlib.transforms import Affine2D                          # noqa: E402
 from matplotlib import font_manager                                # noqa: E402
 from PIL import Image                                               # noqa: E402
 
@@ -1006,12 +1010,15 @@ def explode_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
 ORTHO_VIEWS = (("Front", 1, 0, 2), ("Side", 0, 1, 2), ("Top", 2, 0, 1))
 C_SIL = "#1E40AF"        # the part silhouette; the deck's own primary blue
 C_SIL_EDGE = "#14286B"   # its drawn outline, so a part reads as a shape
-C_CARD = "#B45309"       # dunnage outlines: cardboard, thin, never filled
-# The silhouette is a raster of a 12mm lattice and at report scale that
-# staircase is what the eye sees first ("very low level of image generation").
-# Upsample the mask x4 and threshold at 0.5, then stroke the same 0.5 contour:
-# the shape is unchanged -- this is resampling of `_place`'s own mask, not a
-# different mask -- but the edge reads as drawn instead of as pixels.
+C_CARD = "#B45309"       # dunnage outlines: cardboard, thin
+SHEET_FILL_MM = 6.0      # a dunnage solid this thin is drawn as one solid band
+# F17's SECTION A-A still draws `_place`'s 12mm mask directly (it is one
+# pocket at sheet scale, not the whole box), and at that scale the staircase
+# is what the eye sees first. Upsample the mask x4 and threshold at 0.5, then
+# stroke the same 0.5 contour: the shape is unchanged -- this is resampling of
+# `_place`'s own mask, not a different mask -- but the edge reads as drawn
+# instead of as pixels. `ortho_png` no longer goes through here at all; see
+# `SIL_MM` below for why a 12mm raster cannot draw the report view.
 SMOOTH = 4
 
 
@@ -1027,9 +1034,8 @@ def _smooth_sil(ax, mask, cell_mm: float, x0: float = 0.0, y0: float = 0.0,
     thresholded at 0.5, stroked on that same 0.5 contour.
 
     The shape is unchanged -- this is a resample of the mask, not a different
-    mask -- but the edge reads as drawn instead of as 12mm pixels. Shared by
-    `ortho_png` and F17's SECTION A-A so the two drawings cannot drift apart
-    in style; `_check_ortho_panels` measures the area this produces.
+    mask -- but the edge reads as drawn instead of as 12mm pixels. F17's
+    SECTION A-A only; `ortho_png` traces the real mesh (`_sil_mask`).
     """
     field = ndimage.zoom(mask.astype(float), SMOOTH, order=1,
                          grid_mode=True, mode="nearest")
@@ -1046,9 +1052,211 @@ def _smooth_sil(ax, mask, cell_mm: float, x0: float = 0.0, y0: float = 0.0,
                zorder=z + 0.5, alpha=alpha)
 
 
+# F15b: the report drawing is NOT a picture of the 12mm count lattice.
+# `_place` rasterises parts AND dunnage on `cell_mm`, and a layer step that is
+# not a whole number of cells (the SX4 cover: 79mm = 6.58 cells against a
+# 7-cell part) puts every separator sheet THROUGH the parts -- 7920 of 81884
+# part cells coincided with a sheet cell, and no cell size fixes it: still
+# 6560/350916 at 6mm and 2345/859680 at 4mm. So the drawing takes ONE
+# silhouette off the real mesh at 1mm and stamps it at the exact millimetre
+# origins `_place` recorded (`parts_at_step`) -- same lattice expression,
+# no rounding (hard rule 9).
+SIL_MM = 1.0             # silhouette raster: one pixel per millimetre
+
+
+def _posed_mesh(mesh: trimesh.Trimesh, rotation) -> trimesh.Trimesh:
+    """`mesh` rotated into its resting pose and reseated so the min corner is
+    the origin -- the same pose and the same seat `pose_voxels` rasterises
+    (its dense matrix starts at the occupied region's own lower corner), so a
+    silhouette from here lands on the origins `_place` recorded."""
+    m = mesh.copy()
+    m.apply_transform(_as_4x4(rotation))
+    if m.bounds is None:
+        # An empty mesh gives `bounds is None` and the reseat below would be
+        # a TypeError the worker logs as an unexplained "ortho drawing
+        # failed". Say what is actually wrong instead.
+        raise ValueError("the posed mesh has no geometry (%d faces): the "
+                         "ortho silhouette cannot be traced"
+                         % len(getattr(m, "faces", ())))
+    m.apply_translation(-m.bounds[0])
+    return m
+
+
+def _sil_mask(m: trimesh.Trimesh, h: int, v: int) -> np.ndarray:
+    """The posed mesh's triangles projected onto (h, v) and rasterised at
+    `SIL_MM`, as a bool (h, v) mask seated at the part's own min corner.
+
+    Rendered once into an offscreen Agg canvas at 1px/mm: 40k-95k triangles
+    take ~0.2-0.5s a view, where `nesting.occupancy` at 1mm takes 30-120s.
+    Filled AND stroked -- a triangle seen edge-on projects to a zero-area
+    line, and on the open shells every customer file is, that is most of them
+    at some angle.
+    """
+    size = m.bounds[1] - m.bounds[0]
+    w = max(2, int(np.ceil(size[h] / SIL_MM)))
+    ht = max(2, int(np.ceil(size[v] / SIL_MM)))
+    fig = Figure(figsize=(w / 100.0, ht / 100.0), dpi=100, facecolor="none")
+    FigureCanvasAgg(fig)
+    ax = fig.add_axes((0.0, 0.0, 1.0, 1.0), facecolor="none")
+    ax.set_axis_off()
+    ax.set_xlim(0.0, w * SIL_MM)
+    ax.set_ylim(0.0, ht * SIL_MM)
+    ax.add_collection(PolyCollection(m.vertices[m.faces][:, :, (h, v)],
+                                     facecolors="k", edgecolors="k",
+                                     linewidths=0.8, antialiased=False))
+    fig.canvas.draw()
+    # Alpha, not colour: the figure and axes are transparent, so any pixel a
+    # triangle reached is the only thing with alpha on the canvas. Rows come
+    # back top-down, hence the flip, then transpose to (h, v).
+    return (np.asarray(fig.canvas.buffer_rgba())[::-1, :, 3] > 0).T
+
+
+def _mask_path(mask: np.ndarray, cell_mm: float):
+    """A bool (h, v) mask traced at 0.5 into ONE closed `MplPath` in mm,
+    origin at cell (0, 0)'s lower corner. `None` for an empty mask.
+
+    Padded with a ring of False so a shape touching the edge still closes, and
+    contoured on CELL CENTRES so the traced outline sits half a cell inside
+    the occupied cells' outer face -- the shape, not a dilation of it.
+    """
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.any():
+        return None
+    field = np.pad(mask.astype(float), 1)
+    xs = (np.arange(field.shape[0]) - 0.5) * cell_mm
+    ys = (np.arange(field.shape[1]) - 0.5) * cell_mm
+    cs = Figure().add_subplot().contour(xs, ys, field.T, levels=[0.5])
+    verts, codes = [], []
+    for path in cs.get_paths():
+        for poly in path.to_polygons(closed_only=False):
+            if len(poly) < 3:
+                continue
+            verts.extend((poly, poly[:1]))
+            codes += ([MplPath.MOVETO] + [MplPath.LINETO] * (len(poly) - 1)
+                      + [MplPath.CLOSEPOLY])
+    return MplPath(np.vstack(verts), codes) if codes else None
+
+
+def _uninset_pocket(o, s) -> tuple:
+    """One drawn void back to the pocket the BOM actually states.
+
+    `_pocket_tray_rows` insets every void by `POCKET_WALL_MM`/2 per side so a
+    wall survives the 12mm raster -- DRAW-ONLY, see the constant. Anything
+    that draws in MILLIMETRES has to take that straight back out: F17's
+    dimensioned sheet prints the BOM's `cell_mm` beside the rectangle, and
+    F15's Top view drew the wheel 371x354 inside a 341x325 pocket, i.e. every
+    part bursting 15mm through all four walls. One helper so the two cannot
+    drift apart; the raster paths (explode, GIF) keep the inset.
+    """
+    w = POCKET_WALL_MM
+    return ((o[0] - w / 2, o[1] - w / 2, o[2]),
+            (s[0] + w, s[1] + w, s[2]))
+
+
+def _ortho_geometry(p: _Placement, name: str, h: int, v: int) -> tuple:
+    """Everything one ortho panel draws, in EXACT millimetres:
+    `(part origins [(x, y)], dunnage rects [(element name, x, y, w, h)])`.
+
+    Part origins are `_place`'s own `parts_at_step` records -- the mm the
+    count was laid out on, deduped because a 12-layer stack is one silhouette
+    in plan. Dunnage comes off the same `row.geo()` cuboids `_place`
+    rasterises, deduped at 0.1mm: unsnapped raster rounding used to split a
+    3mm sheet and the tray sitting on it into four coincident full-width
+    lines, and at exact mm they are simply the same rectangle or two
+    different ones.
+
+    `ortho_png` draws exactly this and nothing else, so `_check_ortho_panels`
+    can assert on it -- in particular that no sheet crosses a part.
+    """
+    seen, parts = set(), []
+    for origins in p.parts_at_step.values():
+        for o in origins:
+            k = (round(o[h], 1), round(o[v], 1))
+            if k not in seen:
+                seen.add(k)
+                parts.append((o[h], o[v]))
+    seen, rects = set(), []
+    for row in p.rows:
+        if row.geo is None:
+            continue
+        solids, voids = row.geo()
+        if name == "Top":
+            # Plan view: a layer sheet or a tray slab is the whole footprint
+            # and would just restate the box outline. Only a pocket that could
+            # actually HOLD the part earns a wall line -- an interleaved pose
+            # whose in-plane pitch is under the part extent has no pockets,
+            # whatever its BOM says (F11). Gated on the rectangle that gets
+            # DRAWN, not on the element's declared `cell_mm`: those differ by
+            # the draw-only wall inset, so gating on the declaration let a
+            # pocket 36mm under the part through.
+            boxes = [b for b in (_uninset_pocket(o, s) for o, s in voids)
+                     if b[1][0] >= p.extent[0] and b[1][1] >= p.extent[1]]
+        else:
+            # ponytail: EVERY dunnage solid, outlined, not just the layer
+            # sheets -- a sheet is full footprint x 3mm and draws as the thin
+            # line the ticket asks for, and a bar or tray drawing itself costs
+            # one rectangle. Filter by element role here if a busy
+            # bar_and_rod front view ever needs it.
+            boxes = solids
+        for o, sz in boxes:
+            # Keyed on the ELEMENT as well as the rectangle: a sheet edge that
+            # lands exactly on a tray edge is one line either way, but sharing
+            # one key across elements made the survivor carry the first
+            # element's name, and `_sheets_through_parts` then stopped seeing
+            # a sheet it was meant to test.
+            k = (row.name,) + tuple(round(float(q), 1)
+                                    for q in (o[h], o[v], sz[h], sz[v]))
+            if k not in seen:
+                seen.add(k)
+                rects.append((row.name, o[h], o[v], sz[h], sz[v]))
+    return parts, rects
+
+
+def _sheets_through_parts(p: _Placement, part_hv, name: str, h: int, v: int,
+                          names: set, tol: float = 0.01) -> list:
+    """Every (element, rect, part origin) pair whose DRAWN spans overlap.
+
+    The F15b defect, as an assertion: `_place` rasterises parts and dunnage on
+    `cell_mm`, so a layer step that is not a whole number of cells drew each
+    separator sheet straight THROUGH the parts it separates. Off the exact mm
+    `ortho_png` now draws, this is empty. `tol` lets a sheet TOUCH the part
+    that rests on it -- the part's own z0 is the sheet thickness.
+
+    `names` is the elements to test: a layer separator must never cross a
+    part, while a pocket tray surrounds one by design and a bar_and_rod layer
+    bar is a thing the parts deliberately nest into.
+    """
+    _parts, rects = _ortho_geometry(p, name, h, v)
+    bad = []
+    for nm, x, y, w, ht in rects:
+        if nm not in names:
+            continue
+        for px, py in _parts:
+            if (min(x + w, px + part_hv[0]) - max(x, px) > tol
+                    and min(y + ht, py + part_hv[1]) - max(y, py) > tol):
+                bad.append((nm, (x, y, w, ht), (px, py)))
+    return bad
+
+
+def ortho_silhouettes(mesh: trimesh.Trimesh, rotation) -> dict:
+    """One traced part silhouette per ORTHO_VIEWS panel: `{(h, v): MplPath}`
+    in mm, origin at the posed part's min corner.
+
+    Split out of `ortho_png` so the CALLER can memoise it. The worker renders
+    one ortho per ranked asset and those commonly share a pose, so the same
+    three traces (~1.5s, and nothing in them depends on the asset) were being
+    recomputed per asset: `voxels_for` already memoises the raster the same
+    way, per (pose_label, turned).
+    """
+    posed = _posed_mesh(mesh, rotation)
+    return {(h, v): _mask_path(_sil_mask(posed, h, v), SIL_MM)
+            for _n, _d, h, v in ORTHO_VIEWS}
+
+
 def ortho_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
               bom: dunnage.Bom, asset_name: str, count: int,
-              cell_mm: float = CELL_MM) -> bytes:
+              cell_mm: float = CELL_MM, mesh: trimesh.Trimesh | None = None,
+              rotation=None, sil_paths: dict | None = None) -> bytes:
     """The packed box as three flat views -- Front, Side, Top -- as PNG bytes.
 
     The competitor's pack report (PLANNING F15) draws parts as filled
@@ -1056,15 +1264,26 @@ def ortho_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
     13-layer stack that reads where `explode_png`'s isometric voxel mass does
     not (F9).
 
-    Every silhouette is `_place`'s OWN parts volume flattened along one axis --
-    the same lattice the count came off, never a second placement expression
-    (hard rule 9). The dunnage rectangles are the same `row.geo()` cuboids
-    `_place` rasterises.
+    `mesh` + `rotation` (the resting rotation the winning layout was posed
+    with, `worker.rotation_for`) give the SHAPE: one silhouette per view off
+    the real triangles at 1mm. `sil_paths` is that same trace already done --
+    `ortho_silhouettes`, memoised by the caller across the assets that share a
+    pose -- and wins over `mesh` when both are given. `voxels` still drives
+    `_place`, so the dunnage rows, the counts and the component geometry come
+    from the one placement. With neither the silhouette falls back to the
+    `cell_mm` raster -- the synthetic self-check lattices have no CAD behind
+    them.
+
+    The POSITIONS are exact millimetres either way: `_place`'s own
+    `parts_at_step` origins and `row.geo()` cuboids, never a cell index (F15b
+    -- see `SIL_MM` above for what the rounding cost).
     """
     p = _place(voxels=voxels, extent_lbh=extent_lbh, pitch_lbh=pitch_lbh,
               grid=grid, inner_lbh=inner_lbh, bom=bom, count=count,
               cell_mm=cell_mm)
-    inner, extent = p.inner, p.extent
+    if sil_paths is None and mesh is not None and rotation is not None:
+        sil_paths = ortho_silhouettes(mesh, rotation)
+    inner = p.inner
     # Each panel gets the same axes height, so the figure follows the tallest
     # one; widths follow the horizontal span so all three share one mm scale.
     widths = [inner[h] for _n, _d, h, _v in ORTHO_VIEWS]
@@ -1078,63 +1297,21 @@ def ortho_png(*, voxels: np.ndarray, extent_lbh, pitch_lbh, grid, inner_lbh,
                  fontsize=13, weight="bold", color=C_INK, family=SANS)
 
     for ax, (name, drop, h, v) in zip(axes, ORTHO_VIEWS):
-        mask = (p.prt > 0).any(axis=drop)           # (horizontal, vertical)
-        # `grid_mode=True` (inside `_smooth_sil`) resamples CELLS, not sample
-        # points, so the smoothed field covers exactly the same mm extent as
-        # `mask` -- endpoint-aligned zoom would stretch it by half a cell at
-        # each end. `> 0.5` (strict) keeps a one-cell gap between two parts
-        # open: bilinear reads exactly 0.5 across it.
-        _smooth_sil(ax, mask, cell_mm)
-        for row in p.rows:
-            if row.geo is None:
-                continue
-            solids, voids = row.geo()
-            if name == "Top":
-                # Plan view: a layer sheet or a tray slab is the whole
-                # footprint and would just restate the box outline. Only a
-                # pocket that could actually HOLD the part earns a wall line
-                # -- an interleaved pose whose in-plane pitch is under the
-                # part extent has no pockets, whatever its BOM says (F11).
-                e = p.el[row.name]
-                if not (e.matrix and e.cell_mm
-                        and e.cell_mm[0] >= extent[0]
-                        and e.cell_mm[1] >= extent[1]):
-                    continue
-                boxes = voids
-            else:
-                # ponytail: EVERY dunnage solid, outlined, not just the layer
-                # sheets -- a sheet is full footprint x 3mm and draws as the
-                # thin line the ticket asks for, and a bar or tray drawing
-                # itself costs one rectangle. Filter by element role here if a
-                # busy bar_and_rod front view ever needs it.
-                boxes = solids
-            # Snap every dunnage rectangle to the SAME `cell_mm` lattice the
-            # silhouette is a raster of, and draw each distinct one once.
-            # Unsnapped, a component thinner than a drawn line contributed two
-            # coincident edges: the 3mm separator sheet and the 69mm tray that
-            # sits 3mm above it produced FOUR full-width lines per 72mm layer,
-            # and where sub-pixel rounding split a pair by 2px the part
-            # silhouette showed through the gap as a stray line across the
-            # Side view. Snapped, the sheet is one line at the layer boundary
-            # and the tray's edges land on it.
-            seen = set()
-            for o, s in boxes:
-                k = (int(round(o[h] / cell_mm)), int(round(o[v] / cell_mm)),
-                     int(round((o[h] + s[h]) / cell_mm)),
-                     int(round((o[v] + s[v]) / cell_mm)))
-                if k in seen:
-                    continue
-                seen.add(k)
-                # ponytail: a component under half a cell on BOTH axes snaps to
-                # a point and vanishes. At 12mm cells nothing in any shipped
-                # BOM is that small; drop the snap for that element if one ever
-                # is.
-                # Clamp to the box: a 1150 inner snaps to 1152 at 12mm cells,
-                # and a full-footprint sheet must not poke past the outline.
-                x0, x1 = (min(max(k[i] * cell_mm, 0.0), inner[h]) for i in (0, 2))
-                y0, y1 = (min(max(k[i] * cell_mm, 0.0), inner[v]) for i in (1, 3))
-                ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False,
-                                       ec=C_CARD, lw=0.5, zorder=3))
+        sil = (sil_paths[(h, v)] if sil_paths is not None
+               else _mask_path(np.asarray(voxels).any(axis=drop), cell_mm))
+        parts, rects = _ortho_geometry(p, name, h, v)
+        for x, y in (parts if sil is not None else []):
+            ax.add_patch(PathPatch(
+                sil, fc=C_SIL, ec=C_SIL_EDGE, lw=0.5, zorder=2,
+                transform=Affine2D().translate(x, y) + ax.transData))
+        for _nm, x, y, w, ht in rects:
+            # A 3 mm sheet outlined is two hairlines a pixel apart, and at
+            # report scale one of them antialiases grey: draw anything
+            # thinner than SHEET_FILL_MM as one solid cardboard band. A tray
+            # or bar keeps the outline so the parts nested in it stay visible.
+            thin = min(w, ht) <= SHEET_FILL_MM
+            ax.add_patch(Rectangle((x, y), w, ht, fill=thin, fc=C_CARD,
+                                   ec=C_CARD, lw=0.5, zorder=3))
         ax.add_patch(Rectangle((0.0, 0.0), inner[h], inner[v], fill=False,
                                ec=C_INK, lw=1.1, zorder=4))
         ax.set_title("%s\n%g x %g mm" % (name, inner[h], inner[v]),
@@ -1261,9 +1438,9 @@ def _tray_pockets(p) -> list:
     if not voids:
         return []
     z0 = min(o[2] for o, _s in voids)
-    w = POCKET_WALL_MM
-    return sorted(((o[0] - w / 2, o[1] - w / 2), (s[0] + w, s[1] + w))
-                  for o, s in voids if abs(o[2] - z0) < 1e-6)
+    return sorted((tuple(a[:2]), tuple(b[:2]))
+                  for a, b in (_uninset_pocket(o, s) for o, s in voids
+                               if abs(o[2] - z0) < 1e-6))
 
 
 def _tray_sheet(fig, p, e, bom, voxels, cell_mm) -> None:
@@ -2319,10 +2496,12 @@ def _check_ortho_panels(outdir) -> None:
     """The orthographic report drawing must actually SEPARATE parts (F15).
 
     A 3 x 2 x 4 lattice of a well-separated box: Top is 6 silhouettes, Front
-    is 4 occupied row bands (one per layer). Both numbers come off the decoded
-    PNG, not off the lattice -- a view flattened along the wrong axis, a
-    transposed mask or silhouettes merged into one blob all fail here while
-    every count in `_place` still asserts clean.
+    and Side are 4 occupied row bands each (one per layer). Those numbers come
+    off the decoded PNG, not off the lattice -- a view flattened along the
+    wrong axis, a transposed mask or silhouettes merged into one blob all fail
+    here while every count in `_place` still asserts clean. Two probe pixels
+    close the last gap: they tie a mm position `_ortho_geometry` reports to
+    the pixel the artist actually painted.
 
     Panels are located by their own box outlines: the two full-height dark
     columns per panel. Clustering the blue by gaps cannot work -- the gap
@@ -2332,14 +2511,49 @@ def _check_ortho_panels(outdir) -> None:
     from pathlib import Path
     from scipy import ndimage
 
+    # Probe offsets, mm: inside the drawn edge and clear of it. The panel
+    # resolves ~2.5mm/px, so 4/8 is the tightest pair that is not measuring
+    # antialiasing -- it bites on a stamp off by more than ~8mm.
+    IN_MM, OUT_MM = 4.0, 8.0
     extent, pitch, grid = (200.0, 150.0, 80.0), (300.0, 300.0, 150.0), (3, 2, 4)
     inner, count = (1000.0, 700.0, 700.0), 24
     bom = dunnage.bom(extent, pitch, grid, inner)
     vox = np.ones([int(np.ceil(e / CELL_MM)) for e in extent], dtype=bool)
+    # F15b: the SHAPE comes off a mesh now, so the check feeds one -- a box of
+    # exactly `extent`, whose true silhouette is `extent` to the millimetre,
+    # which is what makes the area assertion below exact instead of
+    # cell-rounded.
+    box = trimesh.creation.box(extent)
     png = ortho_png(voxels=vox, extent_lbh=extent, pitch_lbh=pitch, grid=grid,
-                    inner_lbh=inner, bom=bom, asset_name="CHECK", count=count)
+                    inner_lbh=inner, bom=bom, asset_name="CHECK", count=count,
+                    mesh=box, rotation=np.eye(4))
     path = Path(outdir) / "ortho_check_3x2x4.png"
     path.write_bytes(png)
+
+    # F15b: no separator sheet may be drawn THROUGH a part. On the 12mm
+    # raster it always was -- the BOM's layer step is not a whole number of
+    # cells -- and this is the assertion that says so, off the exact mm
+    # `ortho_png` draws from.
+    p = _place(voxels=vox, extent_lbh=extent, pitch_lbh=pitch, grid=grid,
+              inner_lbh=inner, bom=bom, count=count, cell_mm=CELL_MM)
+    sheets = {r.name for r in p.rows
+              if r.name and r.geo is not None and not p.el[r.name].matrix}
+    crossings = _sheets_through_parts(p, (extent[0], extent[2]),
+                                      "Front", 0, 2, sheets)
+    assert not crossings, "%d sheet/part crossings, e.g. %s" \
+        % (len(crossings), crossings[0])
+    # Non-vacuity: the SAME check on the cell-snapped geometry the old code
+    # drew must fail, or it is decoration. One cell of layer step rounding is
+    # all it takes.
+    assert bom.layer_step_mm % CELL_MM, \
+        "pick a lattice whose layer step is not a whole number of cells"
+    raster = replace(p, parts_at_step={
+        k: [(a, b, round(c / CELL_MM) * CELL_MM) for a, b, c in v]
+        for k, v in p.parts_at_step.items()})
+    assert _sheets_through_parts(raster, (extent[0], extent[2]),
+                                 "Front", 0, 2, sheets), \
+        "the crossing check passes on cell-snapped parts too -- it is not " \
+        "measuring anything"
 
     a = np.asarray(Image.open(BytesIO(png)).convert("RGB")).astype(int)
     r, g, b = a[..., 0], a[..., 1], a[..., 2]
@@ -2363,24 +2577,71 @@ def _check_ortho_panels(outdir) -> None:
     bands = _runs(ndimage.binary_closing(front.any(axis=1), np.ones(5)))
     assert len(bands) == 4, "%s panel has %d occupied row bands, expected 4" \
         % (names[0], len(bands))
+    # Side too, not just Front: the two panels share a vertical axis, so a
+    # view built with the wrong `v` shows up in exactly one of them.
+    sbands = _runs(ndimage.binary_closing(_side.any(axis=1), np.ones(5)))
+    assert len(sbands) == 4, "%s panel has %d occupied row bands, expected 4" \
+        % (names[1], len(sbands))
 
-    # The x4 bilinear smoothing must move the EDGE, never the area: it is a
-    # resample of `_place`'s mask, not a dilation of it. Measured off the
-    # decoded PNG against the mm area the lattice actually rasterises (the
-    # part rounded up to whole cells x 6 silhouettes), with mm-per-pixel taken
-    # from the Top box outline the panels were located by. Component and band
-    # counts alone do NOT catch over-smoothing -- a 9x9 dilation and a
-    # `> 0.0` threshold both left them at 6 and 4.
+    # The numbers above all come from `_ortho_geometry`, so they cannot see
+    # whether the ARTIST went where the geometry said: dropping
+    # `+ ax.transData` from the stamp leaves every count intact. Probe two
+    # pixels the mm positions predict -- the centre of the lowest-left Front
+    # instance must be part-blue, and the in-plane gap beside it must be
+    # white. (This resolves ~2.5mm/px, so it catches a wrong transform, a
+    # wrong axes or a silhouette that never landed; it does not claim to
+    # catch a few mm of drift -- the crossing assertion above does that.)
+    fx0, fx1 = spans[0]
+    x_px = [float(np.mean(e)) for e in panels[:2]]       # mm 0 and mm inner[0]
+    wide = dark[:, fx0:fx1].sum(axis=1)
+    hedges = _runs(wide >= 0.5 * wide.max())
+    assert len(hedges) == 2, \
+        "%s panel has %d full-width box edges, expected 2" % (names[0],
+                                                              len(hedges))
+    y_top, y_bot = (float(np.mean(e)) for e in hedges)   # mm inner[2] and mm 0
+
+    def _px(x_mm, y_mm) -> tuple:
+        return (int(round(y_bot - y_mm * (y_bot - y_top) / inner[2])),
+                int(round(x_px[0] + x_mm * (x_px[1] - x_px[0]) / inner[0])))
+
+    fparts = sorted(_ortho_geometry(p, names[0], 0, 2)[0])
+    xs = sorted({x for x, _z in fparts})
+    assert xs[1] - xs[0] - extent[0] > 2 * OUT_MM, "no in-plane gap to probe"
+    x0, z_mid = fparts[0][0], fparts[0][1] + extent[2] / 2
+    # Both EDGES of the first instance, not its centre: the centre of a 200mm
+    # part stays blue however far the stamp drifts, and a check that a 50mm
+    # offset passes is not a check.
+    hits = [_px(x0 + IN_MM, z_mid), _px(x0 + extent[0] - IN_MM, z_mid)]
+    misses = [_px(x0 - OUT_MM, z_mid), _px(x0 + extent[0] + OUT_MM, z_mid)]
+    for q in hits:
+        assert blue[q], \
+            "%s: pixel %s is %s, but _ortho_geometry puts the first instance " \
+            "%gmm inside there -- the artist is not at the mm it reports" \
+            % (names[0], q, tuple(a[q]), IN_MM)
+    for q in misses:
+        assert a[q].min() > 200, \
+            "%s: pixel %s is %s, %gmm clear of the first instance -- the " \
+            "silhouette is drawn wider or further out than it reports" \
+            % (names[0], q, tuple(a[q]), OUT_MM)
+
+    # The traced contour must BE the shape, never a dilation of it. Measured
+    # off the decoded PNG against the mesh's own plan area (a box of `extent`
+    # x 6 silhouettes), with mm-per-pixel taken from the Top box outline the
+    # panels were located by. Component and band counts alone do NOT catch an
+    # over-grown silhouette -- a 9x9 dilation and a `> 0.0` threshold both
+    # left them at 6 and 4.
     mm_px = inner[0] / (np.mean(panels[5]) - np.mean(panels[4]))
     area = top.sum() * mm_px ** 2
-    ref = 6 * np.prod([int(np.ceil(e / CELL_MM)) * CELL_MM for e in extent[:2]])
+    ref = 6 * extent[0] * extent[1]
     assert abs(area / ref - 1) < 0.04, \
-        "%s panel silhouettes cover %.0f mm2, lattice says %.0f (%.1f%% off) " \
-        "-- the smoothing is growing the shape, not just its edge" \
+        "%s panel silhouettes cover %.0f mm2, the mesh says %.0f (%.1f%% " \
+        "off) -- the traced outline is growing the shape, not tracing it" \
         % (names[2], area, ref, 100 * (area / ref - 1))
-    print("PASS  ortho panels %s: Top %d silhouettes (%.1f%% of the lattice "
-          "area), Front %d layer bands  ->  %s"
-          % ("/".join(names), n_top, 100 * area / ref, len(bands), path))
+    print("PASS  ortho panels %s: Top %d silhouettes (%.1f%% of the mesh "
+          "area), Front/Side %d/%d layer bands, 2 part pixels %s and 2 clear "
+          "%s, 0 sheet/part crossings  ->  %s"
+          % ("/".join(names), n_top, 100 * area / ref, len(bands),
+             len(sbands), hits, misses, path))
 
 
 def _selfcheck(outdir) -> int:

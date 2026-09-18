@@ -2843,3 +2843,29 @@ was right against a PM ruling, nothing reopens. Open rows C9, C11–C13 need a h
 T7 and physical samples. Details in the local `scores.md`; the verdict's §5.1 holds the
 table. Next: T1b (brick bond), T3b (load-path hardening), T7.
 
+## 2026-09-17 (later still) — F15b: the report drawing was a raster lie; redrawn from the mesh
+
+Rahul, on production minutes after the T3/T4/T5 push (floor side cover, 60 in PLS12103): "absolute
+garbage … a project killer". Diagnosis, measured locally: `ortho_png` drew parts AND sheets on
+`_place`'s 12 mm lattice; the 79 mm layer step is 6.58 cells and the 76 mm part 7 cells, so layers
+stepped 6-7-6, adjacent layers interpenetrated and the 3 mm sheet was drawn through the parts
+(7920 coincident cells; 6560 at 6 mm, 2345 at 4 mm — no cell size that does not divide the step
+is honest). The parts were 12 mm blobs with raster holes. The engine (4 mm) and every number were
+right; the drawing was a second, coarser model of the layout — hard rule 9 broken in the drawing.
+PM's fault: F15 reused the GIF raster for a report drawing and was never checked on a
+layer-sheet layout. Fix (geometry agent, reviewed, five findings fixed): one silhouette per view
+traced at 1 mm from the posed mesh's projected triangles (offscreen Agg, 0.2–0.5 s/view, memoised
+per pose in the worker like `voxels_for`), stamped at `_place`'s own `parts_at_step` mm origins;
+dunnage rectangles at exact mm from `row.geo()`, sheets ≤ 6 mm as one solid band; the DRAW-ONLY
+36 mm pocket inset is un-inset for the ortho through the same helper the F17 sheet uses (wheel
+pocket now 377×361 around a 371×354 wheel, was 341×325 — the wheel burst its pocket); a failed
+ortho now lands in `render_errors`; `_check_ortho_panels` probes pixels of the decoded PNG against
+`_ortho_geometry`'s mm and asserts the old snapped placement fails. Verified by PM: SX4 sheets at
+z = k·79 exactly, 0 sheet/part crossings; bar 1.4 s, wheel 2.2 s, < 0.45 GB; module self-check,
+ground truth 40/48, test_proposal/solve_api/dunnage/engine/projects_api all exit 0. Popup caption
+is the clicked view's label, not "Insert view". Follow-ups: F15c (raster seat vs mesh seat differ
+by up to 6 mm in z between explode/GIF and ortho; `nesting._voxelise` origin docstring wrong);
+`explode_png` and the F17 section fill still raster. Rule saved to memory: anything a customer or
+supplier sees is drawn from the mesh at exact mm, and every new picture is checked on a
+non-integer layer step before it ships. Not committed; Rahul commits.
+

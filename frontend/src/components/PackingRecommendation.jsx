@@ -862,6 +862,11 @@ function ExplodeModal({ views, initial, onClose }) {
   const closeRef = useRef(null)
   const [view, setView] = useState(initial)
   const [zoom, setZoom] = useState('fit') // 'fit' | 'actual' — plain state, no pan-zoom lib
+  // The popup is shared by every drawing; its title is the clicked view's own
+  // label ("Front / Side / Top", the BOM element name), never a fixed
+  // "Insert view" -- that caption made the report views read as the insert
+  // manufacturing drawing.
+  const title = views.find((v) => v.key === view)?.label ?? 'Drawing'
 
   useEffect(() => {
     closeRef.current?.focus()
@@ -873,9 +878,9 @@ function ExplodeModal({ views, initial, onClose }) {
   return (
     <div className="modal-backdrop"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
-      <div className="modal-card" role="dialog" aria-modal="true" aria-label="Insert view">
+      <div className="modal-card" role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-head">
-          <span>Insert view</span>
+          <span>{title}</span>
           <div className="modal-head-actions">
             <button className="btn-ghost" onClick={() => setZoom((z) => (z === 'fit' ? 'actual' : 'fit'))}>
               {zoom === 'fit' ? '1:1' : 'Fit'}

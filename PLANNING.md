@@ -544,6 +544,32 @@ in the proposal PDF with three orthographic views from the placed
 silhouettes (`silhouette_runs` already carries the plan view; the side views
 are the pitch lattice × part extent). F9 closes into this.
 
+**F15b — Report drawing from the mesh at exact mm, never from the 12 mm raster (2026-09-17).**
+F15 drew the three views off `_place`'s 12 mm lattice. On the SX4 floor side cover (60 in
+PLS12103, layer step 79 mm = 6.58 cells, part 76 mm = 7 cells) layers interpenetrated and the 3 mm
+sheet was drawn through the parts (7920 coincident cells; still 2345 at 4 mm — no cell size that
+does not divide the step is honest), and the parts were blobs. Rahul, in production: "absolute
+garbage … a project killer". Fix: one silhouette per view traced at 1 mm from the posed mesh's
+projected triangles (offscreen render, 0.2–0.5 s/view), stamped at `_place`'s own `parts_at_step`
+mm origins; dunnage rectangles at exact mm from `row.geo()`, sheets ≤ 6 mm drawn as one solid
+band. `ortho_png` takes `mesh` + `rotation` from the worker. Acceptance held: SX4 sheet z = k·79
+exactly, 0 sheet/part crossings (self-check also proves the old snapped placement fails), bar and
+wheel render in < 2.2 s under 0.45 GB, ground truth 40/48. Known and not a drawing bug: the TRW
+hub (137.7 mm) stands proud of its 116 mm layer step and the bar nests 80 mm into its layer bars,
+so their sheets legitimately cross the silhouette — `_pocket_tray_rows` says so. Still on the
+12 mm raster: `explode_png` and the F17 SECTION A-A fill; neither reads as a defect at its scale,
+re-open if it does. The popup caption is the clicked view's own label, not "Insert view".
+
+**F15c — One seat per layout (drawing, after F15b).** Review of F15b measured that `pose_voxels`'
+raster seats the part up to 6 mm higher in z (wheel: mesh min minus voxel lower corner =
+(0.5, 9.1, 6.0) mm) than the mesh reseat the ortho now uses, because trimesh's voxel origin is a
+cell CENTRE snapped to a pitch multiple, not the lower corner. The ortho is right to ~1 mm; the
+explode PNG and the GIF/animation seat the same part 6 mm off it — one layout, two seats. Also
+`nesting._voxelise`'s docstring says the returned origin is the lower corner; it is the centre,
+and any mm box `Raster` derives from it is half a voxel off. Acceptance: explode/ortho/animation
+put the bottom of layer 0 at the same z on the wheel and the bar (± 1 mm); the docstring tells the
+truth or the origin is corrected, with a test on a known box.
+
 **F17 — DONE 2026-09-16 (f2a5660 backend, 179d23a ui). The insert manufacturing drawing is the deliverable, and we did not
 have one.** Landed as `insert_sheets_png`: one dimensioned sheet per BOM element (plan, section, title block), on the Insert BOM rows and in the PDF. Open domain question for Rahul: interleaved poses (SX4 cover, 8 of 25 swept parts) ship separator sheets only — whether they need a slotted comb is E1. Rahul, 2026-09-15, on the Insert tab: "What is the use of this
 whole process if I am not able to tell the person what insert to get

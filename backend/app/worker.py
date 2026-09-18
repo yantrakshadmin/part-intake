@@ -24,8 +24,8 @@ from .catalogue import containers, containers_named, excluded_drafts
 from .config import settings
 from .geometry import OrientationCandidate, extract_part, load_unified_mesh
 from .insert_drawing import (_as_4x4, build_gif, explode_png,
-                            insert_sheets_png, ortho_png,
-                             pose_voxels)
+                            insert_sheets_png, ortho_png, ortho_silhouettes,
+                            pose_voxels)
 from .nesting import IN_PLANE_TURN
 from .models import (ExtractionJob, PartProfile, Project, Proposal, SolveJob,
                     Vehicle)
@@ -136,6 +136,7 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
     rotation_by_label = {c.label: c.rotation_matrix for c in candidates}
     inner_by_name = {a.name: a.inner for a in assets}
     voxel_cache: dict = {}
+    sil_cache: dict = {}
 
     def rotation_for(pose_label: str, turned: bool):
         """The matrix the part is actually posed with. ONE expression for the
@@ -168,6 +169,27 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
                                  job_id, pose_label, turned)
                 voxel_cache[key] = None
         return voxel_cache[key]
+
+    def silhouettes_for(pose_label: str, turned: bool):
+        """F15b: the three traced ortho silhouettes for a pose, memoised the
+        same way and for the same reason as `voxels_for`.
+
+        One ortho is rendered per ranked asset, the trace is ~1.5s, and
+        nothing in it depends on the asset -- only on the pose. `None` falls
+        `ortho_png` back to its `cell_mm` raster rather than losing the
+        picture.
+        """
+        key = (pose_label, turned)
+        if key not in sil_cache:
+            rotation = rotation_for(pose_label, turned)
+            try:
+                sil_cache[key] = (ortho_silhouettes(mesh, rotation)
+                                  if rotation is not None else None)
+            except Exception:
+                logger.exception("ortho_silhouettes failed for %s pose %r "
+                                 "(turned=%s)", job_id, pose_label, turned)
+                sil_cache[key] = None
+        return sil_cache[key]
 
     def _write(data: bytes, file_name: str) -> str:
         path = Path(settings.local_storage_dir) / file_name
@@ -226,12 +248,18 @@ def _render_drawings(job_id: str, mesh, candidates, assets, result,
                 ortho_png(voxels=voxels, extent_lbh=extent_lbh,
                           pitch_lbh=pitch_lbh, grid=grid,
                           inner_lbh=inner_lbh, bom=bom,
-                          asset_name=asset_name, count=count),
+                          asset_name=asset_name, count=count,
+                          sil_paths=silhouettes_for(pose_label, turned)),
                 f"{ortho_stem}.png")
             render_counts["ortho"] += 1
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
             logger.exception("ortho drawing failed for %s (%s)",
                              job_id, ortho_stem)
+            # Same as the insert sheets below: without this the job finishes
+            # `render_status: done` with `render_error: null` and no ortho,
+            # which is the silent-gap failure this whole function guards
+            # against.
+            render_errors.append(f"ortho drawing failed: {exc}")
 
         # F17: the manufacturing sheets, one per BOM element -- the thing a
         # tray supplier quotes and cuts from. Guarded on its own for the same
